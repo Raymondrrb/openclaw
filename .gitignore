@@ -75,3 +75,13 @@ USER.md
 memory/
 .agent/*.json
 !.agent/workflows/
+
+# Python tools
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+artifacts/dzine/
+artifacts/downloads/
+artifacts/videos/

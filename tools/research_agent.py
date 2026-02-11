@@ -1,0 +1,800 @@
+#!/usr/bin/env python3
+"""Evidence-first research agent — actually browses review pages.
+
+Opens real review articles from trusted sources, reads the content,
+extracts product picks with evidence, aggregates across sources,
+and produces a structured research report + shortlist.
+
+This is NOT a search-snippet scraper. It opens pages and reads them.
+
+Usage (RUN mode — produces real artifacts):
+    python3 tools/research_agent.py --video-id xyz --niche "wireless earbuds"
+
+Stdlib only (+ Playwright for browser fallback).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+_repo = Path(__file__).resolve().parent.parent
+if str(_repo) not in sys.path:
+    sys.path.insert(0, str(_repo))
+
+from tools.lib.common import load_env_file, now_iso, project_root
+from tools.lib.page_reader import fetch_page_text
+from tools.lib.web_search import web_search
+
+# ---------------------------------------------------------------------------
+# Trusted sources (same as reviews_research.py)
+# ---------------------------------------------------------------------------
+
+TRUSTED_SOURCES = {
+    "Wirecutter": {"domain": "nytimes.com/wirecutter", "weight": 3.0},
+    "RTINGS": {"domain": "rtings.com", "weight": 2.5},
+    "PCMag": {"domain": "pcmag.com", "weight": 2.0},
+}
+
+# Hard restriction: only these 3 domains are allowed in research output.
+_ALLOWED_DOMAINS = {"nytimes.com", "rtings.com", "pcmag.com"}
+
+# Brand patterns for product name detection
+_BRANDS = (
+    r"Sony|Apple|Samsung|Bose|Jabra|Sennheiser|JBL|Anker|Soundcore|"
+    r"Google|Amazon|LG|Dyson|iRobot|Roomba|Ninja|KitchenAid|Breville|"
+    r"Logitech|Razer|SteelSeries|HyperX|Corsair|Dell|ASUS|Acer|BenQ|"
+    r"Philips|Braun|Oral-B|Fitbit|Garmin|Xiaomi|OnePlus|Nothing|"
+    r"Beats|Audio-Technica|Shure|Blue|Elgato|Rode|Samson|"
+    r"Instant Pot|Cuisinart|Hamilton Beach|Vitamix|Blendtec|"
+    r"Ecobee|Ring|Nest|Arlo|Wyze|TP-Link|Netgear|Eero|"
+    r"Herman Miller|Secretlab|Autonomous|FlexiSpot|"
+    r"Peak Design|Osprey|Away|Samsonite|"
+    r"Canon|Nikon|GoPro|DJI|Fujifilm|Insta360|"
+    r"Eufy|Roborock|Dreame|Tineco|Shark|"
+    r"CalDigit|Satechi|Belkin|"
+    r"MSI|ViewSonic|Gigabyte|AOC|"
+    r"Technics|Denon|Yamaha|Sonos|"
+    r"Yeti|HydroFlask|Stanley|"
+    r"1MORE|Skullcandy|Tozo|EarFun|Edifier|Moondrop|"
+    r"Marshall|Bang & Olufsen|B&O|KEF|Klipsch|"
+    r"Nespresso|De'Longhi|Fellow|Baratza|"
+    r"Theragun|Therabody|Hyperice|"
+    r"Cambridge Audio|Cricut|Brother|Silhouette"
+)
+
+_BRAND_RE = re.compile(rf"\b({_BRANDS})\b", re.IGNORECASE)
+
+# Category labels to look for
+_CATEGORY_LABELS = [
+    "best overall", "top pick", "our pick", "editor's choice", "editors' choice",
+    "best budget", "best cheap", "best affordable", "best under",
+    "best premium", "best splurge", "upgrade pick",
+    "best value", "best bang for the buck",
+    "best for travel", "best for calls", "best for gaming",
+    "best for running", "best for working out", "best for music",
+    "best noise cancelling", "best wireless", "best wired",
+    "best for small rooms", "best for large rooms",
+    "best for iphone", "best for android",
+    "runner-up", "also great",
+]
+
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProductEvidence:
+    """A product extracted from one review page with evidence."""
+    product_name: str
+    brand: str = ""
+    category_label: str = ""     # "best overall", "best budget", etc.
+    reasons: list[str] = field(default_factory=list)  # 2-4 key reasons
+    source_name: str = ""
+    source_url: str = ""
+    source_date: str = ""        # publication date if found
+    fetch_method: str = ""       # "http" or "browser"
+
+
+@dataclass
+class AggregatedProduct:
+    """A product with evidence from multiple sources."""
+    product_name: str
+    brand: str = ""
+    evidence: list[ProductEvidence] = field(default_factory=list)
+    source_count: int = 0
+    evidence_score: float = 0.0
+    primary_label: str = ""
+    all_labels: list[str] = field(default_factory=list)
+    all_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SourceReport:
+    """What we found from one review page."""
+    source_name: str
+    url: str
+    title: str = ""
+    date: str = ""
+    fetch_method: str = ""
+    products_found: list[ProductEvidence] = field(default_factory=list)
+    blocked: bool = False
+    error: str = ""
+
+
+@dataclass
+class ResearchReport:
+    """Full research output for one niche."""
+    niche: str
+    date: str = ""
+    sources_reviewed: list[SourceReport] = field(default_factory=list)
+    aggregated: list[AggregatedProduct] = field(default_factory=list)
+    shortlist: list[AggregatedProduct] = field(default_factory=list)
+    rejected: list[AggregatedProduct] = field(default_factory=list)
+    validation_errors: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Find the best review article per source
+# ---------------------------------------------------------------------------
+
+
+def _find_review_articles(niche: str) -> list[tuple[str, str, str]]:
+    """Search Google for review articles — exactly 3 sources, max 2 pages each.
+
+    Returns list of (source_name, url, search_title).
+    """
+    articles: list[tuple[str, str, str]] = []
+
+    for source_name, info in TRUSTED_SOURCES.items():
+        domain = info["domain"]
+        query = f"best {niche} site:{domain}"
+
+        print(f"  Searching {source_name}...", file=sys.stderr)
+        try:
+            results = web_search(query, count=2)
+        except Exception as exc:
+            print(f"    Search failed: {exc}", file=sys.stderr)
+            continue
+
+        if not results:
+            print(f"    No coverage", file=sys.stderr)
+            continue
+
+        # Take up to 2 results per source
+        added = 0
+        for r in results[:2]:
+            # Enforce domain restriction
+            if not any(d in r.url for d in _ALLOWED_DOMAINS):
+                print(f"    SKIPPED (domain violation): {r.url}", file=sys.stderr)
+                continue
+            articles.append((source_name, r.url, r.title))
+            print(f"    -> {r.title[:70]}", file=sys.stderr)
+            added += 1
+        if added == 0:
+            print(f"    No coverage", file=sys.stderr)
+
+    return articles
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Open pages and extract products
+# ---------------------------------------------------------------------------
+
+
+def _extract_date(text: str) -> str:
+    """Try to extract a publication date from page text."""
+    # Look for patterns like "Jan 16, 2026" or "January 16, 2026" or "2026-01-16"
+    patterns = [
+        r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\.?\s+\d{1,2},?\s+\d{4})",
+        r"((?:Updated|Published|Reviewed)(?:\s+on)?\s*:?\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\.?\s+\d{1,2},?\s+\d{4})",
+        r"(\d{4}-\d{2}-\d{2})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text[:2000], re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def _extract_products_from_page(
+    text: str, source_name: str, url: str
+) -> list[ProductEvidence]:
+    """Extract product recommendations from page text.
+
+    Looks for:
+    - Headings with category labels (Best Overall, Best Budget, etc.)
+    - Brand + Model patterns
+    - Surrounding context for reasons
+    """
+    products: list[ProductEvidence] = []
+    seen_names: set[str] = set()
+    date = _extract_date(text)
+    lines = text.splitlines()
+
+    # Strategy 1: Look for "Best X: Brand Model" or "Our pick: Brand Model" headings
+    for i, line in enumerate(lines):
+        line_lower = line.lower().strip()
+
+        # Check if this line has a category label
+        label = ""
+        for cat in _CATEGORY_LABELS:
+            if cat in line_lower:
+                label = cat
+                break
+
+        if not label:
+            continue
+
+        # Look for a product name in this line and the next few lines
+        search_block = "\n".join(lines[i:i+5])
+        brand_matches = list(_BRAND_RE.finditer(search_block))
+
+        for bm in brand_matches:
+            brand = bm.group(1)
+            after = search_block[bm.end():]
+            # Capture model: alphanumeric with hyphens, up to ~40 chars
+            model_match = re.match(
+                r"\s+([\w][\w\s\-\.\/\(\)]+?)"
+                r"(?:\s*[\,\;\|\·]|\s+[\-\—]\s+|\.\s+[A-Z]"
+                r"|\s+(?:is|are|has|was|with|for|and|the|our|we|vs|offers?|from|this|comes|delivers|features)\b|$)",
+                after,
+            )
+            if model_match:
+                model = model_match.group(1).strip().rstrip(".")
+                if len(model) <= 1:
+                    continue
+                full_name = f"{brand} {model}".strip()
+                full_name = re.sub(r"\s+", " ", full_name)
+                name_key = full_name.lower()
+
+                if name_key in seen_names or len(full_name) > 80:
+                    continue
+                seen_names.add(name_key)
+
+                # Extract reasons from surrounding lines
+                reasons = _extract_reasons(lines, i, brand)
+
+                products.append(ProductEvidence(
+                    product_name=full_name,
+                    brand=brand,
+                    category_label=label,
+                    reasons=reasons,
+                    source_name=source_name,
+                    source_url=url,
+                    source_date=date,
+                ))
+                break  # one product per label line
+
+    # Strategy 2: Scan remaining text for Brand+Model not yet captured
+    # (catches products mentioned without category labels)
+    for i, line in enumerate(lines):
+        for bm in _BRAND_RE.finditer(line):
+            brand = bm.group(1)
+            after = line[bm.end():]
+            model_match = re.match(
+                r"\s+([\w][\w\s\-\.\/\(\)]+?)"
+                r"(?:\s*[\,\;\|\·]|\s+[\-\—]\s+|\.\s+[A-Z]"
+                r"|\s+(?:is|are|has|was|with|for|and|the|our|we|vs|offers?|from|this|comes|delivers|features)\b|$)",
+                after,
+            )
+            if model_match:
+                model = model_match.group(1).strip().rstrip(".")
+                if len(model) <= 1:
+                    continue
+                first_word = model.split()[0].lower() if model.split() else ""
+                if first_word in ("is", "are", "has", "was", "the", "a", "and", "or", "for", "with"):
+                    continue
+                full_name = f"{brand} {model}".strip()
+                full_name = re.sub(r"\s+", " ", full_name)
+                name_key = full_name.lower()
+
+                if name_key in seen_names or len(full_name) > 80:
+                    continue
+                seen_names.add(name_key)
+
+                # Try to find a nearby label
+                label = ""
+                nearby = "\n".join(lines[max(0, i-3):i+3]).lower()
+                for cat in _CATEGORY_LABELS:
+                    if cat in nearby:
+                        label = cat
+                        break
+
+                reasons = _extract_reasons(lines, i, brand)
+
+                products.append(ProductEvidence(
+                    product_name=full_name,
+                    brand=brand,
+                    category_label=label,
+                    reasons=reasons,
+                    source_name=source_name,
+                    source_url=url,
+                    source_date=date,
+                ))
+
+    return products
+
+
+def _extract_reasons(lines: list[str], product_line: int, brand: str) -> list[str]:
+    """Extract 2-4 key reasons from lines near a product mention."""
+    reasons: list[str] = []
+    # Look at the next 10 lines for reason-like sentences
+    block = lines[product_line:product_line + 12]
+    brand_lower = brand.lower()
+
+    for line in block:
+        line = line.strip()
+        if not line or len(line) < 20 or len(line) > 200:
+            continue
+        # Skip lines that are just headings or very short
+        lower = line.lower()
+        # Look for sentences with quality indicators
+        if any(kw in lower for kw in [
+            "sound", "noise cancel", "battery", "comfort", "fit",
+            "bass", "treble", "build quality", "water", "sweat",
+            "price", "affordable", "premium", "value",
+            "best", "great", "excellent", "impressive", "stellar",
+            "durable", "lightweight", "compact", "portable",
+            "microphone", "call quality", "latency", "codec",
+            "anc", "transparency", "spatial audio",
+            # General product qualities
+            "performance", "design", "feature", "quality", "reliable",
+            "powerful", "efficient", "fast", "quiet", "bright",
+            "sharp", "crisp", "smooth", "sturdy", "elegant",
+        ]):
+            # Clean up the reason
+            reason = line.strip()
+            if len(reason) > 150:
+                reason = reason[:147] + "..."
+            if reason not in reasons:
+                reasons.append(reason)
+            if len(reasons) >= 4:
+                break
+
+    return reasons[:4]
+
+
+def _open_and_extract(
+    source_name: str, url: str, title: str
+) -> SourceReport:
+    """Open a review page and extract products. The core browsing step."""
+    report = SourceReport(source_name=source_name, url=url, title=title)
+
+    print(f"\n  Opening {source_name}: {url[:80]}...", file=sys.stderr)
+
+    text, method = fetch_page_text(url)
+    report.fetch_method = method
+
+    if not text:
+        report.blocked = True
+        report.error = f"Could not fetch page (tried HTTP + browser)"
+        print(f"    BLOCKED: {report.error}", file=sys.stderr)
+        return report
+
+    print(f"    Fetched via {method} ({len(text)} chars)", file=sys.stderr)
+
+    # Extract date
+    report.date = _extract_date(text)
+    if report.date:
+        print(f"    Date: {report.date}", file=sys.stderr)
+
+    # Extract products
+    products = _extract_products_from_page(text, source_name, url)
+    report.products_found = products
+
+    print(f"    Products found: {len(products)}", file=sys.stderr)
+    for p in products:
+        label = f" [{p.category_label}]" if p.category_label else ""
+        reasons_str = f" ({len(p.reasons)} reasons)" if p.reasons else ""
+        print(f"      - {p.product_name}{label}{reasons_str}", file=sys.stderr)
+
+    # Small delay between pages to be respectful
+    time.sleep(1.0)
+
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Aggregate across sources
+# ---------------------------------------------------------------------------
+
+
+def _normalize_name(name: str) -> str:
+    """Normalize for deduplication."""
+    return re.sub(r"[^\w\s\-]", "", name.lower()).strip()
+
+
+def _aggregate(reports: list[SourceReport]) -> list[AggregatedProduct]:
+    """Merge product evidence across all sources."""
+    product_map: dict[str, AggregatedProduct] = {}
+
+    for report in reports:
+        for evidence in report.products_found:
+            key = _normalize_name(evidence.product_name)
+            if key not in product_map:
+                product_map[key] = AggregatedProduct(
+                    product_name=evidence.product_name,
+                    brand=evidence.brand,
+                )
+
+            agg = product_map[key]
+            # Don't add duplicate source evidence
+            existing_sources = {e.source_name for e in agg.evidence}
+            if evidence.source_name not in existing_sources:
+                agg.evidence.append(evidence)
+                agg.source_count = len(agg.evidence)
+
+            if evidence.category_label and evidence.category_label not in agg.all_labels:
+                agg.all_labels.append(evidence.category_label)
+                if not agg.primary_label:
+                    agg.primary_label = evidence.category_label
+
+            for r in evidence.reasons:
+                if r not in agg.all_reasons:
+                    agg.all_reasons.append(r)
+
+    # Score products
+    for agg in product_map.values():
+        for ev in agg.evidence:
+            source_info = TRUSTED_SOURCES.get(ev.source_name, {})
+            agg.evidence_score += source_info.get("weight", 1.0)
+        # Bonus for having a category label
+        if agg.primary_label:
+            agg.evidence_score += 0.5
+
+    # Sort by evidence score
+    return sorted(product_map.values(), key=lambda a: -a.evidence_score)
+
+
+# ---------------------------------------------------------------------------
+# Step 4: Build shortlist + validate DONE
+# ---------------------------------------------------------------------------
+
+
+def _build_shortlist(
+    aggregated: list[AggregatedProduct],
+) -> tuple[list[AggregatedProduct], list[AggregatedProduct]]:
+    """Build shortlist (8-15 products) and rejected list."""
+    shortlist: list[AggregatedProduct] = []
+    rejected: list[AggregatedProduct] = []
+
+    for agg in aggregated:
+        if agg.source_count >= 2:
+            shortlist.append(agg)
+        elif agg.source_count == 1 and agg.primary_label in ("best overall", "top pick", "our pick"):
+            shortlist.append(agg)
+        elif agg.source_count == 1 and agg.evidence_score >= 2.0:
+            shortlist.append(agg)
+        else:
+            rejected.append(agg)
+
+    # If shortlist too small, relax criteria
+    if len(shortlist) < 8:
+        for agg in rejected[:]:
+            if len(shortlist) >= 15:
+                break
+            shortlist.append(agg)
+            rejected.remove(agg)
+
+    # Cap at 15
+    if len(shortlist) > 15:
+        overflow = shortlist[15:]
+        shortlist = shortlist[:15]
+        rejected = overflow + rejected
+
+    return shortlist, rejected
+
+
+def _validate_done(report: ResearchReport) -> list[str]:
+    """Validate the DONE criteria for research stage."""
+    errors = []
+
+    # Exactly 3 sources attempted (Wirecutter, RTINGS, PCMag)
+    sources_ok = [s for s in report.sources_reviewed if not s.blocked and s.products_found]
+    if len(sources_ok) < 2:
+        errors.append(f"Only {len(sources_ok)} sources produced results (minimum 2)")
+
+    # Domain violation check: no foreign domains in output
+    for s in report.sources_reviewed:
+        if not any(d in s.url for d in _ALLOWED_DOMAINS):
+            errors.append(f"Source violation – research restricted to 3 domains. Found: {s.url}")
+
+    # At least 8 unique products mentioned
+    all_products = set()
+    for s in report.sources_reviewed:
+        for p in s.products_found:
+            all_products.add(_normalize_name(p.product_name))
+    if len(all_products) < 8:
+        errors.append(f"Only {len(all_products)} unique products found (minimum 8)")
+
+    # Shortlist has 8-15 items
+    if len(report.shortlist) < 8:
+        errors.append(f"Shortlist has {len(report.shortlist)} items (minimum 8)")
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# Step 5: Write outputs
+# ---------------------------------------------------------------------------
+
+
+def _write_research_report(report: ResearchReport, output_path: Path) -> None:
+    """Write human-readable research_report.md."""
+    lines = [
+        f"# Research Report: {report.niche}",
+        f"",
+        f"**Date:** {report.date}",
+        f"**Sources reviewed:** {len(report.sources_reviewed)}",
+        f"**Sources with results:** {len([s for s in report.sources_reviewed if s.products_found])}",
+        f"**Unique products found:** {len(report.aggregated)}",
+        f"**Shortlisted:** {len(report.shortlist)}",
+        "",
+    ]
+
+    # Validation
+    if report.validation_errors:
+        lines.append("## Validation Issues")
+        lines.append("")
+        for err in report.validation_errors:
+            lines.append(f"- {err}")
+        lines.append("")
+
+    # Sources reviewed
+    lines.append("## Sources Reviewed")
+    lines.append("")
+    for src in report.sources_reviewed:
+        status = "BLOCKED" if src.blocked else f"{len(src.products_found)} products"
+        method = f" (via {src.fetch_method})" if src.fetch_method else ""
+        date = f" | {src.date}" if src.date else ""
+        lines.append(f"### {src.source_name}{date}")
+        lines.append(f"- **URL:** [{src.title or src.url}]({src.url})")
+        lines.append(f"- **Status:** {status}{method}")
+        if src.error:
+            lines.append(f"- **Error:** {src.error}")
+        for p in src.products_found:
+            label = f" [{p.category_label}]" if p.category_label else ""
+            lines.append(f"  - {p.product_name}{label}")
+            for r in p.reasons[:2]:
+                lines.append(f"    - {r}")
+        lines.append("")
+
+    # Products repeated across sources
+    multi_source = [a for a in report.aggregated if a.source_count >= 2]
+    if multi_source:
+        lines.append("## Products Repeated Across Sources")
+        lines.append("")
+        for agg in multi_source:
+            sources = ", ".join(e.source_name for e in agg.evidence)
+            label = f" [{agg.primary_label}]" if agg.primary_label else ""
+            lines.append(f"- **{agg.product_name}** ({agg.source_count} sources: {sources}){label}")
+            lines.append(f"  Evidence score: {agg.evidence_score:.1f}")
+        lines.append("")
+
+    # Shortlist
+    lines.append("## Shortlist (8-15)")
+    lines.append("")
+    for i, agg in enumerate(report.shortlist, 1):
+        sources = ", ".join(e.source_name for e in agg.evidence)
+        label = f" [{agg.primary_label}]" if agg.primary_label else ""
+        lines.append(f"### {i}. {agg.product_name}{label}")
+        lines.append(f"- **Brand:** {agg.brand}")
+        lines.append(f"- **Sources ({agg.source_count}):** {sources}")
+        lines.append(f"- **Evidence score:** {agg.evidence_score:.1f}")
+        if agg.all_labels:
+            lines.append(f"- **Labels:** {', '.join(agg.all_labels)}")
+        if agg.all_reasons:
+            lines.append(f"- **Key reasons:**")
+            for r in agg.all_reasons[:4]:
+                lines.append(f"  - {r}")
+        for ev in agg.evidence:
+            lines.append(f"- [{ev.source_name}]({ev.source_url})")
+        lines.append("")
+
+    # Rejected
+    if report.rejected:
+        lines.append("## Rejected Candidates and Why")
+        lines.append("")
+        for agg in report.rejected[:15]:
+            sources = ", ".join(e.source_name for e in agg.evidence)
+            reason = "single source, low weight" if agg.source_count == 1 else "low evidence score"
+            if not agg.primary_label:
+                reason += ", no category label"
+            lines.append(f"- **{agg.product_name}** ({sources}) — {reason} (score: {agg.evidence_score:.1f})")
+        if len(report.rejected) > 15:
+            lines.append(f"- ... and {len(report.rejected) - 15} more")
+        lines.append("")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_shortlist_json(report: ResearchReport, output_path: Path) -> None:
+    """Write structured shortlist.json."""
+    data = {
+        "niche": report.niche,
+        "researched_at": now_iso(),
+        "date": report.date,
+        "sources_reviewed": len(report.sources_reviewed),
+        "sources_with_results": len([s for s in report.sources_reviewed if s.products_found]),
+        "total_candidates": len(report.aggregated),
+        "validation_errors": report.validation_errors,
+        "shortlist": [
+            {
+                "product_name": agg.product_name,
+                "brand": agg.brand,
+                "evidence_count": agg.source_count,
+                "evidence_score": round(agg.evidence_score, 1),
+                "primary_label": agg.primary_label,
+                "all_labels": agg.all_labels,
+                "sources": [
+                    {
+                        "name": ev.source_name,
+                        "url": ev.source_url,
+                        "label": ev.category_label,
+                        "date": ev.source_date,
+                    }
+                    for ev in agg.evidence
+                ],
+                "reasons": agg.all_reasons[:4],
+            }
+            for agg in report.shortlist
+        ],
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Main agent function
+# ---------------------------------------------------------------------------
+
+
+def run_reviews_research(
+    video_id: str,
+    niche: str,
+    *,
+    output_dir: Path | None = None,
+    force: bool = False,
+    dry_run: bool = False,
+) -> ResearchReport:
+    """Execute the full evidence-first research pipeline.
+
+    This is the AGENT — it does the work, not just scaffolding.
+
+    Steps:
+    1. Search Google for review articles from trusted sources
+    2. Open each page, read content, extract products with evidence
+    3. Aggregate across sources
+    4. Validate DONE criteria
+    5. Write outputs + notify
+
+    Returns the ResearchReport (also writes to disk).
+    """
+    from tools.lib.video_paths import VideoPaths, VIDEOS_BASE
+
+    paths = VideoPaths(video_id) if not output_dir else None
+    base = output_dir or (VIDEOS_BASE / video_id / "inputs")
+
+    report = ResearchReport(niche=niche, date=now_iso()[:10])
+
+    # --- Step 1: Find review articles ---
+    print(f"\n[research] Step 1: Finding review articles for '{niche}'...", file=sys.stderr)
+    articles = _find_review_articles(niche)
+
+    if dry_run:
+        print(f"\n[DRY RUN] Would open {len(articles)} review pages:", file=sys.stderr)
+        for source, url, title in articles:
+            print(f"  {source}: {title[:60]} ({url[:60]})", file=sys.stderr)
+        print(f"\n[DRY RUN] Then aggregate, validate, and write outputs.", file=sys.stderr)
+        return report
+
+    if not articles:
+        print("[research] No review articles found!", file=sys.stderr)
+        return report
+
+    # Check: at least 2 of 3 sources must have results
+    sources_found = {a[0] for a in articles}
+    if len(sources_found) < 2:
+        print(f"[research] ABORT: Only {len(sources_found)} source(s) have coverage. Minimum 2.", file=sys.stderr)
+        report.validation_errors.append(f"Only {len(sources_found)}/3 sources have coverage (minimum 2)")
+        return report
+
+    # --- Step 2: Open each page and extract products ---
+    print(f"\n[research] Step 2: Opening {len(articles)} review pages...", file=sys.stderr)
+    for source_name, url, title in articles:
+        # Enforce domain restriction
+        if not any(d in url for d in _ALLOWED_DOMAINS):
+            err = f"Source violation – research restricted to 3 domains. Blocked: {url}"
+            print(f"  ABORT: {err}", file=sys.stderr)
+            report.validation_errors.append(err)
+            return report
+        source_report = _open_and_extract(source_name, url, title)
+        report.sources_reviewed.append(source_report)
+
+    # --- Step 3: Aggregate ---
+    print(f"\n[research] Step 3: Aggregating evidence...", file=sys.stderr)
+    report.aggregated = _aggregate(report.sources_reviewed)
+    report.shortlist, report.rejected = _build_shortlist(report.aggregated)
+
+    multi = [a for a in report.aggregated if a.source_count >= 2]
+    print(f"  Total unique products: {len(report.aggregated)}", file=sys.stderr)
+    print(f"  Multi-source products: {len(multi)}", file=sys.stderr)
+    print(f"  Shortlisted: {len(report.shortlist)}", file=sys.stderr)
+
+    # --- Step 4: Validate DONE ---
+    report.validation_errors = _validate_done(report)
+    if report.validation_errors:
+        print(f"\n[research] VALIDATION ISSUES:", file=sys.stderr)
+        for err in report.validation_errors:
+            print(f"  - {err}", file=sys.stderr)
+
+    # --- Step 5: Write outputs ---
+    report_path = base / "research_report.md"
+    shortlist_path = base / "shortlist.json"
+
+    _write_research_report(report, report_path)
+    _write_shortlist_json(report, shortlist_path)
+
+    print(f"\n[research] Wrote {report_path}", file=sys.stderr)
+    print(f"[research] Wrote {shortlist_path}", file=sys.stderr)
+
+    return report
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description="Evidence-first research agent")
+    parser.add_argument("--video-id", required=True, help="Video ID")
+    parser.add_argument("--niche", required=True, help="Product niche")
+    parser.add_argument("--output-dir", default="", help="Output directory (overrides video path)")
+    parser.add_argument("--dry-run", action="store_true", help="Show what would be done")
+    parser.add_argument("--force", action="store_true", help="Force re-run")
+    args = parser.parse_args()
+
+    load_env_file()
+
+    output_dir = Path(args.output_dir) if args.output_dir else None
+    report = run_reviews_research(
+        args.video_id, args.niche,
+        output_dir=output_dir,
+        dry_run=args.dry_run,
+        force=args.force,
+    )
+
+    # Print summary
+    print(f"\nResearch Summary: {args.niche}")
+    print(f"  Sources reviewed: {len(report.sources_reviewed)}")
+    print(f"  Products found: {len(report.aggregated)}")
+    print(f"  Shortlisted: {len(report.shortlist)}")
+
+    if report.shortlist:
+        print(f"\n  Shortlist:")
+        for i, agg in enumerate(report.shortlist, 1):
+            sources = ", ".join(e.source_name for e in agg.evidence)
+            label = f" [{agg.primary_label}]" if agg.primary_label else ""
+            print(f"    {i:2d}. {agg.product_name:<50s}{label} ({sources})")
+
+    if report.validation_errors:
+        print(f"\n  VALIDATION ISSUES:")
+        for err in report.validation_errors:
+            print(f"    - {err}")
+        return 2
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

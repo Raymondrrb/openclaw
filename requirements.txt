@@ -1,0 +1,2 @@
+# Python dependencies for tools/
+playwright>=1.40

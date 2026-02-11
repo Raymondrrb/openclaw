@@ -1,0 +1,174 @@
+"""Fetch and extract text content from web pages.
+
+Cheapest method first:
+1. HTTP fetch via urllib (works for most review sites)
+2. Playwright browser fallback (for dynamic/JS-required pages)
+
+Returns clean text suitable for product extraction.
+Stdlib only (+ optional Playwright).
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# HTML → text
+# ---------------------------------------------------------------------------
+
+_SKIP_TAGS = frozenset({
+    "script", "style", "noscript", "svg", "path", "meta", "link",
+    "nav", "footer", "header", "aside", "iframe", "form", "button",
+    "input", "select", "textarea", "img",
+})
+
+_BLOCK_TAGS = frozenset({
+    "p", "div", "h1", "h2", "h3", "h4", "h5", "h6",
+    "li", "tr", "td", "th", "br", "hr", "blockquote",
+    "section", "article", "main", "figure", "figcaption",
+    "dt", "dd", "pre", "address",
+})
+
+
+class _TextExtractor(HTMLParser):
+    """Strip HTML tags and return readable text."""
+
+    def __init__(self):
+        super().__init__()
+        self._parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs):
+        tag_lower = tag.lower()
+        if tag_lower in _SKIP_TAGS:
+            self._skip_depth += 1
+        elif tag_lower in _BLOCK_TAGS and self._skip_depth == 0:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str):
+        tag_lower = tag.lower()
+        if tag_lower in _SKIP_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        elif tag_lower in _BLOCK_TAGS and self._skip_depth == 0:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str):
+        if self._skip_depth == 0:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        raw = "".join(self._parts)
+        # Collapse whitespace within lines, keep line breaks
+        lines = []
+        for line in raw.splitlines():
+            line = re.sub(r"[ \t]+", " ", line).strip()
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+
+
+def html_to_text(html: str) -> str:
+    """Convert HTML to readable text, skipping scripts/nav/etc."""
+    parser = _TextExtractor()
+    try:
+        parser.feed(html)
+    except Exception:
+        pass
+    return parser.get_text()
+
+
+# ---------------------------------------------------------------------------
+# HTTP fetch
+# ---------------------------------------------------------------------------
+
+_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def _http_fetch(url: str, *, timeout: int = 15) -> str | None:
+    """Fetch page HTML via urllib. Returns None on failure."""
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": _USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ct = resp.headers.get("Content-Type", "")
+            if "text/html" not in ct and "xhtml" not in ct:
+                return None
+            data = resp.read()
+            # Detect encoding
+            charset = "utf-8"
+            if "charset=" in ct:
+                charset = ct.split("charset=")[-1].split(";")[0].strip()
+            return data.decode(charset, errors="replace")
+    except Exception as exc:
+        print(f"  [page_reader] HTTP fetch failed for {url}: {exc}", file=sys.stderr)
+        return None
+
+
+def _browser_fetch(url: str) -> str | None:
+    """Fetch page HTML via Playwright/Brave CDP. Returns None on failure."""
+    try:
+        from tools.lib.brave_profile import connect_or_launch
+    except ImportError:
+        return None
+
+    try:
+        browser, context, should_close, pw = connect_or_launch(headless=False)
+        page = context.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(2000)
+            html = page.content()
+            return html
+        except Exception as exc:
+            print(f"  [page_reader] Browser fetch failed for {url}: {exc}", file=sys.stderr)
+            return None
+        finally:
+            page.close()
+            if should_close:
+                context.close()
+            pw.stop()
+    except Exception as exc:
+        print(f"  [page_reader] Browser init failed: {exc}", file=sys.stderr)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def fetch_page_text(url: str) -> tuple[str, str]:
+    """Fetch a page and return (text_content, method_used).
+
+    Tries HTTP first (cheap), falls back to browser (expensive).
+    Returns ("", "failed") if both fail.
+    """
+    # Try HTTP first
+    html = _http_fetch(url)
+    if html and len(html) > 500:
+        text = html_to_text(html)
+        if len(text) > 200:
+            return text, "http"
+
+    # Fall back to browser
+    html = _browser_fetch(url)
+    if html and len(html) > 500:
+        text = html_to_text(html)
+        if len(text) > 200:
+            return text, "browser"
+
+    return "", "failed"
