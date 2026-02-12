@@ -258,5 +258,72 @@ class TestWhyInShortlist(unittest.TestCase):
         self.assertIn("best overall", reason)
 
 
+class TestDownsideExtraction(unittest.TestCase):
+    """_extract_downside() should find negative/con sentences."""
+
+    def test_extract_downside_found(self):
+        from tools.research_agent import _extract_downside
+        lines = [
+            "The Sony WF-1000XM5 is our top pick.",
+            "Great sound quality and ANC performance.",
+            "However, the case is larger than competitors.",
+            "Battery life is solid at 8 hours.",
+        ]
+        result = _extract_downside(lines, 0, "Sony")
+        self.assertIn("However", result)
+
+    def test_extract_downside_none(self):
+        from tools.research_agent import _extract_downside
+        lines = [
+            "The Sony WF-1000XM5 is our top pick.",
+            "Great sound quality and ANC performance.",
+            "Battery life is solid at 8 hours.",
+        ]
+        result = _extract_downside(lines, 0, "Sony")
+        self.assertEqual(result, "")
+
+    def test_extract_downside_expensive(self):
+        from tools.research_agent import _extract_downside
+        lines = [
+            "The product is our pick.",
+            "The sound is amazing.",
+            "It is quite expensive compared to others.",
+        ]
+        result = _extract_downside(lines, 0, "Sony")
+        self.assertIn("expensive", result)
+
+
+class TestShortlistJsonDownside(unittest.TestCase):
+    """Serialized shortlist.json must include downside field."""
+
+    def test_shortlist_json_has_downside_field(self):
+        import json
+        import tempfile
+        from tools.research_agent import (
+            ResearchReport, AggregatedProduct, ProductEvidence,
+            _write_shortlist_json,
+        )
+        agg = AggregatedProduct(
+            product_name="Test Earbuds",
+            brand="Test",
+            evidence=[ProductEvidence(
+                product_name="Test Earbuds", brand="Test",
+                source_name="Wirecutter",
+                source_url="https://nytimes.com/wirecutter/test",
+                downside="Case is bulky",
+            )],
+            source_count=1, evidence_score=3.0,
+            all_downsides=["Case is bulky"],
+            all_reasons=["Great sound"],
+        )
+        report = ResearchReport(niche="earbuds", shortlist=[agg])
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "shortlist.json"
+            _write_shortlist_json(report, out)
+            data = json.loads(out.read_text())
+            self.assertIn("downside", data["shortlist"][0])
+            self.assertEqual(data["shortlist"][0]["downside"], "Case is bulky")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -96,6 +96,7 @@ class ProductEvidence:
     brand: str = ""
     category_label: str = ""     # "best overall", "best budget", etc.
     reasons: list[str] = field(default_factory=list)  # 2-4 key reasons
+    downside: str = ""           # primary downside/con extracted from review
     source_name: str = ""
     source_url: str = ""
     source_date: str = ""        # publication date if found
@@ -113,6 +114,7 @@ class AggregatedProduct:
     primary_label: str = ""
     all_labels: list[str] = field(default_factory=list)
     all_reasons: list[str] = field(default_factory=list)
+    all_downsides: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -309,14 +311,16 @@ def _extract_products_from_page(
                     continue
                 seen_names.add(name_key)
 
-                # Extract reasons from surrounding lines
+                # Extract reasons and downside from surrounding lines
                 reasons = _extract_reasons(lines, i, brand)
+                downside = _extract_downside(lines, i, brand)
 
                 products.append(ProductEvidence(
                     product_name=full_name,
                     brand=brand,
                     category_label=label,
                     reasons=reasons,
+                    downside=downside,
                     source_name=source_name,
                     source_url=url,
                     source_date=date,
@@ -359,12 +363,14 @@ def _extract_products_from_page(
                         break
 
                 reasons = _extract_reasons(lines, i, brand)
+                downside = _extract_downside(lines, i, brand)
 
                 products.append(ProductEvidence(
                     product_name=full_name,
                     brand=brand,
                     category_label=label,
                     reasons=reasons,
+                    downside=downside,
                     source_name=source_name,
                     source_url=url,
                     source_date=date,
@@ -410,6 +416,27 @@ def _extract_reasons(lines: list[str], product_line: int, brand: str) -> list[st
                 break
 
     return reasons[:4]
+
+
+_DOWNSIDE_PATTERNS = [
+    r"\b(?:downside|drawback|con|weakness|negative|complaint|issue|problem|caveat|trade-?off)\b",
+    r"\b(?:but|however|unfortunately|though|although|lacking|lacks|missing|doesn't|don't|can't)\b",
+    r"\b(?:expensive|pricey|costly|bulky|heavy|loud|flimsy|cheap-feeling)\b",
+]
+
+
+def _extract_downside(lines: list[str], product_line: int, brand: str) -> str:
+    """Extract a single primary downside from lines near a product mention."""
+    block = lines[product_line:product_line + 15]
+    for line in block:
+        line = line.strip()
+        if not line or len(line) < 15 or len(line) > 200:
+            continue
+        lower = line.lower()
+        for pat in _DOWNSIDE_PATTERNS:
+            if re.search(pat, lower):
+                return line.strip()[:150]
+    return ""
 
 
 def _open_and_extract(
@@ -490,6 +517,9 @@ def _aggregate(reports: list[SourceReport]) -> list[AggregatedProduct]:
             for r in evidence.reasons:
                 if r not in agg.all_reasons:
                     agg.all_reasons.append(r)
+
+            if evidence.downside and evidence.downside not in agg.all_downsides:
+                agg.all_downsides.append(evidence.downside)
 
     # Score products
     for agg in product_map.values():
@@ -647,6 +677,8 @@ def _write_research_report(report: ResearchReport, output_path: Path) -> None:
             lines.append(f"- **Key reasons:**")
             for r in agg.all_reasons[:4]:
                 lines.append(f"  - {r}")
+        if agg.all_downsides:
+            lines.append(f"- **Downside:** {agg.all_downsides[0]}")
         for ev in agg.evidence:
             lines.append(f"- [{ev.source_name}]({ev.source_url})")
         lines.append("")
@@ -729,6 +761,7 @@ def _write_shortlist_json(report: ResearchReport, output_path: Path) -> None:
                     for ev in agg.evidence
                 ],
                 "reasons": agg.all_reasons[:4],
+                "downside": agg.all_downsides[0] if agg.all_downsides else "",
             }
             for agg in report.shortlist
         ],
