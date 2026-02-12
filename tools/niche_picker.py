@@ -231,7 +231,7 @@ class NicheHistoryEntry:
 
 
 def load_history() -> list[NicheHistoryEntry]:
-    """Load niche history from disk."""
+    """Load niche history from disk. Backward-compatible: missing fields default to ""."""
     if not HISTORY_PATH.is_file():
         return []
     try:
@@ -241,6 +241,9 @@ def load_history() -> list[NicheHistoryEntry]:
                 date=e.get("date", ""),
                 niche=e.get("niche", ""),
                 video_id=e.get("video_id", ""),
+                category=e.get("category", ""),
+                subcategory=e.get("subcategory", ""),
+                intent=e.get("intent", ""),
                 seed_keywords=e.get("seed_keywords", []),
                 final_top5_asins=e.get("final_top5_asins", []),
             )
@@ -251,13 +254,16 @@ def load_history() -> list[NicheHistoryEntry]:
 
 
 def save_history(history: list[NicheHistoryEntry]) -> None:
-    """Persist niche history to disk."""
+    """Persist niche history to disk (includes V2 fields)."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     data = [
         {
             "date": e.date,
             "niche": e.niche,
             "video_id": e.video_id,
+            "category": e.category,
+            "subcategory": e.subcategory,
+            "intent": e.intent,
             "seed_keywords": e.seed_keywords,
             "final_top5_asins": e.final_top5_asins,
         }
@@ -271,15 +277,21 @@ def update_history(
     date: str,
     *,
     video_id: str = "",
+    category: str = "",
+    subcategory: str = "",
+    intent: str = "",
     asins: list[str] | None = None,
 ) -> None:
-    """Add or update a niche history entry."""
+    """Add or update a niche history entry (populates V2 fields from candidate)."""
     history = load_history()
     # Update existing entry for same date, or append
     for entry in history:
         if entry.date == date:
             entry.niche = niche
             entry.video_id = video_id
+            entry.category = category or entry.category
+            entry.subcategory = subcategory or entry.subcategory
+            entry.intent = intent or entry.intent
             if asins:
                 entry.final_top5_asins = asins
             save_history(history)
@@ -288,6 +300,9 @@ def update_history(
         date=date,
         niche=niche,
         video_id=video_id,
+        category=category,
+        subcategory=subcategory,
+        intent=intent,
         final_top5_asins=asins or [],
     ))
     save_history(history)
@@ -458,7 +473,11 @@ def main() -> int:
 
     # Record in history
     video_id = args.video_id or f"{niche.keyword.replace(' ', '-')}-{date_str}"
-    update_history(niche.keyword, date_str, video_id=video_id)
+    update_history(
+        niche.keyword, date_str, video_id=video_id,
+        category=niche.category, subcategory=niche.subcategory,
+        intent=niche.intent,
+    )
     print(f"\nRecorded in {HISTORY_PATH}")
     print(f"Video ID: {video_id}")
 

@@ -195,5 +195,76 @@ class TestPickNiche(unittest.TestCase):
         self.assertEqual(n1.keyword, n2.keyword)
 
 
+class TestHistoryBackwardCompat(unittest.TestCase):
+    """History serialization with new V2 fields."""
+
+    def test_load_old_history_format(self):
+        """JSON without new fields loads OK (defaults to empty string)."""
+        from tools.niche_picker import NicheHistoryEntry
+        import json
+        import tempfile
+        from unittest.mock import patch as _patch
+
+        old_data = [
+            {"date": "2026-01-01", "niche": "wireless earbuds", "video_id": "v1",
+             "seed_keywords": [], "final_top5_asins": []}
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(old_data, f)
+            f.flush()
+            with _patch("tools.niche_picker.HISTORY_PATH", Path(f.name)):
+                from tools.niche_picker import load_history
+                entries = load_history()
+                self.assertEqual(len(entries), 1)
+                self.assertEqual(entries[0].niche, "wireless earbuds")
+                self.assertEqual(entries[0].category, "")
+                self.assertEqual(entries[0].subcategory, "")
+                self.assertEqual(entries[0].intent, "")
+
+    def test_save_load_roundtrip_new_fields(self):
+        """New fields persist correctly through save/load cycle."""
+        import json
+        import tempfile
+        from unittest.mock import patch as _patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hist_path = Path(tmp) / "niche_history.json"
+            with _patch("tools.niche_picker.HISTORY_PATH", hist_path), \
+                 _patch("tools.niche_picker.DATA_DIR", Path(tmp)):
+                from tools.niche_picker import save_history, load_history
+                entries = [NicheHistoryEntry(
+                    date="2026-02-12", niche="gaming headsets", video_id="v1",
+                    category="audio", subcategory="gaming headsets", intent="gaming",
+                )]
+                save_history(entries)
+                loaded = load_history()
+                self.assertEqual(len(loaded), 1)
+                self.assertEqual(loaded[0].category, "audio")
+                self.assertEqual(loaded[0].subcategory, "gaming headsets")
+                self.assertEqual(loaded[0].intent, "gaming")
+
+    def test_update_history_records_category(self):
+        """update_history() populates V2 fields from candidate data."""
+        import json
+        import tempfile
+        from unittest.mock import patch as _patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hist_path = Path(tmp) / "niche_history.json"
+            with _patch("tools.niche_picker.HISTORY_PATH", hist_path), \
+                 _patch("tools.niche_picker.DATA_DIR", Path(tmp)):
+                from tools.niche_picker import update_history, load_history
+                update_history(
+                    "wireless earbuds", "2026-02-12", video_id="v1",
+                    category="audio", subcategory="true wireless earbuds",
+                    intent="general",
+                )
+                loaded = load_history()
+                self.assertEqual(len(loaded), 1)
+                self.assertEqual(loaded[0].category, "audio")
+                self.assertEqual(loaded[0].subcategory, "true wireless earbuds")
+                self.assertEqual(loaded[0].intent, "general")
+
+
 if __name__ == "__main__":
     unittest.main()

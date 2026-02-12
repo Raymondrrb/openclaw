@@ -229,7 +229,11 @@ def cmd_research(args) -> int:
         niche = candidate.keyword
         paths.ensure_dirs()
         paths.niche_txt.write_text(niche + "\n", encoding="utf-8")
-        update_history(niche, today, video_id=args.video_id)
+        update_history(
+            niche, today, video_id=args.video_id,
+            category=candidate.category, subcategory=candidate.subcategory,
+            intent=candidate.intent,
+        )
         print(f"  Niche: {niche}")
         print(f"  Score: {candidate.static_score:.0f} (static) + rotation bonus")
         print(f"  Intent: {candidate.intent} | Band: {candidate.price_band}")

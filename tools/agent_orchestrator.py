@@ -232,7 +232,11 @@ class NicheStrategist:
         ctx.niche = candidate.keyword
         ctx.paths.ensure_dirs()
         ctx.paths.niche_txt.write_text(ctx.niche + "\n", encoding="utf-8")
-        update_history(ctx.niche, today, video_id=ctx.video_id)
+        update_history(
+            ctx.niche, today, video_id=ctx.video_id,
+            category=candidate.category, subcategory=candidate.subcategory,
+            intent=candidate.intent,
+        )
 
         ctx.bus.post(Message(
             sender=self.name, receiver="*",
