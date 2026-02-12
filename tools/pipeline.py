@@ -41,6 +41,7 @@ if str(_repo) not in sys.path:
     sys.path.insert(0, str(_repo))
 
 from tools.lib.common import load_env_file, now_iso, project_root
+from tools.lib.error_log import log_error as _log_error
 from tools.lib.video_paths import VIDEOS_BASE, VideoPaths
 
 # Load .env early so all tools see credentials
@@ -252,6 +253,13 @@ def cmd_research(args) -> int:
     notify_start(args.video_id, details=[f"Niche: {niche}", "Research started"])
 
     # --- Step 2: Research agent (browse real pages) ---
+    # Preflight check (research uses browser for page fetching)
+    from tools.lib.preflight import preflight_check as _pf_check
+    pf = _pf_check("research")
+    if not pf.passed:
+        for f in pf.failures:
+            print(f"  Preflight: {f}", file=sys.stderr)
+
     shortlist_path = paths.root / "inputs" / "shortlist.json"
     report_path = paths.root / "inputs" / "research_report.md"
 
@@ -284,6 +292,8 @@ def cmd_research(args) -> int:
             print(f"\n  Research DONE criteria NOT met:")
             for err in report.validation_errors:
                 print(f"    - {err}")
+            _log_error(args.video_id, "research", report.validation_errors[0],
+                       exit_code=2, context={"command": "research"})
             notify_action_required(
                 args.video_id, "research",
                 f"Research incomplete: {report.validation_errors[0]}",
@@ -293,6 +303,8 @@ def cmd_research(args) -> int:
 
     if not shortlist:
         print("\n  No candidates found.")
+        _log_error(args.video_id, "research", "Empty shortlist",
+                   exit_code=2, context={"command": "research"})
         notify_action_required(
             args.video_id, "research", "No candidates from trusted sources",
             next_action="Try a different niche or add products manually",
@@ -356,6 +368,8 @@ def cmd_research(args) -> int:
 
     if not verified:
         print("\n  No products verified on Amazon US.")
+        _log_error(args.video_id, "research", "No verified products",
+                   exit_code=2, context={"command": "research"})
         notify_action_required(
             args.video_id, "research", "No products found on Amazon",
             next_action="Check shortlist and verify manually",
@@ -374,6 +388,22 @@ def cmd_research(args) -> int:
     )
 
     update_milestone(args.video_id, "research", "affiliate_links_ready")
+
+    # Supabase: save top 5 products
+    try:
+        from tools.lib.supabase_pipeline import ensure_run_id, save_top5_product
+        rid = ensure_run_id(args.video_id, "research")
+        if rid:
+            for p in top5:
+                save_top5_product(rid,
+                                  rank=p.get("rank", 0),
+                                  asin=p.get("asin", ""),
+                                  role_label=p.get("category_label", ""),
+                                  benefits=p.get("benefits", []),
+                                  downside=p.get("downside", ""),
+                                  affiliate_short_url=p.get("affiliate_short_url", ""))
+    except Exception:
+        pass
 
     print(f"\n  Top 5 ({niche}):")
     for p in top5:
@@ -415,6 +445,8 @@ def _validate_existing_products(video_id: str, paths: VideoPaths) -> int:
         print(f"Validation failed ({len(errors)} issues):")
         for e in errors:
             print(f"  - {e}")
+        _log_error(video_id, "research", errors[0],
+                   context={"command": "research", "mode": "build"})
         record_error(video_id, "research", "validation", "; ".join(errors))
         return EXIT_ERROR
 
@@ -450,7 +482,7 @@ def cmd_script(args) -> int:
     _print_header(f"Script: {args.video_id}")
 
     paths = VideoPaths(args.video_id)
-    generate = getattr(args, "generate", False)
+    generate = getattr(args, "generate", True)
     force = getattr(args, "force", False)
 
     # Load products
@@ -605,6 +637,9 @@ def _auto_generate_script(
     if not result.success:
         for err in result.errors:
             print(f"  Error: {err}")
+        _log_error(video_id, "script",
+                   result.errors[0] if result.errors else "Script generation failed",
+                   context={"command": "script", "mode": "generate"})
         notify_error(
             video_id, "script", "generation_failed",
             result.errors[0] if result.errors else "Unknown error",
@@ -758,6 +793,17 @@ def cmd_script_brief(args) -> int:
     sources = products_data.get("sources_used", [])
 
     update_milestone(args.video_id, "script", "brief_generated")
+
+    # Supabase: save brief
+    try:
+        from tools.lib.supabase_pipeline import ensure_run_id, save_script
+        rid = ensure_run_id(args.video_id, "script-brief")
+        if rid:
+            wc = len(brief_text.split())
+            save_script(rid, "brief", text=brief_text, word_count=wc)
+    except Exception:
+        pass
+
     notify_progress(
         args.video_id, "script", "brief_generated",
         details=[
@@ -838,6 +884,17 @@ def cmd_script_review(args) -> int:
     else:
         print(f"  No automatic fixes needed (clean copy)")
 
+    # Supabase: save review + final
+    try:
+        from tools.lib.supabase_pipeline import ensure_run_id as _ensure_rid, save_script as _save_scr
+        _rid = _ensure_rid(args.video_id, "script-review")
+        if _rid:
+            _save_scr(_rid, "review", text=notes, word_count=result.word_count)
+            _save_scr(_rid, "final", text=fixed_text, word_count=result.word_count,
+                       has_disclosure=result.has_disclosure if hasattr(result, "has_disclosure") else False)
+    except Exception:
+        pass
+
     if result.passed:
         update_milestone(args.video_id, "script", "script_approved")
         notify_progress(
@@ -910,6 +967,16 @@ def cmd_assets(args) -> int:
         if not ok:
             print(f"Blocked: {reason}")
             notify_action_required(args.video_id, "assets", reason,
+                                   next_action="Fix the issue above, then re-run assets")
+            return EXIT_ACTION_REQUIRED
+
+        # Preflight session check: Brave + Dzine login
+        from tools.lib.preflight import preflight_check as _pf_check_assets
+        pf = _pf_check_assets("assets")
+        if not pf.passed:
+            for f in pf.failures:
+                print(f"Preflight: {f}")
+            notify_action_required(args.video_id, "assets", pf.failures[0],
                                    next_action="Fix the issue above, then re-run assets")
             return EXIT_ACTION_REQUIRED
 
@@ -1032,6 +1099,17 @@ def cmd_assets(args) -> int:
             size_kb = dest_path.stat().st_size // 1024
             print(f"  OK: {dest_path.name} ({size_kb} KB, {result.duration_s:.0f}s)")
             generated += 1
+            # Supabase: upload + save asset
+            try:
+                from tools.lib.supabase_pipeline import (
+                    ensure_run_id as _erid, upload_video_file as _uvf, save_asset as _sa,
+                )
+                _asset_rid = _erid(args.video_id, "assets")
+                if _asset_rid:
+                    s_url = _uvf(args.video_id, "rayviewslab-assets", str(dest_path), f"assets/{label}.png")
+                    _sa(_asset_rid, asset_type=label, storage_url=s_url, ok=True)
+            except Exception:
+                pass
         elif result.success and dest_path.is_file():
             size_kb = dest_path.stat().st_size // 1024
             print(f"  Warning: {dest_path.name} too small ({size_kb} KB)")
@@ -1040,6 +1118,8 @@ def cmd_assets(args) -> int:
             print(f"  FAILED: {result.error}")
             failed += 1
             if "login" in (result.error or "").lower():
+                _log_error(args.video_id, "assets", "Dzine login required",
+                           exit_code=2, context={"command": "assets"})
                 notify_action_required(
                     args.video_id, "assets", "Dzine login required",
                     next_action="Log in to Dzine in the Brave browser",
@@ -1063,6 +1143,8 @@ def cmd_assets(args) -> int:
             details=[f"Generated {generated} images, 0 failed"],
         )
     else:
+        _log_error(args.video_id, "assets", f"{failed} image(s) failed generation",
+                   context={"command": "assets", "generated": generated, "failed": failed})
         notify_action_required(
             args.video_id, "assets",
             f"{failed} image(s) failed generation",
@@ -1150,8 +1232,29 @@ def cmd_tts(args) -> int:
     ok = sum(1 for m in results if m.status == "success")
     failed = sum(1 for m in results if m.status == "failed")
 
+    # Supabase: upload chunks + save metadata
+    try:
+        from tools.lib.supabase_pipeline import (
+            ensure_run_id as _tts_erid, upload_video_file as _tts_uvf, save_tts_chunk as _tts_save,
+        )
+        _tts_rid = _tts_erid(args.video_id, "tts")
+        if _tts_rid:
+            for m in results:
+                s_url = ""
+                if m.status == "success" and m.file_path:
+                    s_url = _tts_uvf(args.video_id, "rayviewslab-audio",
+                                     m.file_path, f"chunks/chunk_{m.index:02d}.mp3")
+                _tts_save(_tts_rid, chunk_index=m.index, text=getattr(m, "text", ""),
+                          storage_url=s_url, ok=(m.status == "success"),
+                          error=getattr(m, "error", ""),
+                          duration_seconds=getattr(m, "actual_duration_s", 0) or 0)
+    except Exception:
+        pass
+
     if failed:
         failed_indices = [m.index for m in results if m.status == "failed"]
+        _log_error(args.video_id, "voice", f"{failed} TTS chunk(s) failed",
+                   context={"command": "tts", "failed_indices": failed_indices})
         notify_error(
             args.video_id, "voice", "chunks_failed",
             f"{failed} chunk(s) failed",
@@ -1322,6 +1425,18 @@ def cmd_manifest(args) -> int:
 
     print(f"\nTotal duration: {manifest.total_duration_s:.0f}s ({manifest.total_duration_s/60:.1f} min)")
     print(f"Segments: {len(manifest.segments)}")
+
+    # Supabase: upload resolve files
+    try:
+        from tools.lib.supabase_pipeline import ensure_run_id as _man_erid, upload_video_file as _man_uvf
+        _man_rid = _man_erid(args.video_id, "manifest")
+        if _man_rid:
+            for fname in ["edit_manifest.json", "markers.csv", "markers.edl", "notes.md"]:
+                fpath = paths.resolve_dir / fname
+                if fpath.is_file():
+                    _man_uvf(args.video_id, "rayviewslab-manifests", str(fpath), f"resolve/{fname}")
+    except Exception:
+        pass
 
     update_milestone(args.video_id, "edit_prep", "notes_generated")
 
@@ -1513,31 +1628,40 @@ def cmd_day(args) -> int:
     if rc != EXIT_OK:
         return rc
 
-    # --- Step 3: Script brief ---
+    # --- Step 3: Script brief (for reference) ---
     print()
     brief_args = argparse.Namespace(video_id=args.video_id)
     rc = cmd_script_brief(brief_args)
     if rc != EXIT_OK:
         return rc
 
-    # --- Done: signal human needed ---
-    notify_action_required(
-        args.video_id, "script",
-        "Brief ready — write script_raw.txt",
-        next_action=(
-            f"Write script in {paths.script_raw}, then run: "
-            f"python3 tools/pipeline.py script-review --video-id {args.video_id}"
-        ),
+    # --- Step 4: Script (auto-generate) ---
+    print()
+    script_args = argparse.Namespace(
+        video_id=args.video_id, generate=True, force=force,
+        charismatic="reality_check",
     )
+    rc = cmd_script(script_args)
+    if rc != EXIT_OK:
+        from tools.lib.notify import notify_action_required
+        notify_action_required(
+            args.video_id, "script",
+            "Script auto-generation failed — write manually",
+            next_action=(
+                f"Write script in {paths.script_raw}, then run: "
+                f"python3 tools/pipeline.py script-review --video-id {args.video_id}"
+            ),
+        )
+        return rc
 
     print(f"\n{'=' * 50}")
-    print(f"  Day pipeline complete — human needed")
+    print(f"  Day pipeline complete — script generated")
     print(f"{'=' * 50}")
-    print(f"\n  Brief: {paths.manual_brief}")
-    print(f"  Write: {paths.script_raw}")
-    print(f"\n  Then:  python3 tools/pipeline.py script-review --video-id {args.video_id}")
+    print(f"\n  Script: {paths.script_txt}")
+    print(f"\n  Next: Review script.txt, then run:")
+    print(f"    python3 tools/pipeline.py assets --video-id {args.video_id}")
 
-    return EXIT_ACTION_REQUIRED
+    return EXIT_OK
 
 
 def cmd_status(args) -> int:
@@ -1639,6 +1763,175 @@ def cmd_status(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Runs subcommand
+# ---------------------------------------------------------------------------
+
+
+def cmd_runs(args) -> int:
+    """Show pipeline run history."""
+    from tools.lib.run_log import format_runs_text, get_daily_summary
+
+    if args.summary:
+        date = ""
+        if args.today:
+            from tools.lib.common import now_iso
+            date = now_iso()[:10]
+        summary = get_daily_summary(date=date)
+        if summary["total_runs"] == 0:
+            print(f"No runs recorded for {summary['date']}.")
+            return EXIT_OK
+        print(f"Date: {summary['date']}  |  Runs: {summary['total_runs']}  |  Videos: {', '.join(summary['videos_touched']) or 'none'}")
+        for cmd, stats in sorted(summary["by_command"].items()):
+            print(f"  {cmd:<15s}  {stats['count']} runs ({stats['ok']} ok, {stats['failed']} failed)  avg {stats['avg_duration_s']:.1f}s")
+        return EXIT_OK
+
+    since = ""
+    if args.today:
+        from tools.lib.common import now_iso
+        since = now_iso()[:10]
+
+    text = format_runs_text(
+        video_id=args.video_id,
+        command=args.filter_command,
+        since=since,
+    )
+    print(text)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Errors subcommand
+# ---------------------------------------------------------------------------
+
+
+def cmd_metrics(args) -> int:
+    """Record or view video performance metrics."""
+    from tools.lib.video_analytics import record_metrics, get_niche_performance, update_niche_scores
+
+    if args.update_scores:
+        print("Recomputing niche performance scores...")
+        update_niche_scores()
+        print("Done. Scores saved to channel_memory['niche_performance_scores'].")
+        return EXIT_OK
+
+    if args.record:
+        if not args.video_id:
+            print("Error: --video-id required with --record")
+            return EXIT_ERROR
+
+        # Parse key=value pairs
+        kw: dict = {}
+        niche = ""
+        if args.video_id:
+            niche = _load_niche(VideoPaths(args.video_id))
+        for pair in args.data:
+            if "=" not in pair:
+                print(f"Invalid data format: {pair} (expected key=value)")
+                return EXIT_ERROR
+            k, v = pair.split("=", 1)
+            # Type coercion
+            if k in ("views_24h", "views_48h", "views_7d", "views_30d",
+                      "avd_seconds", "affiliate_clicks", "conversions"):
+                kw[k] = int(v)
+            elif k in ("ctr_percent", "avg_view_percent", "rpm_estimate"):
+                kw[k] = float(v)
+            else:
+                kw[k] = v
+
+        record_metrics(args.video_id, niche=niche, **kw)
+        print(f"Recorded metrics for {args.video_id}: {kw}")
+        return EXIT_OK
+
+    # Show recent performance
+    metrics = get_niche_performance(limit=20)
+    if not metrics:
+        print("No metrics recorded yet.")
+        print("Record with: pipeline.py metrics --video-id <id> --record --data views_7d=5000 ctr_percent=5.2")
+        return EXIT_OK
+
+    _print_header("Recent Video Metrics")
+    for m in metrics:
+        vid = m.get("video_id", "?")
+        niche = m.get("niche", "?")
+        ctr = m.get("ctr", "?")
+        v7 = m.get("views_7d", "?")
+        ts = m.get("recorded_at", "?")[:10]
+        print(f"  {vid:25s} {niche:25s} CTR={ctr}% Views7d={v7} ({ts})")
+
+    return EXIT_OK
+
+
+def cmd_errors(args) -> int:
+    """Review cross-video error log."""
+    from tools.lib.error_log import (
+        resolve_error, get_patterns, format_log_text,
+        get_lessons, get_stale,
+    )
+
+    if args.resolve:
+        root_cause = input("Root cause: ").strip()
+        fix = input("Fix applied: ").strip()
+        result = resolve_error(args.resolve, root_cause, fix)
+        if result:
+            print(f"Resolved: {result['id']}")
+        else:
+            print(f"Error ID not found: {args.resolve}")
+            return EXIT_ERROR
+        return EXIT_OK
+
+    if args.patterns:
+        patterns = get_patterns()
+        if not patterns:
+            print("No recurring patterns found.")
+            return EXIT_OK
+        for p in patterns:
+            status = f"{p['unresolved']} open" if p['unresolved'] else "all resolved"
+            print(
+                f"[{p['count']}x] {p['stage']} | {p['pattern']}\n"
+                f"       Videos: {', '.join(p['video_ids'])} | "
+                f"Last: {p['last_seen'][:19]} | {status}"
+            )
+        return EXIT_OK
+
+    if args.lessons:
+        lessons = get_lessons()
+        if not lessons:
+            print("No lessons yet (resolve some errors first).")
+            return EXIT_OK
+        for l in lessons:
+            print(
+                f"[{l['occurrences']}x] {l['stage']} | {l['pattern']}\n"
+                f"       Cause: {l['root_cause']}\n"
+                f"       Fix:   {l['fix']}\n"
+                f"       Last:  {l['last_resolved'][:19]}"
+            )
+        return EXIT_OK
+
+    if args.stale:
+        stale = get_stale()
+        if not stale:
+            print("No stale errors (all recent or resolved).")
+            return EXIT_OK
+        print(f"Stale unresolved errors (>7 days): {len(stale)}\n")
+        for e in stale:
+            ts = e.get("timestamp", "?")[:19]
+            print(
+                f"  {e.get('video_id', '?')} | {e.get('stage', '?')} | "
+                f"{e.get('error', '?')}\n"
+                f"         {ts}  id={e.get('id', '?')}"
+            )
+        return EXIT_OK
+
+    text = format_log_text(
+        stage=args.stage,
+        video_id=args.video_id,
+        show_resolved=args.all,
+    )
+    print(text)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -1674,8 +1967,12 @@ def main() -> int:
         help="Charismatic signature type",
     )
     p_script.add_argument(
-        "--generate", action="store_true",
-        help="Auto-generate script via OpenAI (draft) + Anthropic (refinement)",
+        "--generate", action="store_true", default=True,
+        help="Auto-generate script via OpenAI (draft) + Anthropic (refinement) [default]",
+    )
+    p_script.add_argument(
+        "--no-generate", action="store_false", dest="generate",
+        help="Disable auto-generation, manual mode only",
     )
     p_script.add_argument("--force", action="store_true", help="Regenerate even if script exists")
 
@@ -1728,6 +2025,37 @@ def main() -> int:
     p_stat.add_argument("--video-id", default="")
     p_stat.add_argument("--all", action="store_true", help="Show all video projects")
 
+    # runs
+    p_runs = sub.add_parser("runs", help="Show pipeline run history")
+    p_runs.add_argument("--video-id", default="")
+    p_runs.add_argument("--cmd", default="", dest="filter_command",
+                        help="Filter by pipeline command (e.g. research, script)")
+    p_runs.add_argument("--today", action="store_true", help="Filter to today only")
+    p_runs.add_argument("--summary", action="store_true", help="Show daily summary")
+
+    # metrics
+    p_metrics = sub.add_parser("metrics", help="Record or view video performance metrics")
+    p_metrics.add_argument("--video-id", default="")
+    p_metrics.add_argument("--record", action="store_true", help="Record metrics for a video")
+    p_metrics.add_argument("--data", nargs="+", default=[],
+                           help="Key=value pairs: views_7d=5000 ctr_percent=5.2")
+    p_metrics.add_argument("--update-scores", action="store_true",
+                           help="Recompute niche performance scores")
+
+    # errors
+    p_errors = sub.add_parser("errors", help="Review cross-video error log")
+    p_errors.add_argument("--stage", default="")
+    p_errors.add_argument("--video-id", default="")
+    p_errors.add_argument("--all", action="store_true", help="Include resolved")
+    p_errors.add_argument("--patterns", action="store_true",
+                          help="Show recurring patterns only")
+    p_errors.add_argument("--resolve", default="", metavar="ID",
+                          help="Mark error resolved")
+    p_errors.add_argument("--lessons", action="store_true",
+                          help="Show lessons learned from resolved errors")
+    p_errors.add_argument("--stale", action="store_true",
+                          help="Show unresolved errors older than 7 days")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1747,9 +2075,38 @@ def main() -> int:
         "day": cmd_day,
         "run": cmd_run,
         "status": cmd_status,
+        "runs": cmd_runs,
+        "metrics": cmd_metrics,
+        "errors": cmd_errors,
     }
 
-    return commands[args.command](args)
+    # Run the command, timing it for the run log
+    import time as _time
+    _start = _time.monotonic()
+    exit_code = commands[args.command](args)
+    _duration = _time.monotonic() - _start
+
+    # Log run for commands that operate on a video
+    video_id = getattr(args, "video_id", "")
+    if video_id:
+        try:
+            from tools.lib.run_log import log_run
+            niche = ""
+            niche_path = VideoPaths(video_id).niche_txt
+            if niche_path.is_file():
+                niche = niche_path.read_text(encoding="utf-8").strip()
+            log_run(video_id, args.command, exit_code, round(_duration, 1), niche=niche)
+        except Exception:
+            pass  # never let logging break the pipeline
+
+        # Supabase: ensure run exists for standalone commands
+        try:
+            from tools.lib.supabase_pipeline import ensure_run_id
+            ensure_run_id(video_id, args.command)
+        except Exception:
+            pass
+
+    return exit_code
 
 
 if __name__ == "__main__":

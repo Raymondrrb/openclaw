@@ -223,10 +223,10 @@ class TestCmdDay(unittest.TestCase):
             p.stop()
         self.tmp.cleanup()
 
-    def test_day_runs_to_brief(self):
-        """Day command with mocked research should reach script-brief stage."""
+    def test_day_runs_to_script(self):
+        """Day command with mocked research + script should succeed."""
         import argparse
-        from tools.pipeline import cmd_day, EXIT_ACTION_REQUIRED
+        from tools.pipeline import cmd_day, EXIT_OK
 
         # Mock the research stage to avoid real browser calls
         def fake_cmd_research(args):
@@ -237,7 +237,15 @@ class TestCmdDay(unittest.TestCase):
             paths.products_json.write_text(json.dumps(products), encoding="utf-8")
             return 0
 
-        with patch("tools.pipeline.cmd_research", side_effect=fake_cmd_research):
+        # Mock the script stage to avoid API calls
+        def fake_cmd_script(args):
+            paths = VideoPaths(args.video_id)
+            paths.script_txt.parent.mkdir(parents=True, exist_ok=True)
+            paths.script_txt.write_text("[HOOK]\nTest script\n", encoding="utf-8")
+            return 0
+
+        with patch("tools.pipeline.cmd_research", side_effect=fake_cmd_research), \
+             patch("tools.pipeline.cmd_script", side_effect=fake_cmd_script):
             args = argparse.Namespace(
                 video_id="test-day",
                 niche="wireless earbuds",
@@ -245,8 +253,8 @@ class TestCmdDay(unittest.TestCase):
             )
             rc = cmd_day(args)
 
-        # Day should return ACTION_REQUIRED (signals human needed)
-        self.assertEqual(rc, EXIT_ACTION_REQUIRED)
+        # Day should return OK (script auto-generated)
+        self.assertEqual(rc, EXIT_OK)
 
         # Brief should have been generated
         paths = VideoPaths("test-day")

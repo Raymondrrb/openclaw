@@ -174,6 +174,7 @@ class TestPipelineResearch(unittest.TestCase):
             patch("tools.lib.pipeline_status._cache", {}),
             patch("tools.lib.amazon_research.VIDEOS_BASE", self.videos_base),
             patch("tools.lib.notify.send_telegram", return_value=False),
+            patch("tools.pipeline._log_error"),
         ]
         for p in self.patchers:
             p.start()
@@ -248,6 +249,7 @@ class TestPipelineScript(unittest.TestCase):
             patch("tools.lib.pipeline_status._cache", {}),
             patch("tools.lib.amazon_research.VIDEOS_BASE", self.videos_base),
             patch("tools.lib.notify.send_telegram", return_value=False),
+            patch("tools.pipeline._log_error"),
         ]
         for p in self.patchers:
             p.start()
@@ -278,9 +280,9 @@ class TestPipelineScript(unittest.TestCase):
         }
         paths.products_json.write_text(json.dumps(data), encoding="utf-8")
 
-        args = _make_args(video_id="test-script", charismatic="reality_check")
+        args = _make_args(video_id="test-script", charismatic="reality_check", generate=False)
         result = cmd_script(args)
-        # No script.txt yet, so it should return action_required
+        # No script.txt yet and generate=False, so it should return action_required
         self.assertEqual(result, 2)
 
         # Check prompts were generated
@@ -429,6 +431,7 @@ class TestPipelineDayCluster(unittest.TestCase):
             patch("tools.lib.pipeline_status.VIDEOS_BASE", self.videos_base),
             patch("tools.lib.pipeline_status._cache", {}),
             patch("tools.lib.notify.send_telegram", return_value=False),
+            patch("tools.pipeline._log_error"),
             patch("tools.cluster_manager.DATA_DIR", self.data_dir),
             patch("tools.cluster_manager.CLUSTERS_PATH", self.data_dir / "clusters.json"),
             patch("tools.cluster_manager.CLUSTER_HISTORY_PATH", self.data_dir / "cluster_history.json"),

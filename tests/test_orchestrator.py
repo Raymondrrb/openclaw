@@ -228,7 +228,43 @@ class TestQAGatekeeper(unittest.TestCase):
         passed, errors = self.qa.check_gate(ctx, Stage.RANK)
         self.assertTrue(passed)
 
+    def test_rank_gate_pass_with_4_products(self):
+        """4 products should pass the rank gate."""
+        ctx = RunContext(video_id="test-001-4rank")
+        ctx.paths.ensure_dirs()
+        products = [
+            {
+                "rank": i,
+                "name": f"Product {i}",
+                "asin": f"B0{i}XXXXX",
+                "affiliate_url": f"https://amzn.to/{i}",
+            }
+            for i in range(1, 5)
+        ]
+        ctx.paths.products_json.write_text(json.dumps({"products": products}))
+        passed, errors = self.qa.check_gate(ctx, Stage.RANK)
+        self.assertTrue(passed, f"Expected pass but got errors: {errors}")
+
+    def test_rank_gate_fail_with_3_products(self):
+        """3 products should fail the rank gate."""
+        ctx = RunContext(video_id="test-001-3rank")
+        ctx.paths.ensure_dirs()
+        products = [
+            {
+                "rank": i,
+                "name": f"Product {i}",
+                "asin": f"B0{i}XXXXX",
+                "affiliate_url": f"https://amzn.to/{i}",
+            }
+            for i in range(1, 4)
+        ]
+        ctx.paths.products_json.write_text(json.dumps({"products": products}))
+        passed, errors = self.qa.check_gate(ctx, Stage.RANK)
+        self.assertFalse(passed)
+        self.assertTrue(any("4-5 products" in e for e in errors))
+
     def test_verify_gate_fail_too_few(self):
+        """3 products should fail (minimum is 4)."""
         ctx = RunContext(video_id="test-001")
         ctx.paths.ensure_dirs()
         verified_path = ctx.paths.root / "inputs" / "verified.json"
@@ -237,7 +273,26 @@ class TestQAGatekeeper(unittest.TestCase):
         }))
         passed, errors = self.qa.check_gate(ctx, Stage.VERIFY)
         self.assertFalse(passed)
-        self.assertTrue(any("minimum 5" in e for e in errors))
+        self.assertTrue(any("minimum 4" in e for e in errors))
+
+    def test_verify_gate_pass_with_4_products(self):
+        """4 products should pass with a warning."""
+        ctx = RunContext(video_id="test-001-4prod")
+        ctx.paths.ensure_dirs()
+        verified_path = ctx.paths.root / "inputs" / "verified.json"
+        verified_path.write_text(json.dumps({
+            "products": [
+                {"product_name": f"P{i}", "verification_method": "paapi",
+                 "affiliate_short_url": ""}
+                for i in range(4)
+            ],
+        }))
+        passed, errors = self.qa.check_gate(ctx, Stage.VERIFY)
+        self.assertTrue(passed, f"Expected pass but got errors: {errors}")
+        # Should have posted a WARNING info message
+        warnings = [m for m in ctx.bus.get_by_type(MsgType.INFO)
+                     if "WARNING" in m.content and "4 products" in m.content]
+        self.assertTrue(len(warnings) > 0, "Expected warning about 4 products")
 
     def test_manifest_gate(self):
         ctx = RunContext(video_id="test-001")
@@ -882,6 +937,137 @@ class TestPriceFloor(unittest.TestCase):
         # $99 < $120 default, should fail
         self.assertFalse(passed)
         self.assertTrue(any("Price floor" in e for e in errors))
+
+
+class TestSupabaseRunId(unittest.TestCase):
+    """Test Supabase run_id propagation in orchestrator."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patcher = patch("tools.lib.video_paths.VIDEOS_BASE", Path(self.tmp.name))
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.tmp.cleanup()
+
+    @patch("tools.lib.supabase_pipeline.insert")
+    def test_run_id_set_on_context(self, mock_insert):
+        """create_run returns UUID, stored in ctx.run_id."""
+        mock_insert.return_value = {"id": "abc-uuid-123"}
+        from tools.lib.supabase_pipeline import create_run
+        run_id = create_run("test-001", "wireless earbuds")
+        self.assertEqual(run_id, "abc-uuid-123")
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_run_id_empty_when_disabled(self):
+        """No crash, returns empty when Supabase disabled."""
+        from tools.lib.supabase_pipeline import create_run
+        run_id = create_run("test-001", "earbuds")
+        self.assertEqual(run_id, "")
+
+    @patch("tools.lib.supabase_pipeline.insert")
+    def test_events_persisted_when_run_id_set(self, mock_insert):
+        """MessageBus.post calls log_event when run_id is set."""
+        bus = MessageBus()
+        bus.set_run_id("test-run-id")
+        bus.post(Message("agent_a", "agent_b", MsgType.INFO, Stage.NICHE, "hello"))
+        # log_event should have called insert with agent_events
+        calls = [c for c in mock_insert.call_args_list if c[0][0] == "agent_events"]
+        self.assertTrue(len(calls) > 0)
+        payload = calls[0][0][1]
+        self.assertEqual(payload["run_id"], "test-run-id")
+        self.assertEqual(payload["agent_name"], "agent_a")
+
+    def test_events_not_persisted_without_run_id(self):
+        """No supabase calls when run_id is empty."""
+        bus = MessageBus()
+        # No set_run_id called — _run_id stays ""
+        with patch("tools.lib.supabase_pipeline.insert") as mock_insert:
+            bus.post(Message("agent_a", "*", MsgType.INFO, Stage.NICHE, "test"))
+            # insert should NOT be called for agent_events
+            event_calls = [c for c in mock_insert.call_args_list if c[0][0] == "agent_events"]
+            self.assertEqual(len(event_calls), 0)
+
+
+class TestRunContextRunId(unittest.TestCase):
+    """Test run_id field on RunContext."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patcher = patch("tools.lib.video_paths.VIDEOS_BASE", Path(self.tmp.name))
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.tmp.cleanup()
+
+    def test_run_id_default_empty(self):
+        ctx = RunContext(video_id="test-001")
+        self.assertEqual(ctx.run_id, "")
+
+
+class TestPreflightInOrchestrator(unittest.TestCase):
+    """Test preflight checks in orchestrator run_pipeline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patcher = patch("tools.lib.video_paths.VIDEOS_BASE", Path(self.tmp.name))
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.tmp.cleanup()
+
+    @patch("tools.lib.pipeline_status.VIDEOS_BASE")
+    @patch("tools.lib.notify.send_telegram", return_value=True)
+    @patch("tools.lib.preflight.preflight_check")
+    def test_preflight_fail_aborts_pipeline(self, mock_pf, mock_telegram, mock_vbase):
+        """Preflight failure on verify stage should abort the pipeline."""
+        from tools.lib.preflight import PreflightResult
+        mock_pf.return_value = PreflightResult(
+            passed=False,
+            failures=["Not logged in to Amazon. Log in at https://www.amazon.com/gp/css/homepage.html"],
+        )
+
+        orch = Orchestrator()
+        # Start at verify stage to trigger preflight
+        ctx = orch.run_pipeline(
+            "test-pf-fail",
+            niche="wireless earbuds",
+            start_stage=Stage.VERIFY,
+        )
+        self.assertTrue(ctx.aborted)
+        self.assertIn("Preflight", ctx.abort_reason)
+
+    @patch("tools.lib.pipeline_status.VIDEOS_BASE")
+    @patch("tools.lib.notify.send_telegram", return_value=True)
+    @patch("tools.lib.preflight.preflight_check")
+    def test_preflight_pass_continues(self, mock_pf, mock_telegram, mock_vbase):
+        """Preflight pass should let the stage proceed normally."""
+        from tools.lib.preflight import PreflightResult
+        mock_pf.return_value = PreflightResult(passed=True)
+
+        orch = Orchestrator()
+        # Niche stage has no preflight → passes
+        ctx = orch.run_pipeline(
+            "test-pf-pass",
+            niche="wireless earbuds",
+            stop_after=Stage.NICHE,
+            dry_run=True,
+        )
+        self.assertFalse(ctx.aborted)
+        self.assertIn(Stage.NICHE, ctx.stages_completed)
+
+
+class TestAmazonBlockError(unittest.TestCase):
+    """Test _AmazonBlockError classification."""
+
+    def test_block_error_classified_as_session(self):
+        from tools.amazon_verify import _AmazonBlockError
+        from tools.lib.retry import classify_error, ErrorKind
+        err = _AmazonBlockError("Amazon CAPTCHA / bot-detection block")
+        self.assertEqual(classify_error(err), ErrorKind.SESSION)
 
 
 if __name__ == "__main__":

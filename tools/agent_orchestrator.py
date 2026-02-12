@@ -67,10 +67,24 @@ class MessageBus:
 
     def __init__(self):
         self._messages: list[Message] = []
+        self._run_id: str = ""
+
+    def set_run_id(self, run_id: str) -> None:
+        self._run_id = run_id
 
     def post(self, msg: Message) -> None:
         self._messages.append(msg)
         _log(f"  [{msg.sender} -> {msg.receiver}] {msg.msg_type.value}: {msg.content[:80]}")
+        if self._run_id:
+            try:
+                from tools.lib.supabase_pipeline import log_event
+                log_event(
+                    self._run_id, msg.sender, msg.receiver,
+                    msg.msg_type.value, msg.stage if isinstance(msg.stage, str) else msg.stage.value,
+                    msg.content, msg.data,
+                )
+            except Exception:
+                pass  # never let Supabase break the pipeline
 
     def get_for(self, agent_name: str, *, stage: str = "") -> list[Message]:
         """Get messages addressed to a specific agent (or broadcast)."""
@@ -151,6 +165,7 @@ class RunContext:
     errors: list[str] = field(default_factory=list)
     aborted: bool = False
     abort_reason: str = ""
+    run_id: str = ""
 
     def __post_init__(self):
         if self.paths is None:
@@ -267,6 +282,19 @@ class NicheStrategist:
                 "price_band": candidate.price_band,
             },
         ))
+
+        # Supabase: save niche
+        if ctx.run_id:
+            try:
+                from tools.lib.supabase_pipeline import save_niche
+                save_niche(ctx.run_id, ctx.video_id,
+                           cluster=candidate.category,
+                           subcategory=candidate.subcategory,
+                           intent_phrase=ctx.niche,
+                           total_score=candidate.static_score)
+            except Exception:
+                pass
+
         self._ensure_contract(ctx)
         return True
 
@@ -356,6 +384,25 @@ class ResearchAgentWrapper:
                 "shortlisted": len(report.shortlist),
             },
         ))
+
+        # Supabase: save research data
+        if ctx.run_id:
+            try:
+                from tools.lib.supabase_pipeline import save_research_source, save_shortlist_item
+                for src in report.sources_reviewed:
+                    save_research_source(ctx.run_id,
+                                         source_domain=src.get("domain", ""),
+                                         source_url=src.get("url", ""),
+                                         ok=not src.get("error"))
+                for i, item in enumerate(report.shortlist, 1):
+                    save_shortlist_item(ctx.run_id,
+                                        product_name_clean=item.get("product_name", ""),
+                                        candidate_rank=min(i, 7),
+                                        claims=item.get("reasons", []),
+                                        evidence_by_source=item.get("sources", []))
+            except Exception:
+                pass
+
         return True
 
 
@@ -430,6 +477,19 @@ class AmazonVerifyAgent:
             data={"verified": len(verified_objs), "total": len(shortlist)},
         ))
 
+        # Supabase: save verified products
+        if ctx.run_id:
+            try:
+                from tools.lib.supabase_pipeline import save_amazon_product
+                for v in verified_objs:
+                    save_amazon_product(ctx.run_id,
+                                        asin=getattr(v, "asin", ""),
+                                        amazon_title=getattr(v, "amazon_title", ""),
+                                        pdp_url=getattr(v, "amazon_url", ""),
+                                        affiliate_short_url=getattr(v, "affiliate_short_url", ""))
+            except Exception:
+                pass
+
         if not verified_objs:
             ctx.bus.post(Message(
                 sender=self.name, receiver="qa_gatekeeper",
@@ -502,6 +562,22 @@ class Top5RankerAgent:
             content=f"Top 5 selected: {', '.join(names[:3])}...",
             data={"top5": names},
         ))
+
+        # Supabase: save top 5
+        if ctx.run_id:
+            try:
+                from tools.lib.supabase_pipeline import save_top5_product
+                for p in top5:
+                    save_top5_product(ctx.run_id,
+                                      rank=p.get("rank", 0),
+                                      asin=p.get("asin", ""),
+                                      role_label=p.get("category_label", ""),
+                                      benefits=p.get("benefits", []),
+                                      downside=p.get("downside", ""),
+                                      affiliate_short_url=p.get("affiliate_short_url", ""))
+            except Exception:
+                pass
+
         return True
 
 
@@ -960,8 +1036,14 @@ class QAGatekeeper:
             return errors
         data = json.loads(verified_path.read_text(encoding="utf-8"))
         products = data.get("products", [])
-        if len(products) < 5:
-            errors.append(f"Only {len(products)} products verified (minimum 5)")
+        if len(products) < 4:
+            errors.append(f"Only {len(products)} products verified (minimum 4)")
+        elif len(products) == 4:
+            ctx.bus.post(Message(
+                sender=self.name, receiver="*",
+                msg_type=MsgType.INFO, stage=Stage.VERIFY,
+                content=f"WARNING: Only 4 products verified (5 preferred). Proceeding.",
+            ))
 
         # SiteStripe short link check for browser-verified products
         missing_short = [
@@ -1010,8 +1092,8 @@ class QAGatekeeper:
             return errors
         data = json.loads(ctx.paths.products_json.read_text(encoding="utf-8"))
         products = data.get("products", [])
-        if len(products) != 5:
-            errors.append(f"Expected 5 products, got {len(products)}")
+        if len(products) < 4 or len(products) > 5:
+            errors.append(f"Expected 4-5 products, got {len(products)}")
         for p in products:
             if not p.get("name"):
                 errors.append(f"Product rank {p.get('rank')} has no name")
@@ -1318,6 +1400,27 @@ class Orchestrator:
         _log(f"  Mode: {'DRY RUN' if dry_run else 'EXECUTE'}")
         _log(f"{'='*60}\n")
 
+        # Supabase: create run + load channel memory
+        if not dry_run:
+            try:
+                from tools.lib.supabase_pipeline import create_run as _create_run
+                ctx.run_id = _create_run(video_id, niche)
+                ctx.bus.set_run_id(ctx.run_id)
+            except Exception:
+                pass  # graceful degradation
+            try:
+                from tools.lib.supabase_pipeline import get_all_channel_memory
+                memory = get_all_channel_memory()
+                if memory:
+                    ctx.bus.post(Message(
+                        sender="orchestrator", receiver="*",
+                        msg_type=MsgType.INFO, stage=Stage.NICHE,
+                        content=f"Loaded {len(memory)} channel memory keys",
+                        data={"keys": list(memory.keys())},
+                    ))
+            except Exception:
+                pass
+
         if not dry_run:
             start_pipeline(video_id)
             notify_start(video_id, details=[
@@ -1337,6 +1440,30 @@ class Orchestrator:
 
             ctx.current_stage = stage
             _log(f"\n--- Stage: {stage.value} ---")
+
+            # Preflight session checks for browser-dependent stages
+            if not dry_run:
+                from tools.lib.preflight import STAGE_SESSIONS, preflight_check
+                if stage.value in STAGE_SESSIONS and STAGE_SESSIONS[stage.value]:
+                    _log(f"  Preflight check for {stage.value}...")
+                    pf_result = preflight_check(stage.value)
+                    if not pf_result.passed:
+                        for failure in pf_result.failures:
+                            ctx.bus.post(Message(
+                                sender="orchestrator", receiver="qa_gatekeeper",
+                                msg_type=MsgType.ERROR, stage=stage,
+                                content=f"Preflight: {failure}",
+                            ))
+                            _log(f"  Preflight FAILED: {failure}")
+                        from tools.lib.notify import notify_action_required
+                        notify_action_required(
+                            video_id, stage.value,
+                            f"Preflight failed: {pf_result.failures[0]}",
+                            next_action="Fix the issue and re-run the pipeline",
+                        )
+                        ctx.aborted = True
+                        ctx.abort_reason = f"Preflight: {pf_result.failures[0]}"
+                        break
 
             # Run stage agents
             agent_names = STAGE_AGENTS.get(stage, [])
@@ -1391,8 +1518,22 @@ class Orchestrator:
                 all_errors = gate_errors + review_issues
                 ctx.errors.extend(all_errors)
                 if not dry_run:
+                    from tools.lib.error_log import log_error as _log_pipeline_error
                     for err in all_errors[:3]:
+                        _log_pipeline_error(video_id, stage.value, err,
+                                            exit_code=2,
+                                            context={"command": "run",
+                                                     "source": "qa_gate"})
                         notify_error(video_id, stage.value, "gate_fail", err)
+
+                # Supabase: save lessons from gate errors
+                if ctx.run_id:
+                    try:
+                        from tools.lib.supabase_pipeline import save_lesson as _save_lsn
+                        for err in all_errors[:3]:
+                            _save_lsn(stage.value, err[:80], err, severity="high")
+                    except Exception:
+                        pass
 
                 # Non-blocking stages: script (prompts generated, script is manual),
                 # assets (may need Dzine login)
@@ -1428,6 +1569,19 @@ class Orchestrator:
                 f"Stages: {len(ctx.stages_completed)}/{len(STAGE_ORDER)}",
                 f"Messages: {ctx.bus.count}",
             ])
+
+        # Supabase: complete run
+        if ctx.run_id and not dry_run:
+            try:
+                from tools.lib.supabase_pipeline import complete_run as _complete_run
+                status = "complete" if not ctx.aborted else ("aborted" if ctx.aborted else "failed")
+                _complete_run(
+                    ctx.run_id, status,
+                    [s.value for s in ctx.stages_completed],
+                    ctx.errors,
+                )
+            except Exception:
+                pass
 
         return ctx
 

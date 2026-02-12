@@ -119,7 +119,10 @@ def _http_fetch(url: str, *, timeout: int = 15) -> str | None:
 
 
 def _browser_fetch(url: str) -> str | None:
-    """Fetch page HTML via Playwright/Brave CDP. Returns None on failure."""
+    """Fetch page HTML via Playwright/Brave CDP. Returns None on failure.
+
+    Uses with_retry for transient errors (timeout, network).
+    """
     try:
         from tools.lib.brave_profile import connect_or_launch
     except ImportError:
@@ -129,7 +132,17 @@ def _browser_fetch(url: str) -> str | None:
         browser, context, should_close, pw = connect_or_launch(headless=False)
         page = context.new_page()
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            from tools.lib.retry import with_retry
+
+            def _goto():
+                page.goto(url, wait_until="domcontentloaded", timeout=20000)
+
+            try:
+                with_retry(_goto, max_retries=2, base_delay_s=2.0)
+            except Exception as exc:
+                print(f"  [page_reader] Browser fetch failed for {url}: {exc}", file=sys.stderr)
+                return None
+
             page.wait_for_timeout(2000)
             html = page.content()
             return html

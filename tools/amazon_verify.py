@@ -36,6 +36,12 @@ from tools.lib.common import load_env_file, now_iso, project_root, require_env
 
 VIDEOS_BASE = project_root() / "artifacts" / "videos"
 
+
+class _AmazonBlockError(Exception):
+    """Amazon CAPTCHA or bot-detection block."""
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
@@ -284,11 +290,24 @@ def _browser_verify_product_pdp(
         page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
         page.wait_for_timeout(3000)
 
-        # Check for captcha
-        if page.locator('form[action*="validateCaptcha"]').count() > 0:
-            print(f"    CAPTCHA detected -- skipping browser verification",
-                  file=sys.stderr)
-            return None
+        # Check for captcha / bot detection
+        captcha_form = page.locator('form[action*="validateCaptcha"]').count() > 0
+        robot_text = False
+        try:
+            robot_text = page.locator("text=Sorry, we just need to make sure you're not a robot").count() > 0
+        except Exception:
+            pass
+        if captcha_form or robot_text:
+            try:
+                from tools.lib.notify import notify_action_required
+                notify_action_required(
+                    video_id or "unknown", "verify",
+                    "Amazon CAPTCHA detected",
+                    next_action="Solve CAPTCHA in Brave browser, then re-run verify",
+                )
+            except Exception:
+                pass
+            raise _AmazonBlockError("Amazon CAPTCHA / bot-detection block")
 
         # Get up to 5 search result cards
         cards = page.locator('[data-component-type="s-search-result"]')
@@ -553,6 +572,7 @@ def verify_products(
     print(f"[verify] Products to verify: {len(shortlist)}", file=sys.stderr)
 
     verified: list[VerifiedProduct] = []
+    consecutive_failures = 0
 
     for i, item in enumerate(shortlist):
         product_name = item.get("product_name", "")
@@ -584,27 +604,58 @@ def verify_products(
                         key_claims=item.get("key_claims", []),
                     )
                     verified.append(vp)
+                    consecutive_failures = 0
                     print(f"    OK: {vp.asin} ({confidence}) -- {vp.amazon_title[:60]}", file=sys.stderr)
                 else:
+                    consecutive_failures += 1
                     print(f"    NOT FOUND on Amazon", file=sys.stderr)
             except Exception as exc:
+                consecutive_failures += 1
                 print(f"    PA-API error: {exc}", file=sys.stderr)
         else:
-            # Browser PDP flow
-            vp = _browser_verify_product_pdp(
-                product_name, brand, tag,
-                video_id=video_id, product_index=i,
-            )
+            # Browser PDP flow with retry
+            from tools.lib.retry import with_retry
+
+            vp = None
+            try:
+                vp = with_retry(
+                    lambda pn=product_name, br=brand, t=tag, vid=video_id, idx=i:
+                        _browser_verify_product_pdp(pn, br, t, video_id=vid, product_index=idx),
+                    max_retries=1,
+                    base_delay_s=5.0,
+                )
+            except _AmazonBlockError:
+                consecutive_failures += 1
+                print(f"    BLOCKED: Amazon CAPTCHA/bot detection", file=sys.stderr)
+            except Exception as exc:
+                consecutive_failures += 1
+                print(f"    Browser error: {exc}", file=sys.stderr)
+
             if vp:
                 vp.evidence = item.get("sources", [])
                 vp.key_claims = item.get("key_claims", [])
                 verified.append(vp)
+                consecutive_failures = 0
                 short_info = f" | short={vp.affiliate_short_url[:30]}" if vp.affiliate_short_url else ""
                 print(f"    OK: {vp.asin} ({vp.match_confidence}) -- {vp.amazon_title[:60]}{short_info}", file=sys.stderr)
                 if vp.error:
                     print(f"    Note: {vp.error}", file=sys.stderr)
+            elif vp is None and consecutive_failures == 0:
+                # _browser_verify_product_pdp returned None (no match), not an error
+                pass
             else:
                 print(f"    NOT FOUND / verification failed", file=sys.stderr)
+
+            # Consecutive failure pause: if 3+ in a row, likely rate-limited
+            if consecutive_failures >= 3:
+                try:
+                    from tools.lib.notify import notify_rate_limited
+                    notify_rate_limited(video_id or "unknown", "verify", wait_minutes=1)
+                except Exception:
+                    pass
+                print(f"    3+ consecutive failures — pausing 30s", file=sys.stderr)
+                time.sleep(30)
+                consecutive_failures = 0
 
             # Delay between browser searches to avoid throttling
             if i < len(shortlist) - 1:
