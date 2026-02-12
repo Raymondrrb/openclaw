@@ -406,5 +406,103 @@ class TestShortlistJsonDownside(unittest.TestCase):
             self.assertEqual(data["shortlist"][0]["downside"], "Case is bulky")
 
 
+class TestGenericClaimFilter(unittest.TestCase):
+    """Test generic claim filtering."""
+
+    def test_generic_claim_filtered(self):
+        """'great sound' alone is filtered."""
+        from tools.research_agent import _is_generic_claim, _filter_generic_reasons
+        self.assertTrue(_is_generic_claim("great sound"))
+        self.assertTrue(_is_generic_claim("Good Value"))
+        result = _filter_generic_reasons(["great sound", "comfortable"])
+        self.assertEqual(result, [])  # both are generic
+
+    def test_attributed_claim_kept(self):
+        """A specific attributed claim is kept."""
+        from tools.research_agent import _is_generic_claim, _filter_generic_reasons
+        claim = "RTINGS measured 98.2% noise reduction at 1kHz"
+        self.assertFalse(_is_generic_claim(claim))
+        result = _filter_generic_reasons([claim, "great sound"])
+        self.assertEqual(result, [claim])
+
+    def test_buyer_pain_fit_in_shortlist(self):
+        """Shortlist entries include buyer_pain_fit field."""
+        from tools.research_agent import (
+            ResearchReport,
+            _write_shortlist_json,
+        )
+        import json
+        import tempfile
+
+        report = ResearchReport(niche="test", date="2026-02-12")
+        # Create a minimal aggregated product
+        agg = AggregatedProduct(
+            product_name="Test Product",
+            brand="TestBrand",
+        )
+        agg.evidence = [ProductEvidence(
+            product_name="Test Product",
+            source_name="Wirecutter",
+            source_url="https://www.nytimes.com/wirecutter/",
+            source_date="2026-01-01",
+            reasons=["Excellent noise cancellation measured at 98%"],
+        )]
+        agg.all_reasons = ["Excellent noise cancellation measured at 98%"]
+        report.shortlist = [agg]
+        report.aggregated = [agg]
+        report.sources_reviewed = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "shortlist.json"
+            _write_shortlist_json(report, path)
+            data = json.loads(path.read_text())
+            for item in data["shortlist"]:
+                self.assertIn("buyer_pain_fit", item)
+
+
+class TestGenericClaimQAGate(unittest.TestCase):
+    """Test generic claim check in orchestrator QA gate."""
+
+    def setUp(self):
+        import tempfile
+        from unittest.mock import patch
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patcher = patch("tools.lib.video_paths.VIDEOS_BASE", Path(self.tmp.name))
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.tmp.cleanup()
+
+    def test_generic_only_fails_gate(self):
+        """Product with only generic claims triggers hard fail."""
+        import json
+        from tools.agent_orchestrator import QAGatekeeper, RunContext, Stage
+
+        qa = QAGatekeeper()
+        ctx = RunContext(video_id="test-gc", niche="earbuds")
+        ctx.paths.ensure_dirs()
+        shortlist_path = ctx.paths.root / "inputs" / "shortlist.json"
+        shortlist_path.write_text(json.dumps({
+            "shortlist": [
+                {
+                    "product_name": f"Good Product {i}",
+                    "reasons": ["RTINGS measured excellent ANC performance"],
+                    "sources": [{"url": "https://rtings.com/headphones"}],
+                }
+                for i in range(5)
+            ] + [
+                {
+                    "product_name": "Generic Product",
+                    "reasons": ["great sound", "comfortable"],
+                    "sources": [{"url": "https://rtings.com/headphones"}],
+                },
+            ],
+        }))
+        passed, errors = qa.check_gate(ctx, Stage.RESEARCH)
+        self.assertFalse(passed)
+        self.assertTrue(any("generic claims" in e.lower() for e in errors))
+
+
 if __name__ == "__main__":
     unittest.main()

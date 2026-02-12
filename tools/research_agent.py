@@ -732,6 +732,28 @@ def _why_in_shortlist(agg: AggregatedProduct) -> str:
     return " ".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Generic claim filter
+# ---------------------------------------------------------------------------
+
+GENERIC_CLAIMS = frozenset({
+    "great sound", "high quality", "good value", "nice design",
+    "comfortable", "easy to use", "looks great", "works well",
+    "solid build", "good performance", "well built", "good sound",
+    "nice build", "great design", "good quality", "works great",
+})
+
+
+def _is_generic_claim(claim: str) -> bool:
+    """Check if a claim is generic filler with no attributed evidence."""
+    return claim.lower().strip().rstrip(".") in GENERIC_CLAIMS
+
+
+def _filter_generic_reasons(reasons: list[str]) -> list[str]:
+    """Remove generic claims from a reasons list."""
+    return [r for r in reasons if not _is_generic_claim(r)]
+
+
 def _write_shortlist_json(report: ResearchReport, output_path: Path) -> None:
     """Write structured shortlist.json."""
     data = {
@@ -752,11 +774,12 @@ def _write_shortlist_json(report: ResearchReport, output_path: Path) -> None:
                 "primary_label": agg.primary_label,
                 "all_labels": agg.all_labels,
                 "why_in_shortlist": _why_in_shortlist(agg),
+                "buyer_pain_fit": "",  # populated by cluster micro-niche if available
                 "pass_subcategory_gate": True,
                 "evidence_by_source": {
                     ev.source_name.lower().replace(" ", "_"): {
                         "url": ev.source_url,
-                        "key_claims": ev.reasons[:3],
+                        "key_claims": _filter_generic_reasons(ev.reasons[:3]),
                         "subcategory_proof": [ev.category_label] if ev.category_label else [],
                     }
                     for ev in agg.evidence
@@ -770,7 +793,7 @@ def _write_shortlist_json(report: ResearchReport, output_path: Path) -> None:
                     }
                     for ev in agg.evidence
                 ],
-                "reasons": agg.all_reasons[:4],
+                "reasons": _filter_generic_reasons(agg.all_reasons[:4]),
                 "downside": agg.all_downsides[0] if agg.all_downsides else "",
             }
             for agg in report.shortlist

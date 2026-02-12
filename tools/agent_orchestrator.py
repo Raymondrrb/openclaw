@@ -926,6 +926,16 @@ class QAGatekeeper:
             if not reasons:
                 errors.append(f"Shortlist product '{item.get('product_name', '?')}' has no evidence claims")
 
+        # Generic claim filter: reject products with ONLY generic claims
+        from tools.research_agent import _is_generic_claim
+        for item in shortlist:
+            reasons = item.get("reasons", [])
+            if reasons and all(_is_generic_claim(r) for r in reasons):
+                errors.append(
+                    f"Shortlist product '{item.get('product_name', '?')}' has only "
+                    f"generic claims (no attributed evidence)"
+                )
+
         # Subcategory contract compliance
         contract_path = ctx.paths.subcategory_contract
         if contract_path.is_file():
