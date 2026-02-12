@@ -230,7 +230,9 @@ def cmd_research(args) -> int:
         paths.ensure_dirs()
         paths.niche_txt.write_text(niche + "\n", encoding="utf-8")
         update_history(niche, today, video_id=args.video_id)
-        print(f"  Niche: {niche} (score: {candidate.score:.1f})")
+        print(f"  Niche: {niche}")
+        print(f"  Score: {candidate.static_score:.0f} (static) + rotation bonus")
+        print(f"  Intent: {candidate.intent} | Band: {candidate.price_band}")
     else:
         print(f"Step 1: Niche: {niche}")
 
@@ -1407,7 +1409,7 @@ def cmd_day(args) -> int:
             from tools.niche_picker import pick_niche
             candidate = pick_niche(today)
             niche = candidate.keyword
-            print(f"Auto-picked niche: {niche} (score: {candidate.score:.1f})")
+            print(f"Auto-picked niche: {niche} (static: {candidate.static_score:.0f}, intent: {candidate.intent})")
 
         init_args = argparse.Namespace(
             video_id=args.video_id, niche=niche, force=force,

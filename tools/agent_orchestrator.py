@@ -237,8 +237,15 @@ class NicheStrategist:
         ctx.bus.post(Message(
             sender=self.name, receiver="*",
             msg_type=MsgType.DECISION, stage=Stage.NICHE,
-            content=f"Selected niche: {ctx.niche} (score: {candidate.score:.1f})",
-            data={"keyword": ctx.niche, "score": candidate.score, "category": candidate.category},
+            content=f"Selected niche: {ctx.niche} (static: {candidate.static_score:.0f}, intent: {candidate.intent})",
+            data={
+                "keyword": ctx.niche,
+                "static_score": candidate.static_score,
+                "category": candidate.category,
+                "subcategory": candidate.subcategory,
+                "intent": candidate.intent,
+                "price_band": candidate.price_band,
+            },
         ))
         self._ensure_contract(ctx)
         return True
@@ -299,6 +306,7 @@ class ResearchAgentWrapper:
             output_dir=ctx.paths.root / "inputs",
             force=ctx.force,
             dry_run=ctx.dry_run,
+            contract_path=ctx.paths.subcategory_contract,
         )
 
         if ctx.dry_run:
