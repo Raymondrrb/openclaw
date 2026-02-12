@@ -310,9 +310,21 @@ def cmd_research(args) -> int:
         verified = verified_data.get("products", [])
     else:
         print(f"\nStep 3: Verifying {len(shortlist)} products on Amazon US...")
+        import time as _time
         from tools.amazon_verify import verify_products, write_verified
 
         verified_objs = verify_products(shortlist, video_id=args.video_id)
+
+        # Retry once if <5 products verified and shortlist had enough candidates
+        if len(verified_objs) < 5 and len(shortlist) >= 5:
+            verified_names = {v.product_name.lower() for v in verified_objs}
+            failed = [s for s in shortlist if s.get("product_name", "").lower() not in verified_names]
+            if failed:
+                print(f"  Retrying {len(failed)} failed verifications...")
+                _time.sleep(5)
+                retry_objs = verify_products(failed, video_id=args.video_id)
+                verified_objs.extend(retry_objs)
+
         verified = [
             {
                 "product_name": v.product_name,

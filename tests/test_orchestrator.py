@@ -695,6 +695,73 @@ class TestQAVerifySiteStripe(unittest.TestCase):
         self.assertEqual(sitestripe_errors, [])
 
 
+class TestVerifyRetry(unittest.TestCase):
+    """Verify retry logic when <5 products verify."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patcher = patch("tools.lib.video_paths.VIDEOS_BASE", Path(self.tmp.name))
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.tmp.cleanup()
+
+    @patch("tools.agent_orchestrator.time.sleep")
+    @patch("tools.amazon_verify.verify_products")
+    @patch("tools.amazon_verify.write_verified")
+    def test_verify_retry_on_insufficient(self, mock_write, mock_verify, mock_sleep):
+        """When first pass returns 3, retry returns 2 more -> total 5."""
+        from tools.agent_orchestrator import AmazonVerifyAgent
+
+        # Create mock verified objects
+        class MockVerified:
+            def __init__(self, name):
+                self.product_name = name
+
+        first_pass = [MockVerified(f"Product {i}") for i in range(3)]
+        retry_pass = [MockVerified(f"Product {i}") for i in range(3, 5)]
+        mock_verify.side_effect = [first_pass, retry_pass]
+
+        ctx = RunContext(video_id="test-retry", niche="earbuds")
+        ctx.paths.ensure_dirs()
+        shortlist_path = ctx.paths.root / "inputs" / "shortlist.json"
+        shortlist_path.write_text(json.dumps({
+            "shortlist": [{"product_name": f"Product {i}"} for i in range(7)],
+        }))
+
+        agent = AmazonVerifyAgent()
+        agent.run(ctx)
+
+        # verify_products called twice (initial + retry)
+        self.assertEqual(mock_verify.call_count, 2)
+
+    @patch("tools.amazon_verify.verify_products")
+    @patch("tools.amazon_verify.write_verified")
+    def test_verify_no_retry_when_sufficient(self, mock_write, mock_verify):
+        """When first pass returns 5, no retry needed."""
+        from tools.agent_orchestrator import AmazonVerifyAgent
+
+        class MockVerified:
+            def __init__(self, name):
+                self.product_name = name
+
+        mock_verify.return_value = [MockVerified(f"Product {i}") for i in range(5)]
+
+        ctx = RunContext(video_id="test-no-retry", niche="earbuds")
+        ctx.paths.ensure_dirs()
+        shortlist_path = ctx.paths.root / "inputs" / "shortlist.json"
+        shortlist_path.write_text(json.dumps({
+            "shortlist": [{"product_name": f"Product {i}"} for i in range(7)],
+        }))
+
+        agent = AmazonVerifyAgent()
+        agent.run(ctx)
+
+        # verify_products called only once
+        self.assertEqual(mock_verify.call_count, 1)
+
+
 class TestAllowedDomains(unittest.TestCase):
     """Test domain enforcement constants."""
 
