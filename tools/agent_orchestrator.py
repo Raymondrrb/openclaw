@@ -866,6 +866,12 @@ class QAGatekeeper:
                 if url and not any(d in url for d in ALLOWED_RESEARCH_DOMAINS):
                     errors.append(f"Domain violation: {url}")
 
+        # Evidence quality: every shortlisted product must have reasons
+        for item in shortlist:
+            reasons = item.get("reasons", [])
+            if not reasons:
+                errors.append(f"Shortlist product '{item.get('product_name', '?')}' has no evidence claims")
+
         # Subcategory contract compliance
         contract_path = ctx.paths.subcategory_contract
         if contract_path.is_file():
@@ -892,6 +898,19 @@ class QAGatekeeper:
         products = data.get("products", [])
         if len(products) < 5:
             errors.append(f"Only {len(products)} products verified (minimum 5)")
+
+        # SiteStripe short link check for browser-verified products
+        missing_short = [
+            p for p in products
+            if not p.get("affiliate_short_url")
+            and p.get("verification_method") == "browser"
+        ]
+        if missing_short:
+            names = ", ".join(p.get("product_name", "?")[:30] for p in missing_short[:3])
+            errors.append(
+                f"SiteStripe short link missing for {len(missing_short)} "
+                f"browser-verified products: {names}"
+            )
 
         # Subcategory contract compliance — HARD FAIL on any drift
         contract_path = ctx.paths.subcategory_contract

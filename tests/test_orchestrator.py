@@ -197,6 +197,7 @@ class TestQAGatekeeper(unittest.TestCase):
             "shortlist": [
                 {
                     "product_name": f"Product {i}",
+                    "reasons": ["good sound", "nice fit"],
                     "sources": [{"url": "https://www.nytimes.com/wirecutter/reviews/earbuds/"}],
                 }
                 for i in range(6)
@@ -595,6 +596,103 @@ class TestQAGatekeeperSubcategoryDrift(unittest.TestCase):
         passed, errors = self.qa.check_gate(ctx, Stage.RESEARCH)
         self.assertFalse(passed)
         self.assertTrue(any("Subcategory drift" in e for e in errors))
+
+
+class TestQAResearchEvidence(unittest.TestCase):
+    """QA gate checks evidence quality in shortlist."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patcher = patch("tools.lib.video_paths.VIDEOS_BASE", Path(self.tmp.name))
+        self.patcher.start()
+        self.qa = QAGatekeeper()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.tmp.cleanup()
+
+    def test_qa_research_no_evidence_fails(self):
+        """Shortlist item with no reasons triggers gate fail."""
+        ctx = RunContext(video_id="test-evidence", niche="earbuds")
+        ctx.paths.ensure_dirs()
+        shortlist_path = ctx.paths.root / "inputs" / "shortlist.json"
+        shortlist_path.write_text(json.dumps({
+            "shortlist": [
+                {"product_name": f"Product {i}", "reasons": ["good sound", "nice fit"],
+                 "sources": [{"url": "https://nytimes.com/wirecutter/test"}]}
+                for i in range(5)
+            ] + [
+                {"product_name": "No Evidence Product", "reasons": [],
+                 "sources": [{"url": "https://nytimes.com/wirecutter/test"}]},
+            ],
+        }))
+        passed, errors = self.qa.check_gate(ctx, Stage.RESEARCH)
+        self.assertFalse(passed)
+        self.assertTrue(any("no evidence claims" in e for e in errors))
+
+    def test_qa_research_with_evidence_passes(self):
+        """All items with reasons passes the evidence check."""
+        ctx = RunContext(video_id="test-evidence-ok", niche="earbuds")
+        ctx.paths.ensure_dirs()
+        shortlist_path = ctx.paths.root / "inputs" / "shortlist.json"
+        shortlist_path.write_text(json.dumps({
+            "shortlist": [
+                {"product_name": f"Product {i}", "reasons": ["good"],
+                 "sources": [{"url": "https://nytimes.com/wirecutter/test"}]}
+                for i in range(6)
+            ],
+        }))
+        passed, errors = self.qa.check_gate(ctx, Stage.RESEARCH)
+        self.assertTrue(passed, f"Expected pass but got errors: {errors}")
+
+
+class TestQAVerifySiteStripe(unittest.TestCase):
+    """QA gate checks SiteStripe short links for browser-verified products."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patcher = patch("tools.lib.video_paths.VIDEOS_BASE", Path(self.tmp.name))
+        self.patcher.start()
+        self.qa = QAGatekeeper()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.tmp.cleanup()
+
+    def test_qa_verify_missing_sitestripe_fails(self):
+        """Browser-verified product without short_url triggers error."""
+        ctx = RunContext(video_id="test-sitestripe", niche="earbuds")
+        ctx.paths.ensure_dirs()
+        verified_path = ctx.paths.root / "inputs" / "verified.json"
+        verified_path.write_text(json.dumps({
+            "products": [
+                {"product_name": f"Product {i}", "verification_method": "browser",
+                 "affiliate_short_url": f"https://amzn.to/{i}"}
+                for i in range(4)
+            ] + [
+                {"product_name": "Missing Link", "verification_method": "browser",
+                 "affiliate_short_url": ""},
+            ],
+        }))
+        passed, errors = self.qa.check_gate(ctx, Stage.VERIFY)
+        self.assertTrue(any("SiteStripe" in e for e in errors))
+
+    def test_qa_verify_paapi_no_sitestripe_ok(self):
+        """PA-API products skip SiteStripe check."""
+        ctx = RunContext(video_id="test-paapi", niche="earbuds")
+        ctx.paths.ensure_dirs()
+        verified_path = ctx.paths.root / "inputs" / "verified.json"
+        verified_path.write_text(json.dumps({
+            "products": [
+                {"product_name": f"Product {i}", "verification_method": "paapi",
+                 "affiliate_short_url": ""}
+                for i in range(5)
+            ],
+        }))
+        passed, errors = self.qa.check_gate(ctx, Stage.VERIFY)
+        # No SiteStripe error for PA-API products
+        sitestripe_errors = [e for e in errors if "SiteStripe" in e]
+        self.assertEqual(sitestripe_errors, [])
 
 
 class TestAllowedDomains(unittest.TestCase):
