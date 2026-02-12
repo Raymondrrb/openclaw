@@ -17,7 +17,7 @@ from pathlib import Path
 # Constants (shared with script_schema)
 # ---------------------------------------------------------------------------
 
-SCRIPT_WORD_MIN = 1300
+SCRIPT_WORD_MIN = 1150
 SCRIPT_WORD_MAX = 1800
 SPEAKING_WPM = 150
 
@@ -256,8 +256,8 @@ def generate_brief(
 
     # Tone
     lines.append("## Tone guidance")
-    lines.append("- Energetic but trustworthy. You're the friend who did the research.")
-    lines.append("- Confident, not salesy. State facts, don't hype.")
+    lines.append("- Calm, confident, practical, anti-hype. You're a trusted advisor, not a hype machine.")
+    lines.append("- State facts, don't sell. Let the evidence do the persuading.")
     lines.append("- Mix short punchy lines with longer explanations.")
     lines.append("- Attribute expert sources naturally when making strong claims.")
     lines.append("- Every product gets an honest downside. This builds trust.")
@@ -282,6 +282,12 @@ def generate_brief(
     lines.append("")
     lines.append("[HOOK] (100-150 words)")
     lines.append("  Open with problem or tension. NOT 'In today's video'.")
+    lines.append("")
+    niche_word = niche.split()[0] if niche.split() else niche
+    lines.append("[MISTAKE_SEGMENT] (60-90 words)")
+    lines.append(f"  \"The mistake 90% of buyers make when choosing {niche}...\"")
+    lines.append("  Reveal a common misconception or buying error. Use evidence to back it up.")
+    lines.append("  This positions you as the advisor who saves them from a bad purchase.")
     lines.append("")
     lines.append("[AVATAR_INTRO] (3-6 seconds)")
     lines.append("  Brief channel intro. 1-2 sentences max.")
@@ -321,6 +327,13 @@ def generate_brief(
     lines.append("- Direct comparison: \"Product X does [thing] better, but Product Y wins on [other thing].\"")
     lines.append("")
 
+    # No-Regret Recommendation
+    lines.append("[NO_REGRET_RECOMMENDATION] (30-50 words)")
+    lines.append("  Restate your #1 pick clearly: \"If you want just one recommendation")
+    lines.append("  and don't want to overthink it, go with [No-Regret Pick].\"")
+    lines.append("  Keep it decisive and confident.")
+    lines.append("")
+
     # Conclusion
     lines.append("[CONCLUSION]")
     lines.append("  - Recap: quick 1-line summary of each pick and who it's for")
@@ -344,6 +357,17 @@ def generate_brief(
     lines.append("- Don't cite every claim. Cite when the source adds credibility.")
     lines.append("- Never say \"studies show\" or \"experts agree\" without naming the source.")
     lines.append("- Never invent specs, measurements, or test results.")
+    lines.append("")
+
+    # Visual direction
+    lines.append("## Visual direction")
+    lines.append("- [HOOK] + [MISTAKE_SEGMENT]: B-roll / product shots. Build tension visually.")
+    lines.append("- [AVATAR_INTRO]: Ray avatar on screen (3-6 seconds max).")
+    lines.append("- [PRODUCT_5] through [PRODUCT_1]: Product B-roll, close-ups, comparison shots.")
+    lines.append("  Change visual every 3-6 seconds. Max 6-word text overlays. 2 benefits per segment.")
+    lines.append("- [RETENTION_RESET]: Quick visual change — different angle, split-screen, or graphic.")
+    lines.append("- [NO_REGRET_RECOMMENDATION]: Ray avatar (20-40s max) — direct-to-camera clarity moment.")
+    lines.append("- [CONCLUSION]: Product lineup shot, then CTA card.")
     lines.append("")
 
     # Words to avoid
@@ -400,6 +424,7 @@ def _parse_sections(text: str) -> dict[str, str]:
     """Parse [SECTION] markers into a dict of section_name -> content."""
     marker_map = {
         "[HOOK]": "hook",
+        "[MISTAKE_SEGMENT]": "mistake_segment",
         "[AVATAR_INTRO]": "avatar_intro",
         "[PRODUCT_5]": "product_5",
         "[PRODUCT_4]": "product_4",
@@ -407,6 +432,7 @@ def _parse_sections(text: str) -> dict[str, str]:
         "[RETENTION_RESET]": "retention_reset",
         "[PRODUCT_2]": "product_2",
         "[PRODUCT_1]": "product_1",
+        "[NO_REGRET_RECOMMENDATION]": "no_regret_recommendation",
         "[CONCLUSION]": "conclusion",
     }
     sections: dict[str, str] = {}
@@ -515,8 +541,10 @@ def review_script(
 
     # Section word counts
     expected_sections = [
-        "hook", "avatar_intro", "product_5", "product_4", "product_3",
-        "retention_reset", "product_2", "product_1", "conclusion",
+        "hook", "mistake_segment", "avatar_intro",
+        "product_5", "product_4", "product_3",
+        "retention_reset", "product_2", "product_1",
+        "no_regret_recommendation", "conclusion",
     ]
     for sec in expected_sections:
         if sec not in sections:
@@ -544,6 +572,18 @@ def review_script(
         result.issues.append(ReviewIssue("error", "retention_reset", f"Retention reset too short: {rr_wc} words (min 50)"))
     if rr_wc > 80:
         result.issues.append(ReviewIssue("warning", "retention_reset", f"Retention reset long: {rr_wc} words (target 50-80)"))
+
+    ms_wc = result.section_word_counts.get("mistake_segment", 0)
+    if "mistake_segment" in sections and ms_wc < 60:
+        result.issues.append(ReviewIssue("error", "mistake_segment", f"Mistake segment too short: {ms_wc} words (min 60)"))
+    if "mistake_segment" in sections and ms_wc > 90:
+        result.issues.append(ReviewIssue("warning", "mistake_segment", f"Mistake segment long: {ms_wc} words (target 60-90)"))
+
+    nr_wc = result.section_word_counts.get("no_regret_recommendation", 0)
+    if "no_regret_recommendation" in sections and nr_wc < 30:
+        result.issues.append(ReviewIssue("error", "no_regret_recommendation", f"No-regret recommendation too short: {nr_wc} words (min 30)"))
+    if "no_regret_recommendation" in sections and nr_wc > 50:
+        result.issues.append(ReviewIssue("warning", "no_regret_recommendation", f"No-regret recommendation long: {nr_wc} words (target 30-50)"))
 
     # Downside check per product
     downside_markers = (

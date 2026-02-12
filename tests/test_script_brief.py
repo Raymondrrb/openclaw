@@ -76,6 +76,11 @@ VALID_SCRIPT = """[HOOK]
 """ + " ".join(["word"] * 120) + """
 You spent hours reading reviews. Half are fake. Here's what the real experts say about wireless earbuds.
 
+[MISTAKE_SEGMENT]
+""" + " ".join(["word"] * 70) + """
+The mistake 90% of buyers make when choosing wireless earbuds is chasing the lowest price.
+Cheap earbuds break fast and sound terrible.
+
 [AVATAR_INTRO]
 I'm Ray, and I test products so you don't have to.
 
@@ -107,6 +112,10 @@ One drawback: battery life is only 5 hours.
 """ + " ".join(["word"] * 220) + """
 And number one. The expert consensus pick. Wirecutter and RTINGS both agree.
 The trade-off is the premium price tag.
+
+[NO_REGRET_RECOMMENDATION]
+""" + " ".join(["word"] * 35) + """
+If you want just one recommendation and don't want to overthink it go with Product 1.
 
 [CONCLUSION]
 Links to all five are in the description. Those are affiliate links, which means
@@ -140,7 +149,7 @@ class TestGenerateBrief(unittest.TestCase):
 
     def test_contains_word_count_target(self):
         brief = generate_brief("wireless earbuds", SAMPLE_PRODUCTS, {})
-        self.assertIn("1300", brief)
+        self.assertIn("1150", brief)
         self.assertIn("1800", brief)
 
     def test_contains_hook_suggestions(self):
@@ -178,7 +187,7 @@ class TestGenerateBrief(unittest.TestCase):
 
     def test_contains_tone_guidance(self):
         brief = generate_brief("wireless earbuds", SAMPLE_PRODUCTS, {})
-        self.assertIn("Energetic but trustworthy", brief)
+        self.assertIn("Calm, confident, practical, anti-hype", brief)
 
     def test_contains_signature_moment(self):
         brief = generate_brief("wireless earbuds", SAMPLE_PRODUCTS, {})
@@ -467,6 +476,74 @@ class TestPipelineScriptReview(unittest.TestCase):
         args = argparse.Namespace(video_id="test-review-bad")
         result = cmd_script_review(args)
         self.assertEqual(result, 2)  # ACTION_REQUIRED (errors found)
+
+
+# ---------------------------------------------------------------------------
+# Tests: identity segments (Commit 7)
+# ---------------------------------------------------------------------------
+
+
+class TestBriefIdentitySegments(unittest.TestCase):
+    """Test Rayviews identity segments in generated brief."""
+
+    def test_brief_has_mistake_segment(self):
+        brief = generate_brief("wireless earbuds", SAMPLE_PRODUCTS, {})
+        self.assertIn("[MISTAKE_SEGMENT]", brief)
+
+    def test_brief_has_no_regret_recommendation(self):
+        brief = generate_brief("wireless earbuds", SAMPLE_PRODUCTS, {})
+        self.assertIn("[NO_REGRET_RECOMMENDATION]", brief)
+
+    def test_brief_has_visual_direction(self):
+        brief = generate_brief("wireless earbuds", SAMPLE_PRODUCTS, {})
+        self.assertIn("## Visual direction", brief)
+
+    def test_brief_has_buy_avoid_per_product(self):
+        products = {
+            "products": [
+                {
+                    "rank": 1,
+                    "name": "Test Product",
+                    "buy_this_if": "You want the best overall",
+                    "avoid_this_if": "You're on a tight budget",
+                    "evidence": [],
+                }
+            ],
+            "sources_used": ["Wirecutter"],
+        }
+        brief = generate_brief("earbuds", products, {})
+        self.assertIn("Buy this if:", brief)
+        self.assertIn("Avoid this if:", brief)
+
+    def test_brief_tone_calm(self):
+        brief = generate_brief("wireless earbuds", SAMPLE_PRODUCTS, {})
+        self.assertIn("Calm, confident, practical", brief)
+        self.assertNotIn("Energetic but trustworthy", brief)
+
+    def test_review_checks_missing_mistake_segment(self):
+        """Review flags missing [MISTAKE_SEGMENT]."""
+        script_no_mistake = VALID_SCRIPT.replace("[MISTAKE_SEGMENT]", "").replace(
+            " ".join(["word"] * 70) + "\n"
+            "The mistake 90% of buyers make when choosing wireless earbuds is chasing the lowest price.\n"
+            "Cheap earbuds break fast and sound terrible.\n", ""
+        )
+        result = review_script(script_no_mistake, SAMPLE_PRODUCTS)
+        self.assertTrue(any(
+            "MISTAKE_SEGMENT" in i.message.upper()
+            for i in result.issues
+        ))
+
+    def test_review_checks_missing_no_regret(self):
+        """Review flags missing [NO_REGRET_RECOMMENDATION]."""
+        script_no_nr = VALID_SCRIPT.replace("[NO_REGRET_RECOMMENDATION]", "").replace(
+            " ".join(["word"] * 35) + "\n"
+            "If you want just one recommendation and don't want to overthink it go with Product 1.\n", ""
+        )
+        result = review_script(script_no_nr, SAMPLE_PRODUCTS)
+        self.assertTrue(any(
+            "NO_REGRET_RECOMMENDATION" in i.message.upper()
+            for i in result.issues
+        ))
 
 
 if __name__ == "__main__":
