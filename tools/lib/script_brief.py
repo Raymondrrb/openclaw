@@ -174,6 +174,14 @@ def _build_product_section(p: dict) -> str:
     else:
         lines.append("  - (no benefits extracted — check evidence below)")
 
+    # Buy / Avoid guidance
+    buy_this_if = p.get("buy_this_if", "")
+    avoid_this_if = p.get("avoid_this_if", "")
+    if buy_this_if:
+        lines.append(f"Buy this if: {buy_this_if}")
+    if avoid_this_if:
+        lines.append(f"Avoid this if: {avoid_this_if}")
+
     lines.append("")
     if downside:
         lines.append(f"Honest downside: {downside}")

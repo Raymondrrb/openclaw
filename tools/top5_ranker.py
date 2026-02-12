@@ -36,13 +36,13 @@ WEIGHT_CONFIDENCE = 2.0     # Amazon ASIN match confidence
 WEIGHT_PRICE = 1.0          # prefer mid-to-premium range
 WEIGHT_REVIEWS = 0.5        # Amazon review count as tiebreaker
 
-# Category labels for diversity
+# Buyer-centric labels (Rayviews ranking framework)
 CATEGORY_SLOTS = [
-    "best overall",
-    "best value",
-    "best premium",
-    "best for specific use",
-    "best budget",
+    "No-Regret Pick",
+    "Best Value",
+    "Best Upgrade",
+    "Best for Specific Scenario",
+    "Best Alternative",
 ]
 
 
@@ -114,39 +114,52 @@ def _reviews_score(product: dict) -> float:
         return 0.0
 
 
-def _category_label(product: dict) -> str:
-    """Assign a category label based on claims and price."""
+def _category_label(product: dict, rank: int = 0) -> str:
+    """Assign a buyer-centric label based on claims, price, and rank position.
+
+    Labels follow the Rayviews ranking framework:
+    #1 No-Regret Pick, #2 Best Value, #3 Best Upgrade,
+    #4 Best for Specific Scenario, #5 Best Alternative.
+    """
     claims = product.get("key_claims", [])
     claims_lower = " ".join(claims).lower()
 
-    if "best overall" in claims_lower or "top pick" in claims_lower:
-        return "best overall"
-    if "best budget" in claims_lower or "best cheap" in claims_lower or "best affordable" in claims_lower:
-        return "best budget"
-    if "best premium" in claims_lower or "best splurge" in claims_lower or "upgrade pick" in claims_lower:
-        return "best premium"
-    if "best value" in claims_lower:
-        return "best value"
-    # Check price for implicit categorization
+    # Rank-based defaults (most reliable signal)
+    if rank == 1:
+        return "No-Regret Pick"
+
+    # Claims-based assignment
+    if "best value" in claims_lower or "best bang for the buck" in claims_lower:
+        return "Best Value"
+    if "upgrade pick" in claims_lower or "best premium" in claims_lower or "best splurge" in claims_lower:
+        return "Best Upgrade"
+
+    # Price-based fallback
     price_str = product.get("amazon_price", "")
     try:
         import re
         m = re.search(r'[\d,]+\.?\d*', price_str.replace(",", ""))
         if m:
             price = float(m.group())
-            if price < 40:
-                return "best budget"
-            elif price > 200:
-                return "best premium"
+            if price > 250:
+                return "Best Upgrade"
     except Exception:
         pass
 
-    # Check for specific use-case claims
-    for keyword in ("travel", "calls", "gaming", "running", "working out", "music", "small rooms", "large rooms"):
+    # Specific use-case claims
+    for keyword in ("travel", "calls", "gaming", "running", "working out",
+                     "music", "small rooms", "large rooms", "commute", "office"):
         if keyword in claims_lower:
-            return "best for specific use"
+            return "Best for Specific Scenario"
 
-    return "best for specific use"
+    # Default based on rank position
+    rank_defaults = {
+        2: "Best Value",
+        3: "Best Upgrade",
+        4: "Best for Specific Scenario",
+        5: "Best Alternative",
+    }
+    return rank_defaults.get(rank, "Best Alternative")
 
 
 def score_product(product: dict) -> float:
@@ -199,45 +212,31 @@ def select_top5(
         scored = sorted(verified, key=lambda p: -score_product(p))
         for i, p in enumerate(scored):
             p["rank"] = i + 1
-            p["category_label"] = _category_label(p)
+            p["category_label"] = _category_label(p, rank=i + 1)
             p["total_score"] = round(score_product(p), 1)
         return scored
 
     # Score all products
     for p in verified:
         p["total_score"] = round(score_product(p), 1)
-        p["category_label"] = _category_label(p)
 
     scored = sorted(verified, key=lambda p: -p["total_score"])
 
-    # Greedy selection with diversity
-    selected: list[dict] = []
-    used_categories: set[str] = set()
-    remaining = list(scored)
+    # Select top 5 by score
+    selected = scored[:5]
 
-    # Pass 1: pick the best product for each category slot
-    for slot in CATEGORY_SLOTS:
-        if len(selected) >= 5:
-            break
-        for p in remaining:
-            if p["category_label"] == slot and p not in selected:
-                selected.append(p)
-                used_categories.add(slot)
-                break
-
-    # Pass 2: fill remaining slots with highest-scored products
-    for p in scored:
-        if len(selected) >= 5:
-            break
-        if p not in selected:
-            selected.append(p)
-
-    # Rank: #1 = best overall (highest score), #5 = entry-level
+    # Rank: #1 = highest score, #5 = most accessible
     selected.sort(key=lambda p: -p["total_score"])
 
-    # Assign ranks: 1 = best, 5 = most accessible
-    for i, p in enumerate(selected[:5]):
+    # Assign ranks and buyer-centric labels
+    for i, p in enumerate(selected):
         p["rank"] = i + 1
+        p["category_label"] = _category_label(p, rank=i + 1)
+
+    # Brand diversity warning (informational, not hard fail)
+    warning = _check_brand_diversity(selected)
+    if warning:
+        print(f"  WARNING: {warning}", file=sys.stderr)
 
     return selected[:5]
 
@@ -311,6 +310,61 @@ def _extract_downside(product: dict) -> str:
     return ""
 
 
+def _build_buy_avoid(product: dict, label: str) -> tuple[str, str]:
+    """Generate 'buy_this_if' / 'avoid_this_if' from evidence and positioning."""
+    benefits = _extract_benefits(product)
+    downside = _extract_downside(product)
+    claims_lower = " ".join(product.get("key_claims", [])).lower()
+
+    # Build "buy this if" from top benefit + positioning
+    buy_parts = []
+    if label == "No-Regret Pick":
+        buy_parts.append("you want the safest, most recommended option")
+    elif label == "Best Value":
+        buy_parts.append("you want the best performance per dollar")
+    elif label == "Best Upgrade":
+        buy_parts.append("you're willing to pay more for premium features")
+    elif label == "Best for Specific Scenario":
+        # Try to extract the specific scenario from claims
+        for kw in ("travel", "gaming", "office", "commute", "small rooms",
+                    "large rooms", "running", "calls"):
+            if kw in claims_lower:
+                buy_parts.append(f"your primary use is {kw}")
+                break
+        else:
+            buy_parts.append("you have a specific use case in mind")
+    else:
+        buy_parts.append("the top picks don't fit your needs")
+
+    if benefits:
+        buy_parts.append(benefits[0].lower().rstrip("."))
+
+    buy_this_if = " and ".join(buy_parts[:2])
+
+    # Build "avoid this if" from downside
+    if downside:
+        avoid_this_if = downside.lower().rstrip(".")
+    elif label == "Best Upgrade":
+        avoid_this_if = "you're on a tight budget"
+    elif label == "Best Value":
+        avoid_this_if = "you need premium features"
+    else:
+        avoid_this_if = "check the downside section for trade-offs"
+
+    return buy_this_if, avoid_this_if
+
+
+def _check_brand_diversity(top5: list[dict]) -> str | None:
+    """Warn if 3+ of 5 products share a brand. Not a hard fail."""
+    from collections import Counter
+    brands = [p.get("brand", "").lower().strip() for p in top5 if p.get("brand")]
+    counts = Counter(brands)
+    for brand, count in counts.most_common(1):
+        if count >= 3:
+            return f"Brand concentration warning: {brand} appears {count}/5 times"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Output: products.json
 # ---------------------------------------------------------------------------
@@ -331,6 +385,9 @@ def write_products_json(
         benefits = _extract_benefits(p)
         # Extract downside from evidence (if reviewers mentioned one)
         downside = _extract_downside(p)
+        # Build buy/avoid guidance
+        label = p.get("category_label", "")
+        buy_this_if, avoid_this_if = _build_buy_avoid(p, label)
 
         products_out.append({
             "rank": p.get("rank", 0),
@@ -347,6 +404,8 @@ def write_products_json(
             "benefits": benefits,
             "target_audience": "",
             "downside": downside,
+            "buy_this_if": buy_this_if,
+            "avoid_this_if": avoid_this_if,
             "evidence": p.get("evidence", []),
             "key_claims": p.get("key_claims", []),
         })

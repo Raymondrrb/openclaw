@@ -514,6 +514,80 @@ class TestPipelineDayCluster(unittest.TestCase):
         self.assertFalse(paths.cluster_txt.is_file())
 
 
+class TestTop5BuyerLabels(unittest.TestCase):
+    """Tests for buyer-centric labels in top5_ranker."""
+
+    def _make_products(self, n=7):
+        """Make verified product dicts for testing."""
+        return [
+            {
+                "product_name": f"Product {i}",
+                "brand": f"Brand{i}",
+                "asin": f"B00{i}",
+                "amazon_price": f"${150 + i * 30}",
+                "amazon_rating": "4.5",
+                "amazon_reviews": "1000",
+                "evidence": [{"source": "Wirecutter", "reasons": [f"Good quality {i}"]}],
+                "key_claims": [f"Rated best for feature {i}"],
+                "match_confidence": "high",
+            }
+            for i in range(n)
+        ]
+
+    def test_new_category_labels(self):
+        """Verify labels are the 5 new buyer-centric names."""
+        from tools.top5_ranker import CATEGORY_SLOTS
+        expected = [
+            "No-Regret Pick", "Best Value", "Best Upgrade",
+            "Best for Specific Scenario", "Best Alternative",
+        ]
+        self.assertEqual(CATEGORY_SLOTS, expected)
+
+    def test_no_regret_pick_is_rank_1(self):
+        """Highest-scored product gets 'No-Regret Pick'."""
+        from tools.top5_ranker import select_top5
+        products = self._make_products(7)
+        top5 = select_top5(products)
+        rank1 = [p for p in top5 if p["rank"] == 1][0]
+        self.assertEqual(rank1["category_label"], "No-Regret Pick")
+
+    def test_buy_avoid_present(self):
+        """Every product in output has buy_this_if and avoid_this_if."""
+        from tools.top5_ranker import select_top5, write_products_json
+        products = self._make_products(7)
+        top5 = select_top5(products)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "products.json"
+            write_products_json(top5, "test niche", out, video_id="test")
+            data = json.loads(out.read_text())
+            for p in data["products"]:
+                self.assertIn("buy_this_if", p, f"Product rank {p['rank']} missing buy_this_if")
+                self.assertIn("avoid_this_if", p, f"Product rank {p['rank']} missing avoid_this_if")
+                self.assertTrue(len(p["buy_this_if"]) > 0, f"Product rank {p['rank']} buy_this_if is empty")
+
+    def test_brand_diversity_warning(self):
+        """3+ same brand triggers warning (captured via stderr)."""
+        from tools.top5_ranker import _check_brand_diversity
+        top5 = [
+            {"brand": "Sony"}, {"brand": "Sony"}, {"brand": "Sony"},
+            {"brand": "Bose"}, {"brand": "JBL"},
+        ]
+        warning = _check_brand_diversity(top5)
+        self.assertIsNotNone(warning)
+        self.assertIn("sony", warning.lower())
+
+    def test_brand_diversity_no_warning(self):
+        """All different brands: no warning."""
+        from tools.top5_ranker import _check_brand_diversity
+        top5 = [
+            {"brand": "Sony"}, {"brand": "Bose"}, {"brand": "JBL"},
+            {"brand": "Sennheiser"}, {"brand": "Audio-Technica"},
+        ]
+        warning = _check_brand_diversity(top5)
+        self.assertIsNone(warning)
+
+
 class TestContractFromMicroNiche(unittest.TestCase):
     """Test generate_contract_from_micro_niche."""
 
