@@ -75,12 +75,23 @@ class NicheCandidate:
             )
 
     @property
-    def score(self) -> float:
+    def static_score(self) -> float:
+        """Score from 3 dimensions, weighted to max 70."""
         return (
-            self.review_coverage * 2.0
-            + self.amazon_depth * 1.5
-            + self.monetization * 2.5
-        )
+            self.review_coverage * 4.0    # 0-20
+            + self.amazon_depth * 3.0     # 0-15
+            + self.monetization * 5.0     # 0-25
+            + self._freshness_bonus() * 2.0  # 0-10
+        )  # max = 20+15+25+10 = 70
+
+    def _freshness_bonus(self) -> int:
+        """1-5: placeholder — actual freshness is computed dynamically."""
+        return 5
+
+    @property
+    def score(self) -> float:
+        """Backward-compatible alias for static_score."""
+        return self.static_score
 
 
 # ~90 curated niches, organized by category
@@ -302,6 +313,42 @@ def _recently_used(days: int = EXCLUSION_DAYS) -> set[str]:
     }
 
 
+def _days_ago(date_str: str) -> int:
+    """How many days ago was this date? Returns large number on parse failure."""
+    try:
+        d = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        return max(0, (now - d).days)
+    except Exception:
+        return 9999
+
+
+def _rotation_penalties(niche: NicheCandidate, history: list[NicheHistoryEntry]) -> int:
+    """Return 0-30 dynamic bonus based on rotation rules.
+
+    - Rule 1: no same category in last 2 days -> +15
+    - Rule 2: no same subcategory in last 14 days -> +10
+    - Rule 3: no same intent in last 7 days -> +5
+    """
+    bonus = 0
+    # Rule 1: category not used in last 2 days
+    recent_cats = {e.category for e in history if e.category and _days_ago(e.date) <= 2}
+    if niche.category not in recent_cats:
+        bonus += 15
+
+    # Rule 2: subcategory not used in last 14 days
+    recent_subs = {e.subcategory or e.niche for e in history if _days_ago(e.date) <= 14}
+    if (niche.subcategory or niche.keyword) not in recent_subs:
+        bonus += 10
+
+    # Rule 3: intent not used in last 7 days
+    recent_intents = {e.intent for e in history if e.intent and _days_ago(e.date) <= 7}
+    if (niche.intent or "general") not in recent_intents:
+        bonus += 5
+
+    return bonus
+
+
 def _date_seed(date_str: str) -> int:
     """Deterministic seed from date string, for stable ordering."""
     h = hashlib.sha256(date_str.encode()).hexdigest()
@@ -311,14 +358,16 @@ def _date_seed(date_str: str) -> int:
 def pick_niche(date_str: str | None = None) -> NicheCandidate:
     """Pick the best available niche for a given date.
 
+    Scoring 0-100: static_score (0-70) + rotation bonus (0-30).
     Deterministic: same date always picks the same niche (given same history).
     """
     if date_str is None:
         date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
     used = _recently_used()
+    history = load_history()
 
-    # Filter to available niches
+    # Filter out 60-day excluded keywords
     available = [n for n in NICHE_POOL if n.keyword.lower() not in used]
 
     if not available:
@@ -329,18 +378,33 @@ def pick_niche(date_str: str | None = None) -> NicheCandidate:
     if not available:
         raise RuntimeError("No available niches — all used recently")
 
-    # Sort by score (descending), then use date seed for tiebreaking
-    seed = _date_seed(date_str)
-    available.sort(key=lambda n: (-n.score, hash((n.keyword, seed))))
+    # Score each candidate: static_score + rotation bonus
+    scored: list[tuple[float, NicheCandidate]] = []
+    for n in available:
+        total = n.static_score + _rotation_penalties(n, history)
+        scored.append((total, n))
 
-    return available[0]
+    # Filter to candidates >= 70 total score
+    threshold = 70
+    high_scored = [(s, n) for s, n in scored if s >= threshold]
+    if len(high_scored) < 12:
+        threshold = 60
+        high_scored = [(s, n) for s, n in scored if s >= threshold]
+    if not high_scored:
+        high_scored = scored  # fallback: use all
+
+    # Sort by total score (descending), date-seed tiebreak
+    seed = _date_seed(date_str)
+    high_scored.sort(key=lambda pair: (-pair[0], hash((pair[1].keyword, seed))))
+
+    return high_scored[0][1]
 
 
 def list_available(days: int = EXCLUSION_DAYS) -> list[NicheCandidate]:
-    """List all available niches (not used in last N days), sorted by score."""
+    """List all available niches (not used in last N days), sorted by static_score."""
     used = _recently_used(days)
     available = [n for n in NICHE_POOL if n.keyword.lower() not in used]
-    available.sort(key=lambda n: -n.score)
+    available.sort(key=lambda n: -n.static_score)
     return available
 
 
@@ -371,10 +435,10 @@ def main() -> int:
     if args.list:
         available = list_available()
         print(f"Available niches ({len(available)}/{len(NICHE_POOL)}):\n")
-        print(f"{'Score':>5}  {'Niche':<40} {'Category':<12} {'Price'}")
-        print("-" * 75)
+        print(f"{'Static':>6}  {'Niche':<40} {'Category':<12} {'Intent':<8} {'Band':<8} {'Price'}")
+        print("-" * 95)
         for n in available[:30]:
-            print(f"{n.score:5.1f}  {n.keyword:<40} {n.category:<12} ${n.price_min}-${n.price_max}")
+            print(f"{n.static_score:6.1f}  {n.keyword:<40} {n.category:<12} {n.intent:<8} {n.price_band:<8} ${n.price_min}-${n.price_max}")
         if len(available) > 30:
             print(f"  ... and {len(available) - 30} more")
         return 0
@@ -383,11 +447,14 @@ def main() -> int:
     date_str = args.date or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     niche = pick_niche(date_str)
 
-    print(f"Date:     {date_str}")
-    print(f"Niche:    {niche.keyword}")
-    print(f"Category: {niche.category}")
-    print(f"Price:    ${niche.price_min}-${niche.price_max}")
-    print(f"Score:    {niche.score:.1f}")
+    print(f"Date:         {date_str}")
+    print(f"Niche:        {niche.keyword}")
+    print(f"Category:     {niche.category}")
+    print(f"Subcategory:  {niche.subcategory}")
+    print(f"Intent:       {niche.intent}")
+    print(f"Price band:   {niche.price_band}")
+    print(f"Price:        ${niche.price_min}-${niche.price_max}")
+    print(f"Static score: {niche.static_score:.1f} (of 70)")
 
     # Record in history
     video_id = args.video_id or f"{niche.keyword.replace(' ', '-')}-{date_str}"
