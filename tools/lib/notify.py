@@ -76,13 +76,14 @@ def _format_message(
     label = _type_label(msg_type)
 
     # Header line
+    prefix = "[Rayviews]"
     if milestone:
-        header = f"{emoji} {video_id} — {label} / {milestone}"
+        header = f"{prefix} {emoji} {video_id} — {label} / {milestone}"
     else:
-        header = f"{emoji} {video_id} — {label}"
+        header = f"{prefix} {emoji} {video_id} — {label}"
 
     if stage:
-        header = f"{emoji} {video_id} — {stage.title()} / {milestone or label}"
+        header = f"{prefix} {emoji} {video_id} — {stage.title()} / {milestone or label}"
 
     lines = [header]
 
