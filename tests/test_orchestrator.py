@@ -774,5 +774,115 @@ class TestAllowedDomains(unittest.TestCase):
         self.assertIn("pcmag.com", ALLOWED_RESEARCH_DOMAINS)
 
 
+class TestPriceFloor(unittest.TestCase):
+    """Test price floor enforcement in QA gates."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patcher = patch("tools.lib.video_paths.VIDEOS_BASE", Path(self.tmp.name))
+        self.patcher.start()
+        self.qa = QAGatekeeper()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.tmp.cleanup()
+
+    def _make_verified(self, ctx, products):
+        """Write verified.json with the given product list."""
+        verified_path = ctx.paths.root / "inputs" / "verified.json"
+        verified_path.write_text(json.dumps({"products": products}))
+
+    def _make_products(self, ctx, products):
+        """Write products.json with the given product list."""
+        ctx.paths.products_json.write_text(json.dumps({"products": products}))
+
+    def _write_micro_niche(self, ctx, price_min=120):
+        """Write micro_niche.json with given price_min."""
+        ctx.paths.micro_niche_json.write_text(json.dumps({
+            "subcategory": "test",
+            "buyer_pain": "test",
+            "intent_phrase": "test",
+            "price_min": price_min,
+            "price_max": 300,
+        }))
+
+    def test_price_floor_verify_hard_fail(self):
+        """Product at $89 with price_min=120 triggers error."""
+        ctx = RunContext(video_id="test-pf-fail", niche="test")
+        ctx.paths.ensure_dirs()
+        self._write_micro_niche(ctx, price_min=120)
+        self._make_verified(ctx, [
+            {"product_name": f"Product {i}", "brand": "B", "amazon_price": "$149.99",
+             "verification_method": "api", "affiliate_short_url": ""}
+            for i in range(4)
+        ] + [
+            {"product_name": "Cheap Product", "brand": "B", "amazon_price": "$89.00",
+             "verification_method": "api", "affiliate_short_url": ""},
+        ])
+        passed, errors = self.qa.check_gate(ctx, Stage.VERIFY)
+        self.assertFalse(passed)
+        self.assertTrue(any("Price floor" in e for e in errors))
+
+    def test_price_floor_verify_pass(self):
+        """Product at $149 with price_min=120 passes."""
+        ctx = RunContext(video_id="test-pf-pass", niche="test")
+        ctx.paths.ensure_dirs()
+        self._write_micro_niche(ctx, price_min=120)
+        self._make_verified(ctx, [
+            {"product_name": f"Product {i}", "brand": "B", "amazon_price": "$149.99",
+             "verification_method": "api", "affiliate_short_url": ""}
+            for i in range(5)
+        ])
+        passed, errors = self.qa.check_gate(ctx, Stage.VERIFY)
+        self.assertTrue(passed, f"Unexpected errors: {errors}")
+
+    def test_price_floor_respects_micro_niche(self):
+        """Uses micro_niche.json price_min if present (lower floor)."""
+        ctx = RunContext(video_id="test-pf-mn", niche="test")
+        ctx.paths.ensure_dirs()
+        self._write_micro_niche(ctx, price_min=50)  # lower floor
+        self._make_verified(ctx, [
+            {"product_name": f"Product {i}", "brand": "B", "amazon_price": "$79.99",
+             "verification_method": "api", "affiliate_short_url": ""}
+            for i in range(5)
+        ])
+        passed, errors = self.qa.check_gate(ctx, Stage.VERIFY)
+        # $79.99 >= $50, so should pass
+        self.assertTrue(passed, f"Unexpected errors: {errors}")
+
+    def test_price_floor_rank_hard_fail(self):
+        """Price floor also enforced at rank stage."""
+        ctx = RunContext(video_id="test-pf-rank", niche="test")
+        ctx.paths.ensure_dirs()
+        self._write_micro_niche(ctx, price_min=120)
+        self._make_products(ctx, [
+            {"rank": i, "name": f"Product {i}", "brand": "B", "price": "$149.99",
+             "asin": f"B00{i}", "affiliate_url": f"https://amzn.to/{i}"}
+            for i in range(1, 5)
+        ] + [
+            {"rank": 5, "name": "Cheap One", "brand": "B", "price": "$49.99",
+             "asin": "B005", "affiliate_url": "https://amzn.to/5"},
+        ])
+        passed, errors = self.qa.check_gate(ctx, Stage.RANK)
+        self.assertFalse(passed)
+        self.assertTrue(any("Price floor" in e for e in errors))
+
+    def test_price_floor_default_when_no_micro_niche(self):
+        """Without micro_niche.json, uses DEFAULT_PRICE_FLOOR."""
+        from tools.agent_orchestrator import DEFAULT_PRICE_FLOOR
+        ctx = RunContext(video_id="test-pf-default", niche="test")
+        ctx.paths.ensure_dirs()
+        # No micro_niche.json written
+        self._make_verified(ctx, [
+            {"product_name": f"Product {i}", "brand": "B", "amazon_price": "$99.00",
+             "verification_method": "api", "affiliate_short_url": ""}
+            for i in range(5)
+        ])
+        passed, errors = self.qa.check_gate(ctx, Stage.VERIFY)
+        # $99 < $120 default, should fail
+        self.assertFalse(passed)
+        self.assertTrue(any("Price floor" in e for e in errors))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -178,6 +178,22 @@ class Agent(Protocol):
 
 ALLOWED_RESEARCH_DOMAINS = frozenset({"nytimes.com", "rtings.com", "pcmag.com"})
 
+DEFAULT_PRICE_FLOOR = 120
+
+
+def _extract_price(price_str: str) -> float | None:
+    """Extract numeric price from a string like '$149.99' or '149'. Returns None if unparseable."""
+    if not price_str:
+        return None
+    import re
+    m = re.search(r'[\d,]+\.?\d*', str(price_str).replace(",", ""))
+    if not m:
+        return None
+    try:
+        return float(m.group())
+    except ValueError:
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -873,6 +889,17 @@ class QAGatekeeper:
             errors.append("niche.txt not written")
         return errors
 
+    def _get_price_floor(self, ctx: RunContext) -> int:
+        """Get the price floor from micro_niche.json, or default."""
+        mn_path = ctx.paths.micro_niche_json
+        if mn_path.is_file():
+            try:
+                data = json.loads(mn_path.read_text(encoding="utf-8"))
+                return int(data.get("price_min", DEFAULT_PRICE_FLOOR))
+            except Exception:
+                pass
+        return DEFAULT_PRICE_FLOOR
+
     def _check_research(self, ctx: RunContext) -> list[str]:
         errors = []
         shortlist_path = ctx.paths.root / "inputs" / "shortlist.json"
@@ -953,6 +980,17 @@ class QAGatekeeper:
                 if not ok:
                     errors.append(f"Subcategory drift in verified: {p.get('product_name', '?')} -- {reason}")
 
+        # Price floor — HARD FAIL if product is below micro-niche price_min
+        price_min = self._get_price_floor(ctx)
+        if price_min > 0:
+            for p in products:
+                price = _extract_price(p.get("amazon_price", ""))
+                if price is not None and price < price_min:
+                    errors.append(
+                        f"Price floor violation: '{p.get('product_name', '?')}' "
+                        f"at ${price:.0f} is below ${price_min} minimum"
+                    )
+
         return errors
 
     def _check_rank(self, ctx: RunContext) -> list[str]:
@@ -979,6 +1017,17 @@ class QAGatekeeper:
                 ok, reason = passes_gate(p.get("name", ""), p.get("brand", ""), contract)
                 if not ok:
                     errors.append(f"Subcategory drift in Top 5: {p.get('name', '?')} -- {reason}")
+
+        # Price floor — HARD FAIL if product is below micro-niche price_min
+        price_min = self._get_price_floor(ctx)
+        if price_min > 0:
+            for p in products:
+                price = _extract_price(p.get("price", ""))
+                if price is not None and price < price_min:
+                    errors.append(
+                        f"Price floor violation: '{p.get('name', '?')}' "
+                        f"at ${price:.0f} is below ${price_min} minimum"
+                    )
 
         return errors
 
