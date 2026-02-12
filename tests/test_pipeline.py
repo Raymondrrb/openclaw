@@ -416,5 +416,146 @@ def _make_args(**kwargs):
     return argparse.Namespace(**kwargs)
 
 
+class TestPipelineDayCluster(unittest.TestCase):
+    """Tests for cmd_day cluster integration."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.videos_base = Path(self.tmp.name)
+        self.data_dir = Path(self.tmp.name) / "data"
+        self.data_dir.mkdir()
+        self.patchers = [
+            patch("tools.lib.video_paths.VIDEOS_BASE", self.videos_base),
+            patch("tools.lib.pipeline_status.VIDEOS_BASE", self.videos_base),
+            patch("tools.lib.pipeline_status._cache", {}),
+            patch("tools.lib.notify.send_telegram", return_value=False),
+            patch("tools.cluster_manager.DATA_DIR", self.data_dir),
+            patch("tools.cluster_manager.CLUSTERS_PATH", self.data_dir / "clusters.json"),
+            patch("tools.cluster_manager.CLUSTER_HISTORY_PATH", self.data_dir / "cluster_history.json"),
+        ]
+        for p in self.patchers:
+            p.start()
+
+        # Write minimal clusters.json
+        clusters = [
+            {
+                "name": "Test Cluster",
+                "slug": "test_cluster",
+                "micro_niches": [
+                    {
+                        "subcategory": f"test niche {i}",
+                        "buyer_pain": f"test pain {i}",
+                        "intent_phrase": f"best test niche {i}",
+                        "price_min": 120,
+                        "price_max": 300,
+                        "must_have_features": ["feature_a"],
+                        "forbidden_variants": ["bad_variant"],
+                    }
+                    for i in range(5)
+                ],
+            },
+        ]
+        (self.data_dir / "clusters.json").write_text(json.dumps(clusters), encoding="utf-8")
+        (self.data_dir / "cluster_history.json").write_text("[]", encoding="utf-8")
+
+    def tearDown(self):
+        for p in self.patchers:
+            p.stop()
+        self.tmp.cleanup()
+
+    def test_day_writes_cluster_txt(self):
+        """cmd_day creates cluster.txt when using cluster selection."""
+        from tools.pipeline import cmd_day
+
+        # Mock research + script-brief to avoid actual work
+        with patch("tools.pipeline.cmd_research", return_value=0), \
+             patch("tools.pipeline.cmd_script_brief", return_value=0):
+            args = _make_args(video_id="test-cluster", niche="", cluster="", force=False)
+            cmd_day(args)
+
+        paths = VideoPaths("test-cluster")
+        self.assertTrue(paths.cluster_txt.is_file(), "cluster.txt should be written")
+        content = paths.cluster_txt.read_text(encoding="utf-8").strip()
+        self.assertEqual(content, "test_cluster")
+
+    def test_day_writes_micro_niche_json(self):
+        """cmd_day creates micro_niche.json with correct schema."""
+        from tools.pipeline import cmd_day
+
+        with patch("tools.pipeline.cmd_research", return_value=0), \
+             patch("tools.pipeline.cmd_script_brief", return_value=0):
+            args = _make_args(video_id="test-mn", niche="", cluster="", force=False)
+            cmd_day(args)
+
+        paths = VideoPaths("test-mn")
+        self.assertTrue(paths.micro_niche_json.is_file(), "micro_niche.json should be written")
+        data = json.loads(paths.micro_niche_json.read_text(encoding="utf-8"))
+        self.assertIn("subcategory", data)
+        self.assertIn("buyer_pain", data)
+        self.assertIn("intent_phrase", data)
+        self.assertIn("price_min", data)
+        self.assertIn("price_max", data)
+        self.assertIn("cluster_slug", data)
+
+    def test_day_niche_override_skips_cluster(self):
+        """--niche flag bypasses cluster system."""
+        from tools.pipeline import cmd_day
+
+        with patch("tools.pipeline.cmd_research", return_value=0), \
+             patch("tools.pipeline.cmd_script_brief", return_value=0):
+            args = _make_args(
+                video_id="test-override", niche="wireless earbuds",
+                cluster="", force=False,
+            )
+            cmd_day(args)
+
+        paths = VideoPaths("test-override")
+        # cluster.txt should NOT be written when niche override is used
+        self.assertFalse(paths.cluster_txt.is_file())
+
+
+class TestContractFromMicroNiche(unittest.TestCase):
+    """Test generate_contract_from_micro_niche."""
+
+    def test_contract_from_micro_niche(self):
+        from tools.cluster_manager import MicroNicheDef
+        from tools.lib.subcategory_contract import generate_contract_from_micro_niche
+
+        micro = MicroNicheDef(
+            subcategory="ergonomic office chairs",
+            buyer_pain="back pain",
+            intent_phrase="best ergonomic chairs for back pain",
+            price_min=200,
+            price_max=500,
+            must_have_features=["lumbar support", "adjustable armrests"],
+            forbidden_variants=["gaming chair", "stool"],
+        )
+        contract = generate_contract_from_micro_niche(micro)
+        self.assertEqual(contract.niche_name, "ergonomic office chairs")
+        # forbidden_variants should be in disallowed
+        disallowed_lower = [k.lower() for k in contract.disallowed_keywords]
+        self.assertIn("gaming chair", disallowed_lower)
+        self.assertIn("stool", disallowed_lower)
+
+    def test_contract_augments_template(self):
+        """If a template matches, micro-niche data augments it."""
+        from tools.cluster_manager import MicroNicheDef
+        from tools.lib.subcategory_contract import generate_contract_from_micro_niche
+
+        micro = MicroNicheDef(
+            subcategory="air fryers",
+            buyer_pain="slow cooking",
+            intent_phrase="best air fryers",
+            must_have_features=["dishwasher-safe", "digital controls"],
+            forbidden_variants=["deep fryer", "toaster oven"],
+        )
+        contract = generate_contract_from_micro_niche(micro)
+        # Should find the air fryers template
+        self.assertIn("fryer", [k.lower() for k in contract.mandatory_keywords])
+        # And augment with our forbidden variant
+        disallowed_lower = [k.lower() for k in contract.disallowed_keywords]
+        self.assertIn("deep fryer", disallowed_lower)
+
+
 if __name__ == "__main__":
     unittest.main()

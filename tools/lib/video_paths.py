@@ -59,6 +59,10 @@ class VideoPaths:
         # amazon screens (PDP + SiteStripe screenshots)
         self.amazon_screens = self.root / "amazon_screens"
 
+        # cluster / micro-niche
+        self.micro_niche_json = self.root / "inputs" / "micro_niche.json"
+        self.cluster_txt = self.root / "inputs" / "cluster.txt"
+
         # subcategory contract
         self.subcategory_contract = self.root / "inputs" / "subcategory_contract.json"
 

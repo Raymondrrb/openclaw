@@ -1405,15 +1405,91 @@ def cmd_day(args) -> int:
     niche = getattr(args, "niche", "") or ""
     force = getattr(args, "force", False)
 
+    cluster_slug = getattr(args, "cluster", "") or ""
+
     # --- Step 1: Init if root doesn't exist ---
     if not paths.root.exists() or force:
         if not niche:
-            # Auto-pick niche
+            # Try cluster-based selection first
             today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-            from tools.niche_picker import pick_niche
-            candidate = pick_niche(today)
-            niche = candidate.keyword
-            print(f"Auto-picked niche: {niche} (static: {candidate.static_score:.0f}, intent: {candidate.intent})")
+            try:
+                from tools.cluster_manager import (
+                    current_week_monday,
+                    load_clusters,
+                    pick_cluster,
+                    pick_micro_niche,
+                    update_cluster_history,
+                )
+                if cluster_slug:
+                    # Force a specific cluster
+                    all_clusters = load_clusters()
+                    matched = [c for c in all_clusters if c.slug == cluster_slug]
+                    if not matched:
+                        print(f"Unknown cluster slug: {cluster_slug}")
+                        return EXIT_ERROR
+                    cluster = matched[0]
+                else:
+                    cluster = pick_cluster(today)
+
+                week_monday = current_week_monday(today)
+
+                # Get existing video_ids for this week
+                from tools.cluster_manager import load_cluster_history
+                history = load_cluster_history()
+                existing_ids = []
+                for entry in history:
+                    if entry.week_start == week_monday and entry.cluster_slug == cluster.slug:
+                        existing_ids = entry.video_ids
+                        break
+
+                micro = pick_micro_niche(cluster, existing_ids)
+                niche = micro.intent_phrase
+
+                # Write cluster.txt and micro_niche.json
+                paths.ensure_dirs()
+                paths.cluster_txt.write_text(
+                    f"{cluster.slug}\n", encoding="utf-8",
+                )
+
+                import json as _json
+                mn_data = {
+                    "subcategory": micro.subcategory,
+                    "buyer_pain": micro.buyer_pain,
+                    "intent_phrase": micro.intent_phrase,
+                    "price_min": micro.price_min,
+                    "price_max": micro.price_max,
+                    "must_have_features": micro.must_have_features,
+                    "forbidden_variants": micro.forbidden_variants,
+                    "cluster_slug": cluster.slug,
+                    "cluster_name": cluster.name,
+                }
+                paths.micro_niche_json.write_text(
+                    _json.dumps(mn_data, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
+                # Generate subcategory contract from micro-niche
+                from tools.lib.subcategory_contract import (
+                    generate_contract_from_micro_niche,
+                    write_contract,
+                )
+                contract = generate_contract_from_micro_niche(micro)
+                write_contract(contract, paths.subcategory_contract)
+
+                # Update cluster history
+                update_cluster_history(cluster.slug, week_monday, args.video_id)
+
+                print(f"Cluster: {cluster.name} ({cluster.slug})")
+                print(f"Micro-niche: {micro.subcategory}")
+                print(f"Intent: {micro.intent_phrase}")
+                print(f"Price: ${micro.price_min}-${micro.price_max}")
+
+            except Exception as exc:
+                print(f"Cluster selection failed ({exc}), falling back to niche picker")
+                from tools.niche_picker import pick_niche
+                candidate = pick_niche(today)
+                niche = candidate.keyword
+                print(f"Auto-picked niche: {niche} (static: {candidate.static_score:.0f}, intent: {candidate.intent})")
 
         init_args = argparse.Namespace(
             video_id=args.video_id, niche=niche, force=force,
@@ -1634,7 +1710,8 @@ def main() -> int:
     # day (daily pipeline)
     p_day = sub.add_parser("day", help="Daily pipeline: init -> research -> script-brief (stops for human)")
     p_day.add_argument("--video-id", required=True)
-    p_day.add_argument("--niche", default="", help="Product niche (auto-picked if empty)")
+    p_day.add_argument("--niche", default="", help="Product niche (auto-picked if empty, bypasses cluster)")
+    p_day.add_argument("--cluster", default="", help="Force a specific cluster slug")
     p_day.add_argument("--force", action="store_true", help="Force re-run all stages")
 
     # run (full orchestrator)

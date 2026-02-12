@@ -414,6 +414,71 @@ def _cross_category_disallowed(category: str) -> list[str]:
     return disallowed
 
 
+def generate_contract_from_micro_niche(micro_niche) -> SubcategoryContract:
+    """Generate a SubcategoryContract from a MicroNicheDef.
+
+    Maps must_have_features -> allowed/mandatory keywords,
+    forbidden_variants -> disallowed keywords.
+    Tries existing template first, augments with micro-niche data.
+    """
+    niche = micro_niche.subcategory
+    niche_lower = niche.lower().strip()
+
+    # Derive category from subcategory name (best effort)
+    category = _guess_category(niche_lower)
+
+    # Try template match first
+    base: SubcategoryContract | None = None
+    if niche_lower in _CONTRACT_TEMPLATES:
+        base = _from_template(niche, category, _CONTRACT_TEMPLATES[niche_lower])
+    else:
+        for template_key, tpl in _CONTRACT_TEMPLATES.items():
+            if template_key in niche_lower or niche_lower in template_key:
+                base = _from_template(niche, category, tpl)
+                break
+
+    if base is None:
+        base = _auto_generate(niche, niche_lower, category)
+
+    # Augment with micro-niche data
+    for feat in micro_niche.must_have_features:
+        feat_lower = feat.lower()
+        if feat_lower not in [k.lower() for k in base.allowed_keywords]:
+            base.allowed_keywords.append(feat_lower)
+
+    for variant in micro_niche.forbidden_variants:
+        variant_lower = variant.lower()
+        if variant_lower not in [k.lower() for k in base.disallowed_keywords]:
+            base.disallowed_keywords.append(variant_lower)
+        if variant_lower not in [k.lower() for k in base.disallowed_labels]:
+            base.disallowed_labels.append(variant_lower)
+        # Also add to acceptance_test name_must_not_contain
+        must_not = base.acceptance_test.get("name_must_not_contain", [])
+        if variant_lower not in [k.lower() for k in must_not]:
+            must_not.append(variant_lower)
+            base.acceptance_test["name_must_not_contain"] = must_not
+
+    return base
+
+
+def _guess_category(niche_lower: str) -> str:
+    """Best-effort category guess from niche name."""
+    category_hints = {
+        "audio": ["headphone", "earbuds", "speaker", "soundbar", "microphone"],
+        "computing": ["keyboard", "mouse", "monitor", "webcam", "ssd"],
+        "home": ["vacuum", "purifier", "humidifier", "lock", "thermostat", "camera"],
+        "kitchen": ["fryer", "espresso", "coffee", "blender", "mixer", "cookware",
+                     "processor"],
+        "office": ["chair", "desk", "lamp", "arm"],
+        "travel": ["luggage", "backpack", "charger", "pillow", "packing"],
+        "fitness": ["tracker", "watch", "shoe", "dumbbell"],
+    }
+    for cat, hints in category_hints.items():
+        if any(h in niche_lower for h in hints):
+            return cat
+    return "general"
+
+
 def generate_contract(niche: str, category: str) -> SubcategoryContract:
     """Generate a SubcategoryContract for a niche.
 
