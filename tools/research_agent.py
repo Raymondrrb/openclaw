@@ -601,6 +601,16 @@ def _validate_done(report: ResearchReport) -> list[str]:
     if len(report.shortlist) > 7:
         errors.append(f"Shortlist has {len(report.shortlist)} items (maximum 7)")
 
+    # Every shortlisted product must have at least 1 reason/claim
+    for agg in report.shortlist:
+        if not agg.all_reasons:
+            errors.append(f"Shortlist product '{agg.product_name}' has no evidence claims")
+
+    # At least 3 of shortlisted must have 2+ reasons
+    well_evidenced = sum(1 for agg in report.shortlist if len(agg.all_reasons) >= 2)
+    if report.shortlist and well_evidenced < min(3, len(report.shortlist)):
+        errors.append(f"Only {well_evidenced} shortlisted products have 2+ evidence claims (minimum 3)")
+
     return errors
 
 

@@ -293,6 +293,87 @@ class TestDownsideExtraction(unittest.TestCase):
         self.assertIn("expensive", result)
 
 
+class TestValidateDoneEvidence(unittest.TestCase):
+    """_validate_done() evidence quality checks."""
+
+    def _make_report(self, shortlist_reasons: list[list[str]]) -> "ResearchReport":
+        from tools.research_agent import (
+            ResearchReport, AggregatedProduct, ProductEvidence, SourceReport,
+        )
+        shortlist = []
+        for i, reasons in enumerate(shortlist_reasons):
+            agg = AggregatedProduct(
+                product_name=f"Product {i}",
+                brand=f"Brand{i}",
+                evidence=[ProductEvidence(
+                    product_name=f"Product {i}", brand=f"Brand{i}",
+                    source_name="Wirecutter",
+                    source_url="https://nytimes.com/wirecutter/test",
+                ), ProductEvidence(
+                    product_name=f"Product {i}", brand=f"Brand{i}",
+                    source_name="RTINGS",
+                    source_url="https://rtings.com/test",
+                )],
+                source_count=2,
+                evidence_score=5.0,
+                all_reasons=reasons,
+            )
+            shortlist.append(agg)
+        source_reports = [
+            SourceReport(source_name="Wirecutter", url="https://nytimes.com/wirecutter/test",
+                         products_found=[ProductEvidence(product_name="P", source_name="Wirecutter",
+                                                        source_url="https://nytimes.com/wirecutter/test")]),
+            SourceReport(source_name="RTINGS", url="https://rtings.com/test",
+                         products_found=[ProductEvidence(product_name="P", source_name="RTINGS",
+                                                        source_url="https://rtings.com/test")]),
+        ]
+        return ResearchReport(
+            niche="test",
+            sources_reviewed=source_reports,
+            aggregated=shortlist,
+            shortlist=shortlist,
+        )
+
+    def test_validate_done_no_reasons_fails(self):
+        from tools.research_agent import _validate_done
+        report = self._make_report([
+            ["reason1", "reason2"],
+            ["reason1", "reason2"],
+            [],  # no reasons
+            ["reason1", "reason2"],
+            ["reason1"],
+        ])
+        errors = _validate_done(report)
+        self.assertTrue(any("no evidence claims" in e for e in errors))
+
+    def test_validate_done_insufficient_evidence_fails(self):
+        from tools.research_agent import _validate_done
+        # Only 2 out of 5 have 2+ reasons (need 3)
+        report = self._make_report([
+            ["reason1", "reason2"],
+            ["reason1", "reason2"],
+            ["reason1"],
+            ["reason1"],
+            ["reason1"],
+        ])
+        errors = _validate_done(report)
+        self.assertTrue(any("2+ evidence claims" in e for e in errors))
+
+    def test_validate_done_good_evidence_passes(self):
+        from tools.research_agent import _validate_done
+        report = self._make_report([
+            ["reason1", "reason2"],
+            ["reason1", "reason2"],
+            ["reason1", "reason2"],
+            ["reason1", "reason2"],
+            ["reason1", "reason2"],
+        ])
+        errors = _validate_done(report)
+        # Should have no evidence-related errors
+        evidence_errors = [e for e in errors if "evidence" in e.lower()]
+        self.assertEqual(evidence_errors, [])
+
+
 class TestShortlistJsonDownside(unittest.TestCase):
     """Serialized shortlist.json must include downside field."""
 
