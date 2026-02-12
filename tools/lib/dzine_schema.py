@@ -1,13 +1,14 @@
 """Dzine image-generation schema: validation, constants, and prompt templates.
 
 Amazon Associates product ranking channel visual system.
+Supports multi-variant product images (hero, usage, detail, mood).
 Stdlib only — no external deps.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -28,6 +29,300 @@ DEFAULT_RESOLUTIONS: dict[str, tuple[int, int]] = {
     "background": (2048, 1152),
     "avatar_base": (2048, 2048),
 }
+
+# ---------------------------------------------------------------------------
+# Multi-variant image system
+# ---------------------------------------------------------------------------
+
+IMAGE_VARIANTS = ("hero", "usage1", "usage2", "detail", "mood")
+
+# Default: 3 images per product (hero, usage1, detail).
+# Top-rank hierarchy adds mood for rank #2, usage2 + mood for rank #1.
+DZINE_IMAGES_PER_PRODUCT = 3
+DZINE_EXTRA_FOR_TOP2 = True
+
+# Base variants every product gets (first DZINE_IMAGES_PER_PRODUCT from this)
+_BASE_VARIANTS = ("hero", "usage1", "detail")
+
+VARIANT_RESOLUTIONS: dict[str, tuple[int, int]] = {
+    "hero": (2048, 1152),
+    "usage1": (2048, 1152),
+    "usage2": (2048, 1152),
+    "detail": (2048, 2048),
+    "mood": (2048, 1152),
+}
+
+
+def variants_for_rank(rank: int) -> tuple[str, ...]:
+    """Return the variant list for a given product rank.
+
+    Default: 3 per product (hero, usage1, detail).
+    With DZINE_EXTRA_FOR_TOP2:
+      - Rank 2: +mood (4 images)
+      - Rank 1: +usage2, +mood (5 images)
+    """
+    base = _BASE_VARIANTS[:DZINE_IMAGES_PER_PRODUCT]
+    if not DZINE_EXTRA_FOR_TOP2:
+        return base
+    if rank == 2:
+        return base + ("mood",)
+    if rank == 1:
+        return base + ("usage2", "mood")
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Variant prompt building (data-driven)
+# ---------------------------------------------------------------------------
+
+# Shared prefix/suffix for all variant prompts
+_VARIANT_PREFIX = (
+    "Use the uploaded product image as strict visual reference. "
+    "Preserve exact geometry, shape, buttons, ports, branding and color. "
+    "Do NOT modify the product in any way."
+)
+_VARIANT_SUFFIX = "No redesign. No fake features. No logo distortion."
+_REF_PRESERVATION_SUFFIX = (
+    " Match the real product design accurately from the reference image. "
+    "Do not modify shape, color, or branding."
+)
+
+# Base negative prompt shared by all variants
+_NEGATIVE_BASE = (
+    "cartoon, anime style, watermark, extra accessories, wrong shape, "
+    "wrong colors, redesigned product, fake features, distorted logo"
+)
+
+# Per-variant extra negatives appended to _NEGATIVE_BASE
+_NEGATIVE_EXTRAS: dict[str, str] = {
+    "hero": ", messy background",
+    "usage1": ", messy background, visible faces, identifiable people, brand logos on clothing",
+    "usage2": ", messy background, visible faces, identifiable people, brand logos on clothing",
+    "detail": ", messy background, blurry",
+    "mood": "",
+}
+
+VARIANT_NEGATIVES: dict[str, str] = {
+    v: _NEGATIVE_BASE + _NEGATIVE_EXTRAS[v] for v in IMAGE_VARIANTS
+}
+
+
+def _build_variant_template(scene: str, lighting: str, camera: str, mood: str) -> str:
+    """Build a full variant prompt template from its 4 varying parts."""
+    return (
+        f"{_VARIANT_PREFIX}\n\n"
+        f"Scene: {scene}\n\n"
+        f"Lighting: {lighting}\n\n"
+        f"Camera: {camera}\n\n"
+        f"Mood: {mood}\n\n"
+        f"{_VARIANT_SUFFIX}"
+    )
+
+
+# Scene data: (scene, lighting, camera, mood) per category.
+# {product_name} is a .format() placeholder substituted at build time.
+_USAGE1_SCENES: dict[str, tuple[str, str, str, str]] = {
+    "default": (
+        "{product_name} in a clean modern environment, natural context of everyday use. Minimal props, tidy setting.",
+        "natural window light, soft and even, subtle shadows for depth.",
+        "50mm equivalent, medium shot, product clearly visible in context.",
+        "approachable, real-world, lifestyle photography.",
+    ),
+    "audio": (
+        "{product_name} on a modern desk setup with subtle neon ambient glow. Clean workspace, minimal tech accessories visible.",
+        "soft key light with colored ambient accents, subtle rim light.",
+        "50mm equivalent, medium shot, product in natural desk context.",
+        "modern tech lifestyle, creative workspace.",
+    ),
+    "computing": (
+        "{product_name} on a modern desk setup with subtle neon ambient glow. Clean workspace, monitor visible in soft background blur.",
+        "soft key light with colored ambient accents, subtle rim light.",
+        "50mm equivalent, medium shot, product in desk context.",
+        "modern tech lifestyle, productive workspace.",
+    ),
+    "kitchen": (
+        "{product_name} on a marble or stone kitchen counter in bright daylight. Clean kitchen background, minimal props.",
+        "bright natural daylight from window, soft even illumination.",
+        "50mm equivalent, medium shot, product in kitchen context.",
+        "fresh, clean, inviting kitchen lifestyle.",
+    ),
+    "fitness": (
+        "{product_name} in a gym environment with matte dark surfaces. Clean workout setting, minimal equipment visible.",
+        "overhead gym lighting, directional for definition.",
+        "50mm equivalent, medium shot, product in fitness context.",
+        "energetic, motivated, fitness lifestyle.",
+    ),
+    "travel": (
+        "{product_name} in an airport lounge setting. Clean modern interior, travel context.",
+        "warm ambient indoor light, soft and even.",
+        "50mm equivalent, medium shot, product in travel context.",
+        "sophisticated, ready-to-go, travel lifestyle.",
+    ),
+    "office": (
+        "{product_name} on a clean white and wood desk surface. Minimal office environment, tidy workspace.",
+        "bright natural window light, soft shadows.",
+        "50mm equivalent, medium shot, product in office context.",
+        "professional, organized, productive workspace.",
+    ),
+    "camera": (
+        "{product_name} in a studio setup environment. Photography studio context, clean professional setting.",
+        "studio lighting setup, soft and controlled.",
+        "50mm equivalent, medium shot, product in creative context.",
+        "creative, professional, studio lifestyle.",
+    ),
+    "gaming": (
+        "{product_name} on an RGB-lit gaming desk setup. Gaming environment, subtle colored lighting accents.",
+        "ambient RGB glow, soft key light on product.",
+        "50mm equivalent, medium shot, product in gaming context.",
+        "immersive, gaming lifestyle, vibrant.",
+    ),
+    "home": (
+        "{product_name} in a modern living room setting. Clean home environment, tasteful decor.",
+        "warm natural light, soft and inviting.",
+        "50mm equivalent, medium shot, product in home context.",
+        "comfortable, homey, modern living.",
+    ),
+    "outdoor": (
+        "{product_name} at a campsite or outdoor setting. Nature environment, clean outdoor context.",
+        "natural daylight, golden hour tones.",
+        "50mm equivalent, medium shot, product in outdoor context.",
+        "adventurous, natural, outdoor lifestyle.",
+    ),
+    "baby": (
+        "{product_name} in a bright clean nursery setting. Soft pastel tones, safe and welcoming environment.",
+        "bright soft daylight, even and gentle.",
+        "50mm equivalent, medium shot, product in nursery context.",
+        "safe, gentle, nurturing.",
+    ),
+    "streaming": (
+        "{product_name} on a streaming desk setup with ambient lighting. Content creator workspace, subtle RGB accents.",
+        "soft key light with colored ambient fill.",
+        "50mm equivalent, medium shot, product in streaming context.",
+        "creative, modern streamer lifestyle.",
+    ),
+}
+
+_USAGE2_SCENES: dict[str, tuple[str, str, str, str]] = {
+    "default": (
+        "{product_name} in an alternative everyday context, different from primary usage. Casual indoor or outdoor environment.",
+        "natural ambient light, soft and realistic.",
+        "50mm equivalent, medium-wide shot, product visible in context.",
+        "versatile, everyday, real-life context.",
+    ),
+    "audio": (
+        "{product_name} in an on-the-go context — airport or gym environment. Mobile lifestyle setting.",
+        "ambient indoor light, natural feel.",
+        "50mm equivalent, medium shot, product in mobile context.",
+        "active, portable, on-the-go lifestyle.",
+    ),
+    "computing": (
+        "{product_name} in an on-the-go context — airport lounge or gym setting. Portable use scenario.",
+        "ambient indoor light, natural feel.",
+        "50mm equivalent, medium shot, product in mobile context.",
+        "versatile, portable computing.",
+    ),
+    "kitchen": (
+        "{product_name} on an outdoor patio table or deck. Al fresco cooking or entertaining context.",
+        "warm natural outdoor light, golden hour feel.",
+        "50mm equivalent, medium shot, product in outdoor kitchen context.",
+        "relaxed, outdoor entertaining.",
+    ),
+    "fitness": (
+        "{product_name} on a park trail or outdoor exercise area. Outdoor fitness context, natural setting.",
+        "natural daylight, dynamic shadows from trees.",
+        "50mm equivalent, medium shot, product in outdoor fitness context.",
+        "active, fresh, outdoor fitness.",
+    ),
+    "travel": (
+        "{product_name} in an urban commute setting — subway or city street. Urban travel context.",
+        "mixed urban lighting, natural and artificial.",
+        "50mm equivalent, medium shot, product in urban context.",
+        "urban, practical, city travel.",
+    ),
+    "office": (
+        "{product_name} in a coffee shop or coworking space. Alternative work environment.",
+        "warm cafe ambient light, natural tones.",
+        "50mm equivalent, medium shot, product in cafe workspace.",
+        "creative, relaxed productivity.",
+    ),
+    "gaming": (
+        "{product_name} in a couch or living room gaming setup. Console gaming environment, casual setting.",
+        "warm room lighting with subtle screen glow.",
+        "50mm equivalent, medium shot, product in casual gaming context.",
+        "relaxed, casual gaming session.",
+    ),
+    "home": (
+        "{product_name} in a bedroom or personal space. Private home environment, cozy setting.",
+        "warm soft indoor light, gentle and inviting.",
+        "50mm equivalent, medium shot, product in bedroom context.",
+        "personal, cozy, intimate home.",
+    ),
+    "outdoor": (
+        "{product_name} on a hiking trail or nature path. Active outdoor use scenario.",
+        "natural daylight filtering through trees.",
+        "50mm equivalent, medium shot, product in trail context.",
+        "adventurous, active outdoor.",
+    ),
+    "camera": (
+        "{product_name} in an outdoor photography shoot setting. Field use context, natural environment.",
+        "natural outdoor light, golden hour feel.",
+        "50mm equivalent, medium shot, product in outdoor shoot context.",
+        "creative, field photography.",
+    ),
+    "baby": (
+        "{product_name} in a park or outdoor stroll setting. Outdoor family context.",
+        "bright natural daylight, soft and even.",
+        "50mm equivalent, medium shot, product in outdoor family context.",
+        "joyful, outdoor family time.",
+    ),
+    "streaming": (
+        "{product_name} in an on-the-go mobile setup — cafe or outdoor. Portable content creation context.",
+        "natural ambient light, casual setting.",
+        "50mm equivalent, medium shot, product in mobile creator context.",
+        "flexible, mobile content creation.",
+    ),
+}
+
+# Build VARIANT_TEMPLATES from scene data tables
+VARIANT_TEMPLATES: dict[str, dict[str, str]] = {
+    "hero": {
+        "default": _build_variant_template(
+            "{product_name} on a cinematic dark desk surface with premium studio environment. "
+            "Rich dark tones, subtle reflections on the surface.",
+            "dramatic key light from upper left, subtle rim light on product edges, "
+            "soft shadow underneath. Studio quality.",
+            "85mm equivalent, shallow depth of field, product sharp, background softly blurred.",
+            "premium, aspirational, high-end commercial photography.",
+        ),
+    },
+    "usage1": {cat: _build_variant_template(*parts) for cat, parts in _USAGE1_SCENES.items()},
+    "usage2": {cat: _build_variant_template(*parts) for cat, parts in _USAGE2_SCENES.items()},
+    "detail": {
+        "default": _build_variant_template(
+            "extreme macro close-up of {product_name} showing key texture, "
+            "buttons, ports, or material quality. Isolated on clean neutral surface.",
+            "strong directional side light for texture definition, "
+            "subtle fill from opposite side. High sharpness.",
+            "macro lens equivalent, very shallow DOF, razor-sharp focus on detail area.",
+            "precision, craftsmanship, premium quality materials.",
+        ),
+    },
+    "mood": {
+        "default": _build_variant_template(
+            "{product_name} in an atmospheric, cinematic composition. "
+            "Dramatic volumetric light rays, subtle haze or fog effect. "
+            "Emotional product positioning — the product as centerpiece of a story.",
+            "volumetric lighting, strong directional beam with atmospheric scatter. "
+            "Cinematic color grading.",
+            "85mm equivalent, shallow DOF, dramatic angle slightly below eye level.",
+            "aspirational, emotional, cinematic storytelling.",
+        ),
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Asset-type negative prompts (non-variant, legacy)
+# ---------------------------------------------------------------------------
 
 NEGATIVE_PROMPTS: dict[str, str] = {
     "thumbnail": (
@@ -55,14 +350,15 @@ NEGATIVE_PROMPTS: dict[str, str] = {
 PROMPT_TEMPLATES: dict[str, str] = {
     "thumbnail": (
         "High-contrast YouTube thumbnail, 2048x1152 resolution.\n\n"
-        "Product: {product_name} prominently positioned on the right side, "
-        "accurate proportions, realistic materials and sharp detail.\n\n"
-        "Clean dark gradient background with subtle glow behind product for depth.\n\n"
-        'Add bold headline text: "{key_message}" (maximum 4 words), '
-        "large readable font, strong contrast, positioned on left side.\n\n"
-        "Cinematic lighting, subtle shadow under product, premium modern aesthetic.\n\n"
-        "Minimal composition, no clutter, no extra objects, no watermarks, no added logos.\n\n"
-        "Professional commercial quality, realistic lighting physics, no AI artifacts."
+        "Product: {product_name} prominently positioned, occupying ~70% of the frame. "
+        "Accurate proportions, realistic materials and sharp detail.\n\n"
+        "Dynamic gradient background with strong depth separation. "
+        "Subtle glow behind product for visual pop.\n\n"
+        "Space reserved on left side for text overlay (no actual text added). "
+        "Strong contrast, premium modern aesthetic.\n\n"
+        "Cinematic lighting, subtle shadow under product, professional commercial quality.\n\n"
+        "Minimal composition, no clutter, no extra objects, no watermarks, no added logos, no text.\n\n"
+        "Realistic lighting physics, no AI artifacts."
     ),
     "product": (
         "Studio-quality product photo of {product_name}, 2048x2048.\n\n"
@@ -112,6 +408,69 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
 MAX_PROMPT_LENGTH = 3000
 
 # ---------------------------------------------------------------------------
+# Category detection
+# ---------------------------------------------------------------------------
+
+# Keyword hints for fallback category detection when niche not in NICHE_POOL
+_CATEGORY_KEYWORDS: dict[str, list[str]] = {
+    "audio": ["headphone", "earbuds", "speaker", "soundbar", "microphone", "turntable"],
+    "computing": ["keyboard", "mouse", "webcam", "monitor", "ssd", "laptop", "usb"],
+    "home": ["vacuum", "purifier", "thermostat", "router", "wifi", "lock", "doorbell", "shaver", "toothbrush"],
+    "kitchen": ["fryer", "espresso", "coffee", "blender", "mixer", "oven", "kettle", "skillet", "cookware", "knife"],
+    "office": ["desk", "chair", "lamp", "monitor arm", "organizer"],
+    "fitness": ["fitness", "smartwatch", "running", "yoga", "dumbbell", "gym", "helmet", "hiking"],
+    "outdoor": ["camping", "tent", "sleeping bag", "outdoor"],
+    "travel": ["luggage", "travel", "backpack", "packing", "portable charger", "power bank", "adapter"],
+    "camera": ["camera", "vlog", "dash cam", "ring light", "tripod"],
+    "gaming": ["gaming keyboard", "gaming chair", "gaming controller", "gaming mouse", "capture card"],
+    "streaming": ["streaming", "stream deck", "green screen"],
+    "baby": ["baby", "car seat", "stroller", "monitor baby"],
+}
+
+# B-roll search terms per category (used by pipeline broll-plan and notes.md)
+CATEGORY_BROLL_TERMS: dict[str, tuple[str, str]] = {
+    "audio": ("person listening music", "studio audio equipment"),
+    "kitchen": ("cooking kitchen close up", "modern kitchen countertop"),
+    "gaming": ("gaming setup RGB", "hands gaming keyboard"),
+    "computing": ("person working laptop", "modern workspace technology"),
+    "camera": ("photographer shooting", "camera equipment close up"),
+    "fitness": ("gym workout equipment", "person exercising"),
+}
+
+
+def detect_category(niche: str) -> str:
+    """Detect the visual category for a niche keyword.
+
+    1. Exact match against NICHE_POOL entries.
+    2. Keyword heuristic fallback.
+    3. Returns "default" if nothing matches.
+    """
+    niche_lower = niche.lower().strip()
+    if not niche_lower:
+        return "default"
+
+    # Try exact match from NICHE_POOL
+    try:
+        from tools.niche_picker import NICHE_POOL
+        for entry in NICHE_POOL:
+            if entry.keyword.lower() == niche_lower:
+                return entry.category
+    except ImportError:
+        pass
+
+    # Keyword heuristic fallback — check more specific patterns first
+    # "gaming" keywords must be checked before generic "keyboard"/"mouse"
+    for category in ("gaming", "streaming", "baby", "camera", "travel",
+                     "outdoor", "fitness", "kitchen", "office", "home",
+                     "computing", "audio"):
+        for kw in _CATEGORY_KEYWORDS[category]:
+            if kw in niche_lower:
+                return category
+
+    return "default"
+
+
+# ---------------------------------------------------------------------------
 # Dataclass
 # ---------------------------------------------------------------------------
 
@@ -124,12 +483,12 @@ class DzineRequest:
     style: str = "photorealistic"
     width: int = 0
     height: int = 0
-    prompt_override: Optional[str] = None
-    # Reference image path — real product photo used as input for Dzine
-    reference_image: Optional[str] = None
-    # Built prompts (populated by build_prompts)
-    prompt: str = ""
-    negative_prompt: str = ""
+    prompt_override: str | None = None
+    reference_image: str | None = None  # real product photo used as input
+    image_variant: str = ""     # "hero", "usage1", "usage2", "detail", "mood"
+    niche_category: str = ""    # "audio", "kitchen", etc. from detect_category
+    prompt: str = ""            # populated by build_prompts
+    negative_prompt: str = ""   # populated by build_prompts
 
 
 # ---------------------------------------------------------------------------
@@ -153,33 +512,31 @@ def validate_request(req: DzineRequest) -> list[str]:
             f"Invalid style {req.style!r}. Must be one of: {', '.join(STYLES)}"
         )
 
-    # Check required fields for this asset type
+    if req.image_variant and req.image_variant not in IMAGE_VARIANTS:
+        errors.append(
+            f"Invalid image_variant {req.image_variant!r}. "
+            f"Must be one of: {', '.join(IMAGE_VARIANTS)}"
+        )
+
     for fname in REQUIRED_FIELDS.get(req.asset_type, ()):
         if not getattr(req, fname, "").strip():
             errors.append(f"Field {fname!r} is required for asset_type={req.asset_type!r}")
 
-    # key_message length (max 4 words for thumbnails)
     if req.asset_type == "thumbnail" and req.key_message:
-        word_count = len(req.key_message.split())
-        if word_count > 4:
+        if len(req.key_message.split()) > 4:
             errors.append(
-                f"key_message must be 4 words max for thumbnails, got {word_count}: "
-                f"{req.key_message!r}"
+                f"key_message must be 4 words max for thumbnails, got "
+                f"{len(req.key_message.split())}: {req.key_message!r}"
             )
 
-    # Length limits on prompt fields
     for fname in ("prompt_override", "prompt", "negative_prompt"):
         val = getattr(req, fname, None) or ""
         if len(val) > MAX_PROMPT_LENGTH:
             errors.append(f"{fname} exceeds {MAX_PROMPT_LENGTH} characters ({len(val)})")
 
-    # Reference image must exist if provided
-    if req.reference_image:
-        from pathlib import Path
-        if not Path(req.reference_image).is_file():
-            errors.append(f"Reference image not found: {req.reference_image}")
+    if req.reference_image and not Path(req.reference_image).is_file():
+        errors.append(f"Reference image not found: {req.reference_image}")
 
-    # Resolution bounds
     if req.width and (req.width < 256 or req.width > 4096):
         errors.append(f"width must be 256-4096, got {req.width}")
     if req.height and (req.height < 256 or req.height > 4096):
@@ -195,49 +552,54 @@ def validate_request(req: DzineRequest) -> list[str]:
 
 def build_prompts(req: DzineRequest) -> DzineRequest:
     """Render prompt templates and fill in defaults. Returns a new DzineRequest."""
-    # Apply default resolution if not specified
-    w, h = DEFAULT_RESOLUTIONS.get(req.asset_type, (2048, 2048))
-    width = req.width or w
-    height = req.height or h
+    # Determine resolution
+    if req.image_variant and req.image_variant in VARIANT_RESOLUTIONS:
+        default_w, default_h = VARIANT_RESOLUTIONS[req.image_variant]
+    else:
+        default_w, default_h = DEFAULT_RESOLUTIONS.get(req.asset_type, (2048, 2048))
 
-    # If prompt_override is set, use it directly
-    if req.prompt_override:
-        return DzineRequest(
-            asset_type=req.asset_type,
-            product_name=req.product_name,
-            key_message=req.key_message,
-            style=req.style,
-            width=width,
-            height=height,
-            prompt_override=None,
-            reference_image=req.reference_image,
-            prompt=req.prompt_override,
-            negative_prompt=req.negative_prompt or NEGATIVE_PROMPTS.get(req.asset_type, ""),
-        )
+    width = req.width or default_w
+    height = req.height or default_h
 
-    # Pick template — use reference variant for product if reference image exists
-    template_key = req.asset_type
-    if req.asset_type == "product" and req.reference_image:
-        template_key = "product_with_ref"
-
-    template = PROMPT_TEMPLATES.get(template_key, "")
     fmt_vars = {
         "product_name": req.product_name or "the product",
         "key_message": req.key_message or "",
     }
 
-    prompt = req.prompt or template.format(**fmt_vars)
-    negative = req.negative_prompt or NEGATIVE_PROMPTS.get(req.asset_type, "")
+    # prompt_override bypasses all templates
+    if req.prompt_override:
+        return replace(
+            req, width=width, height=height, prompt_override=None,
+            prompt=req.prompt_override,
+            negative_prompt=req.negative_prompt or NEGATIVE_PROMPTS.get(req.asset_type, ""),
+        )
 
-    return DzineRequest(
-        asset_type=req.asset_type,
-        product_name=req.product_name,
-        key_message=req.key_message,
-        style=req.style,
-        width=width,
-        height=height,
-        prompt_override=None,
-        reference_image=req.reference_image,
-        prompt=prompt,
-        negative_prompt=negative,
+    # Variant-aware prompt building
+    if req.image_variant and req.image_variant in VARIANT_TEMPLATES:
+        variant_dict = VARIANT_TEMPLATES[req.image_variant]
+        cat = req.niche_category or "default"
+        template = variant_dict.get(cat, variant_dict["default"])
+        prompt = req.prompt or template.format(**fmt_vars)
+
+        # Append reference preservation suffix if reference image exists
+        if req.reference_image and not req.prompt:
+            prompt += _REF_PRESERVATION_SUFFIX
+
+        return replace(
+            req, width=width, height=height, prompt_override=None,
+            prompt=prompt,
+            negative_prompt=req.negative_prompt or VARIANT_NEGATIVES.get(req.image_variant, ""),
+        )
+
+    # Legacy behavior — no variant set
+    template_key = req.asset_type
+    if req.asset_type == "product" and req.reference_image:
+        template_key = "product_with_ref"
+
+    template = PROMPT_TEMPLATES.get(template_key, "")
+
+    return replace(
+        req, width=width, height=height, prompt_override=None,
+        prompt=req.prompt or template.format(**fmt_vars),
+        negative_prompt=req.negative_prompt or NEGATIVE_PROMPTS.get(req.asset_type, ""),
     )

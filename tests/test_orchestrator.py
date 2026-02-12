@@ -161,11 +161,11 @@ class TestQAGatekeeper(unittest.TestCase):
         ctx.paths.ensure_dirs()
         shortlist_path = ctx.paths.root / "inputs" / "shortlist.json"
         shortlist_path.write_text(json.dumps({
-            "shortlist": [{"product_name": f"P{i}", "sources": []} for i in range(5)],
+            "shortlist": [{"product_name": f"P{i}", "sources": []} for i in range(3)],
         }))
         passed, errors = self.qa.check_gate(ctx, Stage.RESEARCH)
         self.assertFalse(passed)
-        self.assertTrue(any("minimum 8" in e for e in errors))
+        self.assertTrue(any("minimum 5" in e for e in errors))
 
     def test_research_gate_domain_violation(self):
         ctx = RunContext(video_id="test-001", niche="earbuds")
@@ -177,7 +177,7 @@ class TestQAGatekeeper(unittest.TestCase):
                     "product_name": f"P{i}",
                     "sources": [{"url": "https://www.nytimes.com/wirecutter/reviews/best-earbuds/"}],
                 }
-                for i in range(10)
+                for i in range(6)
             ] + [
                 {
                     "product_name": "Bad",
@@ -199,7 +199,7 @@ class TestQAGatekeeper(unittest.TestCase):
                     "product_name": f"Product {i}",
                     "sources": [{"url": "https://www.nytimes.com/wirecutter/reviews/earbuds/"}],
                 }
-                for i in range(10)
+                for i in range(6)
             ],
         }))
         passed, errors = self.qa.check_gate(ctx, Stage.RESEARCH)
@@ -495,6 +495,106 @@ class TestMessageTypes(unittest.TestCase):
     def test_message_timestamp(self):
         msg = Message("a", "b", MsgType.INFO, Stage.NICHE, "test")
         self.assertTrue(len(msg.timestamp) > 0)
+
+
+class TestQAGatekeeperSubcategoryDrift(unittest.TestCase):
+    """QA gate must HARD FAIL on any subcategory drift."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.patcher = patch("tools.lib.video_paths.VIDEOS_BASE", Path(self.tmp.name))
+        self.patcher.start()
+        self.qa = QAGatekeeper()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self.tmp.cleanup()
+
+    def _write_contract(self, ctx):
+        from tools.lib.subcategory_contract import SubcategoryContract, write_contract
+        c = SubcategoryContract(
+            niche_name="wireless earbuds",
+            category="audio",
+            allowed_subcategory_labels=["earbuds", "tws"],
+            disallowed_labels=["headphone", "speaker"],
+            allowed_keywords=["earbuds", "earbud"],
+            disallowed_keywords=["headphone", "speaker"],
+            mandatory_keywords=["earbuds", "earbud"],
+            acceptance_test={
+                "name_must_contain_one_of": ["earbuds", "earbud"],
+                "name_must_not_contain": ["headphone", "speaker"],
+                "brand_is_not_product_name": True,
+            },
+        )
+        write_contract(c, ctx.paths.subcategory_contract)
+
+    def test_rank_gate_hard_fail_on_drift(self):
+        """products.json with a drifted product must HARD FAIL the rank gate."""
+        ctx = RunContext(video_id="test-drift-rank", niche="wireless earbuds")
+        ctx.paths.ensure_dirs()
+        self._write_contract(ctx)
+        products = [
+            {"rank": 1, "name": "Sony WF-1000XM5 Earbuds", "brand": "Sony", "asin": "B01"},
+            {"rank": 2, "name": "Apple AirPods Pro Earbuds", "brand": "Apple", "asin": "B02"},
+            {"rank": 3, "name": "Sony WH-1000XM5 Headphones", "brand": "Sony", "asin": "B03"},
+            {"rank": 4, "name": "Jabra Elite 85t Earbuds", "brand": "Jabra", "asin": "B04"},
+            {"rank": 5, "name": "Samsung Galaxy Buds Earbuds", "brand": "Samsung", "asin": "B05"},
+        ]
+        ctx.paths.products_json.write_text(json.dumps({"products": products}))
+        passed, errors = self.qa.check_gate(ctx, Stage.RANK)
+        self.assertFalse(passed)
+        self.assertTrue(any("Subcategory drift" in e for e in errors))
+        self.assertTrue(any("Headphones" in e for e in errors))
+
+    def test_rank_gate_pass_all_on_subcategory(self):
+        """products.json with all matching products passes the rank gate."""
+        ctx = RunContext(video_id="test-drift-ok", niche="wireless earbuds")
+        ctx.paths.ensure_dirs()
+        self._write_contract(ctx)
+        products = [
+            {"rank": i, "name": f"Brand{i} Wireless Earbuds", "brand": f"Brand{i}",
+             "asin": f"B0{i}", "affiliate_url": f"https://amzn.to/{i}"}
+            for i in range(1, 6)
+        ]
+        ctx.paths.products_json.write_text(json.dumps({"products": products}))
+        passed, errors = self.qa.check_gate(ctx, Stage.RANK)
+        self.assertTrue(passed, f"Expected pass but got errors: {errors}")
+
+    def test_verify_gate_hard_fail_on_drift(self):
+        """verified.json with a drifted product must HARD FAIL the verify gate."""
+        ctx = RunContext(video_id="test-drift-verify", niche="wireless earbuds")
+        ctx.paths.ensure_dirs()
+        self._write_contract(ctx)
+        verified_path = ctx.paths.root / "inputs" / "verified.json"
+        products = [
+            {"product_name": f"Brand{i} True Wireless Earbuds", "brand": f"Brand{i}"}
+            for i in range(5)
+        ] + [
+            {"product_name": "Bose Smart Soundbar 600", "brand": "Bose"},
+        ]
+        verified_path.write_text(json.dumps({"products": products}))
+        passed, errors = self.qa.check_gate(ctx, Stage.VERIFY)
+        self.assertFalse(passed)
+        self.assertTrue(any("Subcategory drift" in e for e in errors))
+
+    def test_research_gate_hard_fail_on_drift(self):
+        """shortlist.json with a drifted product must HARD FAIL the research gate."""
+        ctx = RunContext(video_id="test-drift-research", niche="wireless earbuds")
+        ctx.paths.ensure_dirs()
+        self._write_contract(ctx)
+        shortlist_path = ctx.paths.root / "inputs" / "shortlist.json"
+        shortlist = [
+            {"product_name": f"Brand{i} Wireless Earbuds", "brand": f"Brand{i}",
+             "sources": [{"url": "https://www.nytimes.com/wirecutter/test"}]}
+            for i in range(5)
+        ] + [
+            {"product_name": "Sony WH-1000XM5 Headphones", "brand": "Sony",
+             "sources": [{"url": "https://www.nytimes.com/wirecutter/test"}]},
+        ]
+        shortlist_path.write_text(json.dumps({"shortlist": shortlist}))
+        passed, errors = self.qa.check_gate(ctx, Stage.RESEARCH)
+        self.assertFalse(passed)
+        self.assertTrue(any("Subcategory drift" in e for e in errors))
 
 
 class TestAllowedDomains(unittest.TestCase):

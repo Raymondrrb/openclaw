@@ -49,6 +49,7 @@ class VerifiedProduct:
     asin: str = ""
     amazon_url: str = ""
     affiliate_url: str = ""
+    affiliate_short_url: str = ""  # amzn.to link from SiteStripe
     amazon_title: str = ""
     amazon_price: str = ""
     amazon_rating: str = ""
@@ -69,6 +70,55 @@ class VerifiedProduct:
 def _make_affiliate_url(asin: str, tag: str) -> str:
     """Generate an Amazon affiliate URL."""
     return f"https://www.amazon.com/dp/{asin}?tag={tag}"
+
+
+def _normalize_search_query(brand: str, product_name: str) -> str:
+    """Build a clean Amazon search query from brand + product name.
+
+    Strips parentheticals, non-word characters, and collapses whitespace.
+    Result: clean "Brand Model" only.
+    """
+    # Start from product_name (may already include brand)
+    name = product_name
+    # Strip trailing parenthetical content: "(2024 Edition)" etc.
+    name = re.sub(r'\s*\([^)]*\)\s*$', '', name)
+    # Remove non-word characters except embedded hyphens and spaces
+    name = re.sub(r'[^\w\s-]', '', name)
+    # Collapse whitespace
+    name = re.sub(r'\s+', ' ', name).strip()
+    # If brand not already in name, prepend it
+    if brand and not name.lower().startswith(brand.lower()):
+        brand_clean = re.sub(r'[^\w\s-]', '', brand).strip()
+        name = f"{brand_clean} {name}"
+    return name.strip()
+
+
+# ---------------------------------------------------------------------------
+# SiteStripe selectors (best-effort, updatable)
+# ---------------------------------------------------------------------------
+
+SITESTRIPE_SELECTORS = {
+    "bar": ["#amzn-ss-wrap", "#site-stripe", "[id*='sitestripe' i]", "[id*='SiteStripe']"],
+    "get_link": ["#amzn-ss-text-link", "text=Text", "text=Get Link"],
+    "short_link": ["text=Short Link", "text=Short", "#amzn-ss-text-shortlink-widget"],
+    "link_output": [
+        "input[value*='amzn.to']",
+        "#amzn-ss-text-shortlink-textarea",
+        "input[readonly]",
+    ],
+}
+
+
+def _find_first_visible(context, selectors: list[str], timeout: int = 2000):
+    """Try selectors in order, return first visible locator or None."""
+    for sel in selectors:
+        try:
+            loc = context.locator(sel).first
+            if loc.is_visible(timeout=timeout):
+                return loc
+        except Exception:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +249,19 @@ def _paapi_search(keyword: str, tag: str) -> list[dict]:
 def _browser_verify_product(
     product_name: str, tag: str
 ) -> VerifiedProduct | None:
-    """Search Amazon in the browser and verify a product exists.
+    """Legacy wrapper — delegates to PDP flow."""
+    return _browser_verify_product_pdp(product_name, "", tag)
+
+
+def _browser_verify_product_pdp(
+    product_name: str,
+    brand: str,
+    tag: str,
+    *,
+    video_id: str = "",
+    product_index: int = 0,
+) -> VerifiedProduct | None:
+    """Search Amazon, open PDP, extract details, capture SiteStripe link.
 
     Uses the running Brave browser via CDP.
     """
@@ -208,124 +270,235 @@ def _browser_verify_product(
     browser, context, should_close, pw = connect_or_launch(headless=False)
     page = context.new_page()
 
+    # Resolve screenshot directory
+    screen_dir = None
+    if video_id:
+        from tools.lib.video_paths import VideoPaths
+        screen_dir = VideoPaths(video_id).amazon_screens
+        screen_dir.mkdir(parents=True, exist_ok=True)
+
     try:
-        # Search Amazon for the product
-        query = urllib.parse.quote_plus(product_name)
-        search_url = f"https://www.amazon.com/s?k={query}"
+        # Build clean query
+        query = _normalize_search_query(brand, product_name)
+        search_url = f"https://www.amazon.com/s?k={urllib.parse.quote_plus(query)}"
         page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
         page.wait_for_timeout(3000)
 
         # Check for captcha
         if page.locator('form[action*="validateCaptcha"]').count() > 0:
-            print(f"    CAPTCHA detected — skipping browser verification",
+            print(f"    CAPTCHA detected -- skipping browser verification",
                   file=sys.stderr)
             return None
 
-        # Get first few search result cards
+        # Get up to 5 search result cards
         cards = page.locator('[data-component-type="s-search-result"]')
         count = min(cards.count(), 5)
 
-        best_match: VerifiedProduct | None = None
-        best_score = 0.0
-
+        # Build (index, card_title, similarity) list sorted by similarity
+        card_info: list[tuple[int, str, float]] = []
         for i in range(count):
             card = cards.nth(i)
             try:
-                asin = card.get_attribute("data-asin", timeout=2000) or ""
-                if not asin:
+                card_asin = card.get_attribute("data-asin", timeout=2000) or ""
+                if not card_asin:
                     continue
-
-                # Title
                 title = ""
                 try:
                     title_el = card.locator("h2 a span, h2 span").first
                     title = title_el.inner_text(timeout=2000).strip()
                 except Exception:
                     pass
+                sim = _title_similarity(product_name, title)
+                if sim >= 0.5:
+                    card_info.append((i, title, sim))
+            except Exception:
+                continue
 
-                # Price — prefer .a-offscreen for clean formatting
-                price = ""
+        card_info.sort(key=lambda x: -x[2])
+
+        for card_idx, card_title, card_sim in card_info:
+            card = cards.nth(card_idx)
+
+            try:
+                # Click title link to navigate to PDP
+                title_link = card.locator("h2 a").first
+                title_link.click(timeout=5000)
+
+                # Wait for PDP to load
                 try:
-                    offscreen = card.locator(".a-price .a-offscreen").first
-                    price = offscreen.inner_text(timeout=1500).strip()
+                    page.wait_for_selector("#productTitle", timeout=10000)
                 except Exception:
+                    page.go_back(wait_until="domcontentloaded", timeout=10000)
+                    page.wait_for_timeout(1000)
+                    continue
+
+                # Extract ASIN from URL
+                asin = ""
+                url_match = re.search(r'/dp/([A-Z0-9]{10})', page.url)
+                if url_match:
+                    asin = url_match.group(1)
+                else:
+                    # Fallback: DOM
                     try:
-                        pw_ = card.locator(".a-price .a-price-whole").first
-                        pf = card.locator(".a-price .a-price-fraction").first
-                        whole = pw_.inner_text(timeout=1500).replace("\n", "").strip().rstrip(".")
-                        frac = pf.inner_text(timeout=1500).replace("\n", "").strip()
-                        price = f"${whole}.{frac}"
+                        asin_input = page.locator('input[name="ASIN"]').first
+                        asin = asin_input.get_attribute("value", timeout=2000) or ""
                     except Exception:
                         pass
 
-                # Rating — try multiple selector patterns
+                if not asin:
+                    page.go_back(wait_until="domcontentloaded", timeout=10000)
+                    page.wait_for_timeout(1000)
+                    continue
+
+                # Extract title from PDP
+                pdp_title = ""
+                try:
+                    pdp_title = page.locator("#productTitle").first.inner_text(timeout=3000).strip()
+                except Exception:
+                    pass
+
+                # Check similarity against PDP title — strict 85% threshold
+                pdp_sim = _title_similarity(product_name, pdp_title)
+                if pdp_sim < 0.85:
+                    print(f"    PDP title mismatch ({pdp_sim:.2f} < 0.85): {pdp_title[:60]}", file=sys.stderr)
+                    page.go_back(wait_until="domcontentloaded", timeout=10000)
+                    page.wait_for_timeout(1000)
+                    continue
+
+                # Extract price from PDP
+                price = ""
+                try:
+                    offscreen = page.locator(".a-price .a-offscreen").first
+                    price = offscreen.inner_text(timeout=2000).strip()
+                except Exception:
+                    pass
+
+                # Extract rating
                 rating = ""
                 try:
-                    for r_sel in [".a-icon-star-small .a-icon-alt", ".a-icon-alt"]:
-                        r_el = card.locator(r_sel).first
-                        if r_el.count() > 0:
-                            r_text = r_el.inner_text(timeout=1500)
-                            m = re.search(r"(\d+\.?\d*)\s*out\s*of", r_text)
-                            if m:
-                                rating = m.group(1)
-                                break
+                    alt_el = page.locator("#acrPopover .a-icon-alt").first
+                    r_text = alt_el.inner_text(timeout=2000)
+                    m = re.search(r"(\d+\.?\d*)\s*out\s*of", r_text)
+                    if m:
+                        rating = m.group(1)
                 except Exception:
                     pass
 
-                # Reviews count — look for (18.9K) or (1,234) patterns
+                # Extract reviews count
                 reviews = ""
                 try:
-                    # Find the link near ratings that contains the count
-                    rev_links = card.locator("a")
-                    for ri in range(min(rev_links.count(), 15)):
-                        rt = rev_links.nth(ri).inner_text(timeout=800).strip()
-                        # Match patterns like (18.9K) or (1,234)
-                        rm = re.search(r"\(?([\d,\.]+[KkMm]?)\)?", rt)
-                        if rm and rt.startswith("("):
-                            raw = rm.group(1).replace(",", "")
-                            # Expand K/M suffixes
-                            if raw.upper().endswith("K"):
-                                reviews = str(int(float(raw[:-1]) * 1000))
-                            elif raw.upper().endswith("M"):
-                                reviews = str(int(float(raw[:-1]) * 1000000))
-                            else:
-                                reviews = raw
-                            break
+                    rev_el = page.locator("#acrCustomerReviewText").first
+                    rev_text = rev_el.inner_text(timeout=2000)
+                    rm = re.search(r'([\d,]+)', rev_text)
+                    if rm:
+                        reviews = rm.group(1).replace(",", "")
                 except Exception:
                     pass
 
-                # Image
+                # Extract image
                 image_url = ""
                 try:
-                    img = card.locator(".s-image").first
-                    image_url = img.get_attribute("src", timeout=1500) or ""
+                    img = page.locator("#landingImage, #imgBlkFront").first
+                    image_url = img.get_attribute("src", timeout=2000) or ""
                 except Exception:
                     pass
 
-                # Score the match
-                score = _title_similarity(product_name, title)
+                # Take PDP screenshot
+                if screen_dir:
+                    try:
+                        page.screenshot(path=str(screen_dir / f"{product_index:02d}_{asin}_pdp.png"))
+                    except Exception:
+                        pass
 
-                if score > best_score:
-                    best_score = score
-                    confidence = "high" if score > 0.6 else ("medium" if score > 0.35 else "low")
-                    best_match = VerifiedProduct(
-                        product_name=product_name,
-                        asin=asin,
-                        amazon_url=f"https://www.amazon.com/dp/{asin}",
-                        affiliate_url=_make_affiliate_url(asin, tag),
-                        amazon_title=title,
-                        amazon_price=price,
-                        amazon_rating=rating,
-                        amazon_reviews=reviews,
-                        amazon_image_url=image_url,
-                        match_confidence=confidence,
-                        verification_method="browser",
-                    )
+                # --- SiteStripe capture ---
+                short_url = ""
+                ss_error = ""
+
+                # Try main page first, then iframes
+                contexts_to_try = [page]
+                try:
+                    for frame in page.frames:
+                        if frame != page.main_frame:
+                            contexts_to_try.append(frame)
+                except Exception:
+                    pass
+
+                for ss_ctx in contexts_to_try:
+                    bar = _find_first_visible(ss_ctx, SITESTRIPE_SELECTORS["bar"], timeout=2000)
+                    if not bar:
+                        continue
+
+                    # Click "Get Link" / "Text"
+                    get_link = _find_first_visible(ss_ctx, SITESTRIPE_SELECTORS["get_link"], timeout=2000)
+                    if get_link:
+                        try:
+                            get_link.click(timeout=3000)
+                            page.wait_for_timeout(1000)
+                        except Exception:
+                            continue
+
+                    # Click "Short Link"
+                    short_btn = _find_first_visible(ss_ctx, SITESTRIPE_SELECTORS["short_link"], timeout=2000)
+                    if short_btn:
+                        try:
+                            short_btn.click(timeout=3000)
+                            page.wait_for_timeout(1500)
+                        except Exception:
+                            pass
+
+                    # Extract the short URL
+                    link_out = _find_first_visible(ss_ctx, SITESTRIPE_SELECTORS["link_output"], timeout=3000)
+                    if link_out:
+                        try:
+                            val = link_out.get_attribute("value", timeout=2000) or ""
+                            if not val:
+                                val = link_out.inner_text(timeout=2000)
+                            if "amzn.to" in val:
+                                short_url = val.strip()
+                        except Exception:
+                            pass
+
+                    if short_url:
+                        # Take SiteStripe screenshot
+                        if screen_dir:
+                            try:
+                                page.screenshot(path=str(screen_dir / f"{product_index:02d}_{asin}_sitestripe.png"))
+                            except Exception:
+                                pass
+                        break
+
+                if not short_url:
+                    ss_error = "ACTION_REQUIRED: SiteStripe not visible -- log in to Amazon Associates"
+
+                confidence = "high" if pdp_sim >= 0.90 else ("medium" if pdp_sim >= 0.85 else "low")
+
+                return VerifiedProduct(
+                    product_name=product_name,
+                    brand=brand,
+                    asin=asin,
+                    amazon_url=f"https://www.amazon.com/dp/{asin}",
+                    affiliate_url=_make_affiliate_url(asin, tag) if tag else f"https://www.amazon.com/dp/{asin}",
+                    affiliate_short_url=short_url,
+                    amazon_title=pdp_title,
+                    amazon_price=price,
+                    amazon_rating=rating,
+                    amazon_reviews=reviews,
+                    amazon_image_url=image_url,
+                    match_confidence=confidence,
+                    verification_method="browser",
+                    error=ss_error,
+                )
 
             except Exception as exc:
+                # Try to go back to search results for next card
+                try:
+                    page.go_back(wait_until="domcontentloaded", timeout=10000)
+                    page.wait_for_timeout(1000)
+                except Exception:
+                    pass
                 continue
 
-        return best_match
+        return None
 
     except Exception as exc:
         print(f"    Browser verification failed: {exc}", file=sys.stderr)
@@ -362,10 +535,11 @@ def verify_products(
     shortlist: list[dict],
     *,
     associate_tag: str = "",
+    video_id: str = "",
 ) -> list[VerifiedProduct]:
     """Verify each shortlisted product exists on Amazon US.
 
-    Uses PA-API if configured, otherwise browser fallback.
+    Uses PA-API if configured, otherwise browser fallback with PDP navigation.
     """
     load_env_file()
     tag = associate_tag or os.environ.get("AMAZON_ASSOCIATE_TAG", "").strip()
@@ -374,7 +548,7 @@ def verify_products(
               file=sys.stderr)
 
     use_paapi = _paapi_available()
-    method = "PA-API" if use_paapi else "Browser"
+    method = "PA-API" if use_paapi else "Browser (PDP)"
     print(f"[verify] Method: {method}", file=sys.stderr)
     print(f"[verify] Products to verify: {len(shortlist)}", file=sys.stderr)
 
@@ -383,12 +557,14 @@ def verify_products(
     for i, item in enumerate(shortlist):
         product_name = item.get("product_name", "")
         brand = item.get("brand", "")
+        clean_query = _normalize_search_query(brand, product_name)
         print(f"\n  [{i+1}/{len(shortlist)}] {product_name}...", file=sys.stderr)
+        print(f"    Query: {clean_query}", file=sys.stderr)
 
         if use_paapi:
             # PA-API search
             try:
-                results = _paapi_search(f"{brand} {product_name}", tag)
+                results = _paapi_search(clean_query, tag)
                 if results:
                     best = results[0]
                     score = _title_similarity(product_name, best["title"])
@@ -408,26 +584,31 @@ def verify_products(
                         key_claims=item.get("key_claims", []),
                     )
                     verified.append(vp)
-                    print(f"    OK: {vp.asin} ({confidence}) — {vp.amazon_title[:60]}", file=sys.stderr)
+                    print(f"    OK: {vp.asin} ({confidence}) -- {vp.amazon_title[:60]}", file=sys.stderr)
                 else:
                     print(f"    NOT FOUND on Amazon", file=sys.stderr)
             except Exception as exc:
                 print(f"    PA-API error: {exc}", file=sys.stderr)
         else:
-            # Browser fallback
-            vp = _browser_verify_product(product_name, tag)
+            # Browser PDP flow
+            vp = _browser_verify_product_pdp(
+                product_name, brand, tag,
+                video_id=video_id, product_index=i,
+            )
             if vp:
-                vp.brand = brand
                 vp.evidence = item.get("sources", [])
                 vp.key_claims = item.get("key_claims", [])
                 verified.append(vp)
-                print(f"    OK: {vp.asin} ({vp.match_confidence}) — {vp.amazon_title[:60]}", file=sys.stderr)
+                short_info = f" | short={vp.affiliate_short_url[:30]}" if vp.affiliate_short_url else ""
+                print(f"    OK: {vp.asin} ({vp.match_confidence}) -- {vp.amazon_title[:60]}{short_info}", file=sys.stderr)
+                if vp.error:
+                    print(f"    Note: {vp.error}", file=sys.stderr)
             else:
                 print(f"    NOT FOUND / verification failed", file=sys.stderr)
 
-            # Small delay between browser searches to avoid throttling
+            # Delay between browser searches to avoid throttling
             if i < len(shortlist) - 1:
-                time.sleep(1.5)
+                time.sleep(2.5)
 
     return verified
 
@@ -449,6 +630,7 @@ def write_verified(verified: list[VerifiedProduct], output_path: Path) -> None:
                 "asin": v.asin,
                 "amazon_url": v.amazon_url,
                 "affiliate_url": v.affiliate_url,
+                "affiliate_short_url": v.affiliate_short_url,
                 "amazon_title": v.amazon_title,
                 "amazon_price": v.amazon_price,
                 "amazon_rating": v.amazon_rating,
@@ -458,6 +640,7 @@ def write_verified(verified: list[VerifiedProduct], output_path: Path) -> None:
                 "verification_method": v.verification_method,
                 "evidence": v.evidence,
                 "key_claims": v.key_claims,
+                "error": v.error,
             }
             for v in verified
         ],
@@ -491,7 +674,7 @@ def main() -> int:
         print("Empty shortlist", file=sys.stderr)
         return 1
 
-    verified = verify_products(shortlist)
+    verified = verify_products(shortlist, video_id=args.video_id)
 
     print(f"\nVerified: {len(verified)}/{len(shortlist)} products found on Amazon US")
 

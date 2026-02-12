@@ -164,12 +164,36 @@ def score_product(product: dict) -> float:
 # ---------------------------------------------------------------------------
 
 
-def select_top5(verified: list[dict]) -> list[dict]:
+def select_top5(
+    verified: list[dict],
+    *,
+    contract_path: Path | None = None,
+) -> list[dict]:
     """Select the final Top 5 with category diversity.
 
     Returns products ranked 1 (best) to 5 (entry-level), with
     diversity across categories (best overall, budget, premium, etc.).
+
+    If contract_path is provided, every product must pass the
+    subcategory gate. Any drift is a hard reject — the product
+    is removed before scoring.
     """
+    # --- Subcategory gate: HARD reject any drifted product ---
+    if contract_path and contract_path.is_file():
+        from tools.lib.subcategory_contract import load_contract, passes_gate
+        contract = load_contract(contract_path)
+        clean = []
+        for p in verified:
+            ok, reason = passes_gate(
+                p.get("product_name", ""), p.get("brand", ""), contract,
+            )
+            if ok:
+                clean.append(p)
+            else:
+                print(f"  DRIFT REJECT (top5): {p.get('product_name', '?')} — {reason}",
+                      file=sys.stderr)
+        verified = clean
+
     if len(verified) <= 5:
         # Not enough to be picky — rank by score
         scored = sorted(verified, key=lambda p: -score_product(p))
@@ -314,7 +338,7 @@ def write_products_json(
             "brand": p.get("brand", ""),
             "asin": p.get("asin", ""),
             "amazon_url": p.get("amazon_url", ""),
-            "affiliate_url": p.get("affiliate_url", ""),
+            "affiliate_url": p.get("affiliate_short_url") or p.get("affiliate_url", ""),
             "price": p.get("amazon_price", ""),
             "rating": p.get("amazon_rating", ""),
             "reviews_count": p.get("amazon_reviews", ""),
@@ -371,7 +395,14 @@ def main() -> int:
 
     print(f"Verified products: {len(verified)}")
 
-    top5 = select_top5(verified)
+    # Load subcategory contract if available
+    contract_path = None
+    if args.video_id:
+        cp = VIDEOS_BASE / args.video_id / "inputs" / "subcategory_contract.json"
+        if cp.is_file():
+            contract_path = cp
+
+    top5 = select_top5(verified, contract_path=contract_path)
 
     print(f"\nTop 5 ({args.niche or 'unknown niche'}):\n")
     for p in top5:

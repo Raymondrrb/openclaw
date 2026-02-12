@@ -216,6 +216,7 @@ def generate_brief(
     niche: str,
     products_data: dict,
     seo_data: dict,
+    channel_style: str = "",
 ) -> str:
     """Build the manual_brief.txt content from structured data.
 
@@ -253,6 +254,12 @@ def generate_brief(
     lines.append("- Attribute expert sources naturally when making strong claims.")
     lines.append("- Every product gets an honest downside. This builds trust.")
     lines.append("")
+
+    # Channel style (from channel/channel_style.md if provided)
+    if channel_style:
+        lines.append("## Channel Style")
+        lines.append(channel_style.strip())
+        lines.append("")
 
     # Hook suggestions
     lines.append("## Hook suggestions (pick one or remix)")

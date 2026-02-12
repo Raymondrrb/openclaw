@@ -4,13 +4,22 @@
 Wraps all individual tools behind repeatable subcommands with validation,
 resumability, and Telegram notifications.
 
-Usage:
-    python3 tools/pipeline.py init --video-id <id> --niche "<niche>"
-    python3 tools/pipeline.py research --video-id <id>
-    python3 tools/pipeline.py script --video-id <id> [--charismatic ...]
+Recommended daily flow:
+    python3 tools/pipeline.py day --video-id <id> [--niche "<niche>"]
+      (runs init → research → script-brief, then stops for human)
+
+    ... human writes script_raw.txt from the brief ...
+
+    python3 tools/pipeline.py script-review --video-id <id>
     python3 tools/pipeline.py assets --video-id <id> [--force] [--dry-run]
     python3 tools/pipeline.py tts --video-id <id> [--force] [--patch N ...]
     python3 tools/pipeline.py manifest --video-id <id>
+
+Individual commands:
+    python3 tools/pipeline.py init --video-id <id> --niche "<niche>"
+    python3 tools/pipeline.py research --video-id <id>
+    python3 tools/pipeline.py script-brief --video-id <id>
+    python3 tools/pipeline.py script --video-id <id> [--charismatic ...]
     python3 tools/pipeline.py status --video-id <id> | --all
 
 Exit codes: 0=ok, 1=error, 2=action_required
@@ -130,6 +139,13 @@ def cmd_init(args) -> int:
     paths.niche_txt.write_text(args.niche + "\n", encoding="utf-8")
     print(f"Niche: {args.niche}")
 
+    # Generate subcategory contract
+    from tools.lib.subcategory_contract import generate_contract, write_contract
+    from tools.lib.dzine_schema import detect_category
+    contract = generate_contract(args.niche, detect_category(args.niche))
+    write_contract(contract, paths.subcategory_contract)
+    print(f"Wrote subcategory contract ({contract.category}): {len(contract.allowed_keywords)} allowed, {len(contract.disallowed_keywords)} disallowed keywords")
+
     # Write empty products.json template
     if not paths.products_json.is_file() or args.force:
         template = {
@@ -218,6 +234,14 @@ def cmd_research(args) -> int:
     else:
         print(f"Step 1: Niche: {niche}")
 
+    # Generate subcategory contract if not already present
+    if not paths.subcategory_contract.is_file():
+        from tools.lib.subcategory_contract import generate_contract, write_contract
+        from tools.lib.dzine_schema import detect_category
+        contract = generate_contract(niche, detect_category(niche))
+        write_contract(contract, paths.subcategory_contract)
+        print(f"  Wrote subcategory contract ({contract.category})")
+
     update_milestone(args.video_id, "research", "search_started")
     notify_start(args.video_id, details=[f"Niche: {niche}", "Research started"])
 
@@ -239,6 +263,7 @@ def cmd_research(args) -> int:
             output_dir=paths.root / "inputs",
             force=force,
             dry_run=dry_run,
+            contract_path=paths.subcategory_contract,
         )
 
         if dry_run:
@@ -287,7 +312,7 @@ def cmd_research(args) -> int:
         print(f"\nStep 3: Verifying {len(shortlist)} products on Amazon US...")
         from tools.amazon_verify import verify_products, write_verified
 
-        verified_objs = verify_products(shortlist)
+        verified_objs = verify_products(shortlist, video_id=args.video_id)
         verified = [
             {
                 "product_name": v.product_name,
@@ -295,6 +320,7 @@ def cmd_research(args) -> int:
                 "asin": v.asin,
                 "amazon_url": v.amazon_url,
                 "affiliate_url": v.affiliate_url,
+                "affiliate_short_url": v.affiliate_short_url,
                 "amazon_title": v.amazon_title,
                 "amazon_price": v.amazon_price,
                 "amazon_rating": v.amazon_rating,
@@ -329,8 +355,7 @@ def cmd_research(args) -> int:
         video_id=args.video_id, date=today,
     )
 
-    update_milestone(args.video_id, "research", "affiliate_links_ready",
-                     next_action=f"python3 tools/pipeline.py script --video-id {args.video_id}")
+    update_milestone(args.video_id, "research", "affiliate_links_ready")
 
     print(f"\n  Top 5 ({niche}):")
     for p in top5:
@@ -702,8 +727,12 @@ def cmd_script_brief(args) -> int:
     if paths.seo_json.is_file():
         seo_data = json.loads(paths.seo_json.read_text(encoding="utf-8"))
 
+    # Load channel style (optional)
+    style_path = project_root() / "channel" / "channel_style.md"
+    channel_style = style_path.read_text(encoding="utf-8") if style_path.is_file() else ""
+
     # Generate brief
-    brief_text = generate_brief(niche, products_data, seo_data)
+    brief_text = generate_brief(niche, products_data, seo_data, channel_style=channel_style)
     paths.manual_brief.parent.mkdir(parents=True, exist_ok=True)
     paths.manual_brief.write_text(brief_text, encoding="utf-8")
 
@@ -814,12 +843,57 @@ def cmd_script_review(args) -> int:
         return EXIT_ACTION_REQUIRED
 
 
+def _download_amazon_images(products, paths: VideoPaths) -> dict[int, Path]:
+    """Download Amazon product reference images for Dzine generation.
+
+    Returns {rank: local_path} for successfully downloaded images.
+    Skips if file already exists and is >10KB.
+    """
+    import urllib.request
+    ref_images: dict[int, Path] = {}
+    paths.assets_amazon.mkdir(parents=True, exist_ok=True)
+
+    for p in products:
+        image_url = getattr(p, "image_url", "")
+        if not image_url:
+            continue
+        dest = paths.amazon_ref_image(p.rank)
+        if dest.is_file() and dest.stat().st_size > 10 * 1024:
+            ref_images[p.rank] = dest
+            continue
+        try:
+            urllib.request.urlretrieve(image_url, str(dest))
+            if dest.is_file() and dest.stat().st_size > 1024:
+                ref_images[p.rank] = dest
+                print(f"  Downloaded ref image: {dest.name}")
+            else:
+                print(f"  Warning: ref image too small for rank {p.rank}, skipping")
+        except Exception as exc:
+            print(f"  Warning: could not download ref image for rank {p.rank}: {exc}")
+    return ref_images
+
+
 def cmd_assets(args) -> int:
-    """Check/generate Dzine assets (thumbnail + product images)."""
+    """Check/generate Dzine assets (thumbnail + variant product images)."""
     from tools.lib.pipeline_status import update_milestone
     from tools.lib.notify import notify_progress, notify_action_required
+    from tools.lib.preflight_gate import can_run_assets
+    from tools.lib.dzine_schema import (
+        DzineRequest, build_prompts, detect_category, variants_for_rank,
+    )
+
+    MIN_ASSET_SIZE = 80 * 1024  # 80 KB minimum for valid images
 
     _print_header(f"Assets: {args.video_id}")
+
+    # Preflight safety gate (skip on --dry-run so status check still works)
+    if not args.dry_run:
+        ok, reason = can_run_assets(args.video_id)
+        if not ok:
+            print(f"Blocked: {reason}")
+            notify_action_required(args.video_id, "assets", reason,
+                                   next_action="Fix the issue above, then re-run assets")
+            return EXIT_ACTION_REQUIRED
 
     paths = VideoPaths(args.video_id)
 
@@ -828,26 +902,46 @@ def cmd_assets(args) -> int:
         print(f"products.json not found: {paths.products_json}")
         return EXIT_ACTION_REQUIRED
 
-    # Determine needed assets
-    needed: list[tuple[str, Path]] = []  # (label, path)
-    needed.append(("thumbnail", paths.thumbnail_path()))
+    niche = _load_niche(paths)
+    category = detect_category(niche) if niche else "default"
+
+    # Build needed list: 1 thumbnail + variant images per product
+    needed: list[tuple[str, Path, dict]] = []  # (label, path, params)
+    needed.append(("thumbnail", paths.thumbnail_path(), {
+        "asset_type": "thumbnail",
+        "product_name": niche or "Top 5 Products",
+        "key_message": "Top 5",
+    }))
+
     for rank in [5, 4, 3, 2, 1]:
-        needed.append((f"product_{rank:02d}", paths.product_image_path(rank)))
+        p = next((pr for pr in products if pr.rank == rank), None)
+        name = p.name if p else f"Product {rank}"
+        for variant in variants_for_rank(rank):
+            needed.append((
+                f"{rank:02d}_{variant}",
+                paths.product_image_path(rank, variant),
+                {
+                    "asset_type": "product",
+                    "product_name": name,
+                    "image_variant": variant,
+                    "niche_category": category,
+                },
+            ))
 
     # Check existing
     existing = []
     missing = []
-    for label, path in needed:
-        if path.is_file() and path.stat().st_size > 50 * 1024:
-            existing.append((label, path))
+    for label, path, params in needed:
+        if path.is_file() and path.stat().st_size >= MIN_ASSET_SIZE:
+            existing.append((label, path, params))
         else:
-            missing.append((label, path))
+            missing.append((label, path, params))
 
-    print(f"Assets: {len(existing)} present, {len(missing)} missing")
-    for label, path in existing:
+    print(f"Assets: {len(existing)} present, {len(missing)} missing (total: {len(needed)})")
+    for label, path, _ in existing:
         size_kb = path.stat().st_size // 1024
         print(f"  [x] {label} ({size_kb} KB)")
-    for label, path in missing:
+    for label, path, _ in missing:
         print(f"  [ ] {label}")
 
     if args.dry_run:
@@ -860,73 +954,126 @@ def cmd_assets(args) -> int:
         update_milestone(args.video_id, "assets", "product_images_done")
         return EXIT_OK
 
-    # Generate missing assets
-    targets = missing if not args.force else needed
+    # Download Amazon reference images
+    print(f"\nDownloading Amazon reference images...")
+    ref_images = _download_amazon_images(products, paths)
+    print(f"  {len(ref_images)} reference images available")
 
+    # Import Dzine browser
     try:
         from tools.lib.dzine_browser import generate_image
-        from tools.lib.dzine_schema import DzineRequest
     except ImportError as exc:
         print(f"Cannot import Dzine modules: {exc}")
         print("Install playwright: pip install playwright && playwright install")
         return EXIT_ERROR
 
-    niche = _load_niche(paths)
     paths.assets_dzine.mkdir(parents=True, exist_ok=True)
     (paths.assets_dzine / "products").mkdir(parents=True, exist_ok=True)
+    (paths.assets_dzine / "prompts").mkdir(parents=True, exist_ok=True)
 
-    for i, (label, dest_path) in enumerate(targets):
+    targets = missing if not args.force else needed
+    generated = 0
+    failed = 0
+
+    notify_progress(
+        args.video_id, "assets", "generation_started",
+        progress_done=0, progress_total=len(targets),
+        details=[f"Starting Dzine generation: {len(targets)} images"],
+    )
+
+    for i, (label, dest_path, params) in enumerate(targets):
         print(f"\nGenerating {label} ({i+1}/{len(targets)})...")
 
-        # Build prompt based on asset type
-        if label == "thumbnail":
-            prompt = f"YouTube thumbnail for Top 5 {niche} video, vibrant, eye-catching, professional"
-            asset_type = "thumbnail"
-        else:
-            rank = int(label.split("_")[1])
-            p = next((pr for pr in products if pr.rank == rank), None)
-            name = p.name if p else f"Product {rank}"
-            prompt = f"Product showcase image for {name}, clean background, professional photography style"
-            asset_type = f"product_{rank:02d}"
+        # Add reference image if available for product variants
+        is_thumbnail = label == "thumbnail"
+        if not is_thumbnail:
+            rank = int(label.split("_")[0])
+            variant = label.split("_", 1)[1]
+            if rank in ref_images:
+                params["reference_image"] = str(ref_images[rank])
 
-        req = DzineRequest(
-            prompt=prompt,
-            asset_type=asset_type,
-            width=1920,
-            height=1080,
-        )
+        req = DzineRequest(**params)
+        req = build_prompts(req)
+
+        # Save prompt to prompts dir
+        if is_thumbnail:
+            prompt_path = paths.thumbnail_prompt_path()
+        else:
+            prompt_path = paths.product_prompt_path(rank, variant)
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text(req.prompt, encoding="utf-8")
 
         result = generate_image(req, output_path=dest_path)
 
-        if result.success:
-            print(f"  OK: {dest_path.name} ({result.duration_s:.0f}s)")
-            notify_progress(
-                args.video_id, "assets", f"{label}_done",
-                progress_done=i + 1, progress_total=len(targets),
-            )
+        if not result.success:
+            # Single retry
+            print(f"  Retry {label}...")
+            result = generate_image(req, output_path=dest_path)
+
+        if result.success and dest_path.is_file() and dest_path.stat().st_size >= MIN_ASSET_SIZE:
+            size_kb = dest_path.stat().st_size // 1024
+            print(f"  OK: {dest_path.name} ({size_kb} KB, {result.duration_s:.0f}s)")
+            generated += 1
+        elif result.success and dest_path.is_file():
+            size_kb = dest_path.stat().st_size // 1024
+            print(f"  Warning: {dest_path.name} too small ({size_kb} KB)")
+            failed += 1
         else:
             print(f"  FAILED: {result.error}")
-            if "login" in result.error.lower():
+            failed += 1
+            if "login" in (result.error or "").lower():
                 notify_action_required(
                     args.video_id, "assets", "Dzine login required",
                     next_action="Log in to Dzine in the Brave browser",
                 )
                 return EXIT_ACTION_REQUIRED
-            # Continue with remaining assets
+
+        # Telegram progress every 5 images
+        if (i + 1) % 5 == 0 or i + 1 == len(targets):
+            notify_progress(
+                args.video_id, "assets", f"generating",
+                progress_done=i + 1, progress_total=len(targets),
+            )
 
     update_milestone(args.video_id, "assets", "product_images_done")
+
+    if failed == 0:
+        notify_progress(
+            args.video_id, "assets", "product_images_done",
+            progress_done=len(targets), progress_total=len(targets),
+            next_action=f"python3 tools/pipeline.py tts --video-id {args.video_id}",
+            details=[f"Generated {generated} images, 0 failed"],
+        )
+    else:
+        notify_action_required(
+            args.video_id, "assets",
+            f"{failed} image(s) failed generation",
+            next_action=f"Re-run: python3 tools/pipeline.py assets --video-id {args.video_id}",
+        )
+
+    print(f"\nGenerated: {generated}, Failed: {failed}")
     print(f"\nNext: python3 tools/pipeline.py tts --video-id {args.video_id}")
-    return EXIT_OK
+    return EXIT_OK if failed == 0 else EXIT_ERROR
 
 
 def cmd_tts(args) -> int:
     """Generate TTS voiceover chunks."""
     from tools.lib.pipeline_status import update_milestone
     from tools.lib.tts_generate import generate_full, generate_patch
+    from tools.lib.preflight_gate import can_run_tts
+    from tools.lib.notify import notify_action_required, notify_progress, notify_error
 
     _print_header(f"TTS: {args.video_id}")
 
     paths = VideoPaths(args.video_id)
+
+    # Preflight safety gate — requires reviewed script
+    ok, reason = can_run_tts(args.video_id)
+    if not ok:
+        print(f"Blocked: {reason}")
+        notify_action_required(args.video_id, "tts", reason,
+                               next_action="Fix the issue above, then re-run tts")
+        return EXIT_ACTION_REQUIRED
 
     if not paths.script_txt.is_file():
         print(f"Script not found: {paths.script_txt}")
@@ -987,12 +1134,104 @@ def cmd_tts(args) -> int:
 
     if failed:
         failed_indices = [m.index for m in results if m.status == "failed"]
+        notify_error(
+            args.video_id, "voice", "chunks_failed",
+            f"{failed} chunk(s) failed",
+            next_action=f"Retry: python3 tools/pipeline.py tts --video-id {args.video_id} --patch {' '.join(str(i) for i in failed_indices)}",
+        )
         print(f"\n{failed} chunk(s) failed. Retry with:")
         print(f"  python3 tools/pipeline.py tts --video-id {args.video_id} --patch {' '.join(str(i) for i in failed_indices)}")
         return EXIT_ERROR
 
     update_milestone(args.video_id, "voice", "chunks_generated")
+    notify_progress(
+        args.video_id, "voice", "chunks_generated",
+        progress_done=ok, progress_total=len(results),
+        next_action=f"python3 tools/pipeline.py manifest --video-id {args.video_id}",
+        details=[f"Generated {ok} TTS chunks successfully"],
+    )
     print(f"\nNext: python3 tools/pipeline.py manifest --video-id {args.video_id}")
+    return EXIT_OK
+
+
+def cmd_broll_plan(args) -> int:
+    """Generate B-roll search plan from products.json."""
+    from tools.lib.dzine_schema import CATEGORY_BROLL_TERMS, detect_category
+
+    _print_header(f"B-Roll Plan: {args.video_id}")
+
+    paths = VideoPaths(args.video_id)
+    products = _load_products(paths)
+    niche = _load_niche(paths)
+
+    if not products:
+        print(f"Products not found: {paths.products_json}")
+        return EXIT_ACTION_REQUIRED
+
+    category = detect_category(niche) if niche else "default"
+    broll_terms = CATEGORY_BROLL_TERMS.get(category, ("hands using product", "modern lifestyle technology"))
+
+    lines = [
+        f"# B-Roll Plan — {args.video_id}",
+        f"Niche: {niche} (category: {category})",
+        "",
+        "Download 2-3 clips per product (3-6s each, 1080p minimum).",
+        "Save to: assets/broll/",
+        "Naming: <rank>_<description>.mp4 (e.g. 05_hands_using.mp4)",
+        "",
+        "Free sources: Pexels, Pixabay, Mixkit, Coverr",
+        "",
+        "---",
+        "",
+    ]
+
+    for p in sorted(products, key=lambda x: x.rank, reverse=True):
+        name_short = p.name.split("(")[0].strip()[:40]
+        lines.append(f"## #{p.rank} — {p.name}")
+        if p.positioning:
+            lines.append(f"Positioning: {p.positioning}")
+        lines.append("")
+        lines.append("Search terms:")
+        lines.append(f'  - "{name_short} in use"')
+        lines.append(f'  - "{niche} lifestyle"')
+        lines.append(f'  - "{broll_terms[0]}"')
+        lines.append(f'  - "{broll_terms[1]}"')
+
+        if p.benefits:
+            lines.append(f'  - "{p.benefits[0][:30]}" (benefit visual)')
+        lines.append("")
+        lines.append("Suggested clips: hero transition, usage context, detail B-roll")
+        lines.append("")
+
+    # General clips section
+    lines.extend([
+        "---",
+        "",
+        "## General Clips (reusable across segments)",
+        "",
+        "Search terms:",
+        '  - "transition whoosh motion"',
+        '  - "abstract light leak"',
+        '  - "modern technology montage"',
+        f'  - "{niche} comparison"',
+        "",
+        "Retention reset clip:",
+        '  - "split screen comparison" or "fast montage product"',
+    ])
+
+    plan_text = "\n".join(lines)
+
+    # Write to resolve/ dir
+    paths.resolve_dir.mkdir(parents=True, exist_ok=True)
+    plan_path = paths.resolve_dir / "broll_plan.txt"
+    plan_path.write_text(plan_text, encoding="utf-8")
+    print(f"Wrote {plan_path}")
+
+    # Also ensure broll dir exists
+    paths.assets_broll.mkdir(parents=True, exist_ok=True)
+    print(f"B-roll directory: {paths.assets_broll}")
+
+    print(f"\n{len(products)} products, ~{len(products) * 2}-{len(products) * 3} clips needed")
     return EXIT_OK
 
 
@@ -1001,6 +1240,7 @@ def cmd_manifest(args) -> int:
     from tools.lib.pipeline_status import update_milestone
     from tools.lib.resolve_schema import (
         generate_manifest,
+        manifest_to_edl,
         manifest_to_json,
         manifest_to_markers_csv,
         manifest_to_notes,
@@ -1017,12 +1257,19 @@ def cmd_manifest(args) -> int:
     script_text = paths.script_txt.read_text(encoding="utf-8")
 
     products = _load_products(paths)
+    niche = _load_niche(paths)
     product_names = {}
     product_benefits = {}
+    product_data: dict[int, dict] = {}
     if products:
         for p in products:
             product_names[p.rank] = p.name
             product_benefits[p.rank] = p.benefits
+            product_data[p.rank] = {
+                "benefits": p.benefits,
+                "downside": p.downside,
+                "positioning": p.positioning,
+            }
 
     # Generate manifest
     manifest = generate_manifest(
@@ -1044,8 +1291,15 @@ def cmd_manifest(args) -> int:
     markers_path.write_text(manifest_to_markers_csv(manifest), encoding="utf-8")
     print(f"Wrote {markers_path}")
 
+    edl_path = paths.resolve_dir / "markers.edl"
+    edl_path.write_text(manifest_to_edl(manifest), encoding="utf-8")
+    print(f"Wrote {edl_path}")
+
     notes_path = paths.resolve_dir / "notes.md"
-    notes_path.write_text(manifest_to_notes(manifest), encoding="utf-8")
+    notes_path.write_text(
+        manifest_to_notes(manifest, product_data=product_data, niche=niche),
+        encoding="utf-8",
+    )
     print(f"Wrote {notes_path}")
 
     print(f"\nTotal duration: {manifest.total_duration_s:.0f}s ({manifest.total_duration_s/60:.1f} min)")
@@ -1053,7 +1307,18 @@ def cmd_manifest(args) -> int:
 
     update_milestone(args.video_id, "edit_prep", "notes_generated")
 
-    print("\nNext: Open DaVinci Resolve and import the manifest")
+    from tools.lib.notify import notify_summary
+    notify_summary(
+        args.video_id,
+        details=[
+            f"Duration: {manifest.total_duration_s:.0f}s ({manifest.total_duration_s/60:.1f} min)",
+            f"Segments: {len(manifest.segments)}",
+            "Files: edit_manifest.json, markers.csv, markers.edl, notes.md",
+        ],
+        next_action="Open DaVinci Resolve > Import Timeline Markers from EDL > markers.edl",
+    )
+
+    print("\nNext: Open DaVinci Resolve > right-click timeline > Import > Timeline Markers from EDL > select markers.edl")
     return EXIT_OK
 
 
@@ -1110,6 +1375,77 @@ def cmd_run(args) -> int:
     return EXIT_OK
 
 
+def cmd_day(args) -> int:
+    """Daily pipeline: init (if needed) -> research -> script-brief. Stops for human."""
+    import argparse
+    import datetime
+    from tools.lib.notify import notify_action_required
+
+    _print_header(f"Day: {args.video_id}")
+
+    paths = VideoPaths(args.video_id)
+    niche = getattr(args, "niche", "") or ""
+    force = getattr(args, "force", False)
+
+    # --- Step 1: Init if root doesn't exist ---
+    if not paths.root.exists() or force:
+        if not niche:
+            # Auto-pick niche
+            today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+            from tools.niche_picker import pick_niche
+            candidate = pick_niche(today)
+            niche = candidate.keyword
+            print(f"Auto-picked niche: {niche} (score: {candidate.score:.1f})")
+
+        init_args = argparse.Namespace(
+            video_id=args.video_id, niche=niche, force=force,
+        )
+        rc = cmd_init(init_args)
+        if rc != EXIT_OK:
+            return rc
+    else:
+        print(f"Video folder exists: {paths.root}")
+        niche = _load_niche(paths)
+        if not niche:
+            print("niche.txt not found — run init first or pass --niche")
+            return EXIT_ERROR
+
+    # --- Step 2: Research ---
+    print()
+    research_args = argparse.Namespace(
+        video_id=args.video_id, mode="run", dry_run=False, force=force,
+    )
+    rc = cmd_research(research_args)
+    if rc != EXIT_OK:
+        return rc
+
+    # --- Step 3: Script brief ---
+    print()
+    brief_args = argparse.Namespace(video_id=args.video_id)
+    rc = cmd_script_brief(brief_args)
+    if rc != EXIT_OK:
+        return rc
+
+    # --- Done: signal human needed ---
+    notify_action_required(
+        args.video_id, "script",
+        "Brief ready — write script_raw.txt",
+        next_action=(
+            f"Write script in {paths.script_raw}, then run: "
+            f"python3 tools/pipeline.py script-review --video-id {args.video_id}"
+        ),
+    )
+
+    print(f"\n{'=' * 50}")
+    print(f"  Day pipeline complete — human needed")
+    print(f"{'=' * 50}")
+    print(f"\n  Brief: {paths.manual_brief}")
+    print(f"  Write: {paths.script_raw}")
+    print(f"\n  Then:  python3 tools/pipeline.py script-review --video-id {args.video_id}")
+
+    return EXIT_ACTION_REQUIRED
+
+
 def cmd_status(args) -> int:
     """Show pipeline status for one or all videos."""
     from tools.lib.pipeline_status import format_status_text, get_status
@@ -1162,10 +1498,16 @@ def cmd_status(args) -> int:
         ("assets/dzine/thumbnail.png", paths.thumbnail_path().is_file()),
     ]
 
-    # Check product images
+    # Check product images (variant-aware)
+    from tools.lib.dzine_schema import variants_for_rank
     for rank in [5, 4, 3, 2, 1]:
-        img = paths.product_image_path(rank)
-        checks.append((f"assets/dzine/products/{rank:02d}.png", img.is_file()))
+        expected = variants_for_rank(rank)
+        present = [v for v in expected if paths.product_image_path(rank, v).is_file()]
+        missing_v = [v for v in expected if v not in present]
+        if missing_v:
+            checks.append((f"  product {rank:02d}: {len(present)}/{len(expected)} variants (missing: {', '.join(missing_v)})", False))
+        else:
+            checks.append((f"  product {rank:02d}: {len(present)}/{len(expected)} variants", True))
 
     # Check audio chunks
     chunk_count = 0
@@ -1176,6 +1518,7 @@ def cmd_status(args) -> int:
     # Check resolve outputs
     checks.append(("resolve/edit_manifest.json", (paths.resolve_dir / "edit_manifest.json").is_file()))
     checks.append(("resolve/markers.csv", (paths.resolve_dir / "markers.csv").is_file()))
+    checks.append(("resolve/markers.edl", (paths.resolve_dir / "markers.edl").is_file()))
     checks.append(("resolve/notes.md", (paths.resolve_dir / "notes.md").is_file()))
 
     print("Files:")
@@ -1262,9 +1605,19 @@ def main() -> int:
     p_tts.add_argument("--force", action="store_true", help="Regenerate all chunks")
     p_tts.add_argument("--patch", type=int, nargs="+", help="Regenerate specific chunk indices")
 
+    # broll-plan
+    p_broll = sub.add_parser("broll-plan", help="Generate B-roll search plan from products")
+    p_broll.add_argument("--video-id", required=True)
+
     # manifest
     p_man = sub.add_parser("manifest", help="Generate Resolve edit manifest")
     p_man.add_argument("--video-id", required=True)
+
+    # day (daily pipeline)
+    p_day = sub.add_parser("day", help="Daily pipeline: init -> research -> script-brief (stops for human)")
+    p_day.add_argument("--video-id", required=True)
+    p_day.add_argument("--niche", default="", help="Product niche (auto-picked if empty)")
+    p_day.add_argument("--force", action="store_true", help="Force re-run all stages")
 
     # run (full orchestrator)
     p_run = sub.add_parser("run", help="Run full pipeline via multi-agent orchestrator")
@@ -1294,7 +1647,9 @@ def main() -> int:
         "script-review": cmd_script_review,
         "assets": cmd_assets,
         "tts": cmd_tts,
+        "broll-plan": cmd_broll_plan,
         "manifest": cmd_manifest,
+        "day": cmd_day,
         "run": cmd_run,
         "status": cmd_status,
     }

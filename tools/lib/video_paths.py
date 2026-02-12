@@ -26,8 +26,9 @@ class VideoPaths:
         self.products_json = self.root / "inputs" / "products.json"
         self.niche_txt = self.root / "inputs" / "niche.txt"
 
-        # inputs/
+        # inputs/ (continued)
         self.seo_json = self.root / "inputs" / "seo.json"
+        self.research_report = self.root / "inputs" / "research_report.md"
 
         # script/
         self.script_txt = self.root / "script" / "script.txt"
@@ -41,6 +42,7 @@ class VideoPaths:
         # assets/
         self.assets_dzine = self.root / "assets" / "dzine"
         self.assets_amazon = self.root / "assets" / "amazon"
+        self.assets_broll = self.root / "assets" / "broll"
 
         # audio/
         self.audio_chunks = self.root / "audio" / "voice" / "chunks"
@@ -54,6 +56,12 @@ class VideoPaths:
         # export/
         self.export_dir = self.root / "export"
 
+        # amazon screens (PDP + SiteStripe screenshots)
+        self.amazon_screens = self.root / "amazon_screens"
+
+        # subcategory contract
+        self.subcategory_contract = self.root / "inputs" / "subcategory_contract.json"
+
         # status
         self.status_json = self.root / "status.json"
 
@@ -61,9 +69,27 @@ class VideoPaths:
         """Dzine-generated thumbnail."""
         return self.assets_dzine / "thumbnail.png"
 
-    def product_image_path(self, rank: int) -> Path:
-        """Dzine-generated product image: assets/dzine/products/05.png"""
+    def product_image_path(self, rank: int, variant: str = "") -> Path:
+        """Dzine-generated product image.
+
+        Without variant: assets/dzine/products/05.png (legacy)
+        With variant:    assets/dzine/products/05_hero.png
+        """
+        if variant:
+            return self.assets_dzine / "products" / f"{rank:02d}_{variant}.png"
         return self.assets_dzine / "products" / f"{rank:02d}.png"
+
+    def product_prompt_path(self, rank: int, variant: str) -> Path:
+        """Saved prompt text: assets/dzine/prompts/05_hero.txt"""
+        return self.assets_dzine / "prompts" / f"{rank:02d}_{variant}.txt"
+
+    def thumbnail_prompt_path(self) -> Path:
+        """Saved thumbnail prompt: assets/dzine/prompts/thumbnail.txt"""
+        return self.assets_dzine / "prompts" / "thumbnail.txt"
+
+    def amazon_ref_image(self, rank: int) -> Path:
+        """Amazon reference image: assets/amazon/05_ref.jpg"""
+        return self.assets_amazon / f"{rank:02d}_ref.jpg"
 
     def chunk_path(self, index: int) -> Path:
         """TTS audio chunk: audio/voice/chunks/01.mp3"""
@@ -75,7 +101,10 @@ class VideoPaths:
             self.root / "inputs",
             self.prompts_dir,
             self.assets_dzine / "products",
+            self.assets_dzine / "prompts",
             self.assets_amazon,
+            self.assets_broll,
+            self.amazon_screens,
             self.audio_chunks,
             self.audio_music,
             self.audio_sfx,

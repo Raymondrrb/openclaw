@@ -145,8 +145,52 @@ class ResearchReport:
 # ---------------------------------------------------------------------------
 
 
+# Comparison-page title patterns — only these types of pages are valid sources
+_COMPARISON_TITLE_PATTERNS = [
+    r"\bbest\b",
+    r"\btop\s+\d+\b",
+    r"\btop\s+pick",
+    r"\bour\s+pick",
+    r"\breview",
+    r"\bcompare",
+    r"\bcomparison\b",
+    r"\bbuying\s+guide\b",
+    r"\brated\b",
+    r"\brecommend",
+    r"\bpicks?\b",
+    r"\bfavorite",
+    r"\beditor",
+]
+
+_COMPARISON_RE = re.compile(
+    "|".join(_COMPARISON_TITLE_PATTERNS), re.IGNORECASE,
+)
+
+
+def _is_comparison_page(title: str, url: str) -> bool:
+    """Check if a search result looks like a comparison/recommendation page.
+
+    Only comparison/review list pages are valid research sources.
+    Individual product reviews, news articles, and fluff are rejected.
+    """
+    if not title:
+        return False
+    # URL-based signals: comparison pages typically have these path patterns
+    url_lower = url.lower()
+    url_signals = ["/best-", "/top-", "/reviews/", "/picks/",
+                   "/buying-guide", "/comparison", "/vs"]
+    has_url_signal = any(s in url_lower for s in url_signals)
+    # Title-based signals
+    has_title_signal = bool(_COMPARISON_RE.search(title))
+    return has_url_signal or has_title_signal
+
+
 def _find_review_articles(niche: str) -> list[tuple[str, str, str]]:
-    """Search Google for review articles — exactly 3 sources, max 2 pages each.
+    """Search Google for comparison/review list pages — exactly 3 sources.
+
+    COMPARISON-FIRST: Only accepts pages that are comparison/recommendation
+    lists (e.g., "Best X of 2026", "Top 5 X", "Our Picks").
+    Rejects individual product reviews, news articles, and fluff.
 
     Returns list of (source_name, url, search_title).
     """
@@ -154,11 +198,12 @@ def _find_review_articles(niche: str) -> list[tuple[str, str, str]]:
 
     for source_name, info in TRUSTED_SOURCES.items():
         domain = info["domain"]
+        # Target comparison/best-of pages explicitly
         query = f"best {niche} site:{domain}"
 
         print(f"  Searching {source_name}...", file=sys.stderr)
         try:
-            results = web_search(query, count=2)
+            results = web_search(query, count=3)
         except Exception as exc:
             print(f"    Search failed: {exc}", file=sys.stderr)
             continue
@@ -167,18 +212,24 @@ def _find_review_articles(niche: str) -> list[tuple[str, str, str]]:
             print(f"    No coverage", file=sys.stderr)
             continue
 
-        # Take up to 2 results per source
+        # Take up to 2 COMPARISON pages per source
         added = 0
-        for r in results[:2]:
+        for r in results[:3]:
+            if added >= 2:
+                break
             # Enforce domain restriction
             if not any(d in r.url for d in _ALLOWED_DOMAINS):
                 print(f"    SKIPPED (domain violation): {r.url}", file=sys.stderr)
+                continue
+            # Enforce comparison-page requirement
+            if not _is_comparison_page(r.title, r.url):
+                print(f"    SKIPPED (not a comparison page): {r.title[:60]}", file=sys.stderr)
                 continue
             articles.append((source_name, r.url, r.title))
             print(f"    -> {r.title[:70]}", file=sys.stderr)
             added += 1
         if added == 0:
-            print(f"    No coverage", file=sys.stderr)
+            print(f"    No comparison pages found", file=sys.stderr)
 
     return articles
 
@@ -461,7 +512,7 @@ def _aggregate(reports: list[SourceReport]) -> list[AggregatedProduct]:
 def _build_shortlist(
     aggregated: list[AggregatedProduct],
 ) -> tuple[list[AggregatedProduct], list[AggregatedProduct]]:
-    """Build shortlist (8-15 products) and rejected list."""
+    """Build shortlist (5-7 products) and rejected list."""
     shortlist: list[AggregatedProduct] = []
     rejected: list[AggregatedProduct] = []
 
@@ -476,17 +527,17 @@ def _build_shortlist(
             rejected.append(agg)
 
     # If shortlist too small, relax criteria
-    if len(shortlist) < 8:
+    if len(shortlist) < 5:
         for agg in rejected[:]:
-            if len(shortlist) >= 15:
+            if len(shortlist) >= 7:
                 break
             shortlist.append(agg)
             rejected.remove(agg)
 
-    # Cap at 15
-    if len(shortlist) > 15:
-        overflow = shortlist[15:]
-        shortlist = shortlist[:15]
+    # Cap at 7
+    if len(shortlist) > 7:
+        overflow = shortlist[7:]
+        shortlist = shortlist[:7]
         rejected = overflow + rejected
 
     return shortlist, rejected
@@ -506,17 +557,19 @@ def _validate_done(report: ResearchReport) -> list[str]:
         if not any(d in s.url for d in _ALLOWED_DOMAINS):
             errors.append(f"Source violation – research restricted to 3 domains. Found: {s.url}")
 
-    # At least 8 unique products mentioned
+    # At least 5 unique products mentioned
     all_products = set()
     for s in report.sources_reviewed:
         for p in s.products_found:
             all_products.add(_normalize_name(p.product_name))
-    if len(all_products) < 8:
-        errors.append(f"Only {len(all_products)} unique products found (minimum 8)")
+    if len(all_products) < 5:
+        errors.append(f"Only {len(all_products)} unique products found (minimum 5)")
 
-    # Shortlist has 8-15 items
-    if len(report.shortlist) < 8:
-        errors.append(f"Shortlist has {len(report.shortlist)} items (minimum 8)")
+    # Shortlist has 5-7 items
+    if len(report.shortlist) < 5:
+        errors.append(f"Shortlist has {len(report.shortlist)} items (minimum 5)")
+    if len(report.shortlist) > 7:
+        errors.append(f"Shortlist has {len(report.shortlist)} items (maximum 7)")
 
     return errors
 
@@ -579,7 +632,7 @@ def _write_research_report(report: ResearchReport, output_path: Path) -> None:
         lines.append("")
 
     # Shortlist
-    lines.append("## Shortlist (8-15)")
+    lines.append("## Shortlist (5-7)")
     lines.append("")
     for i, agg in enumerate(report.shortlist, 1):
         sources = ", ".join(e.source_name for e in agg.evidence)
@@ -616,6 +669,27 @@ def _write_research_report(report: ResearchReport, output_path: Path) -> None:
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _extract_model(product_name: str, brand: str) -> str:
+    """Extract model name by stripping brand prefix."""
+    if brand and product_name.lower().startswith(brand.lower()):
+        model = product_name[len(brand):].strip()
+        return model if model else product_name
+    return product_name
+
+
+def _why_in_shortlist(agg: AggregatedProduct) -> str:
+    """Auto-generate 1-2 line summary explaining why this product is shortlisted."""
+    parts = []
+    if agg.source_count >= 2:
+        source_names = ", ".join(ev.source_name for ev in agg.evidence)
+        parts.append(f"Recommended by {agg.source_count} sources: {source_names}")
+    elif agg.source_count == 1:
+        parts.append(f"Recommended by {agg.evidence[0].source_name}")
+    if agg.primary_label:
+        parts.append(f"[{agg.primary_label}]")
+    return " ".join(parts)
+
+
 def _write_shortlist_json(report: ResearchReport, output_path: Path) -> None:
     """Write structured shortlist.json."""
     data = {
@@ -630,10 +704,21 @@ def _write_shortlist_json(report: ResearchReport, output_path: Path) -> None:
             {
                 "product_name": agg.product_name,
                 "brand": agg.brand,
+                "model": _extract_model(agg.product_name, agg.brand),
                 "evidence_count": agg.source_count,
                 "evidence_score": round(agg.evidence_score, 1),
                 "primary_label": agg.primary_label,
                 "all_labels": agg.all_labels,
+                "why_in_shortlist": _why_in_shortlist(agg),
+                "pass_subcategory_gate": True,
+                "evidence_by_source": {
+                    ev.source_name.lower().replace(" ", "_"): {
+                        "url": ev.source_url,
+                        "key_claims": ev.reasons[:3],
+                        "subcategory_proof": [ev.category_label] if ev.category_label else [],
+                    }
+                    for ev in agg.evidence
+                },
                 "sources": [
                     {
                         "name": ev.source_name,
@@ -664,6 +749,7 @@ def run_reviews_research(
     output_dir: Path | None = None,
     force: bool = False,
     dry_run: bool = False,
+    contract_path: Path | None = None,
 ) -> ResearchReport:
     """Execute the full evidence-first research pipeline.
 
@@ -722,6 +808,22 @@ def run_reviews_research(
     # --- Step 3: Aggregate ---
     print(f"\n[research] Step 3: Aggregating evidence...", file=sys.stderr)
     report.aggregated = _aggregate(report.sources_reviewed)
+
+    # --- Step 3b: Subcategory gate filtering ---
+    contract = None
+    if contract_path and contract_path.is_file():
+        from tools.lib.subcategory_contract import load_contract, passes_gate
+        contract = load_contract(contract_path)
+        filtered: list[AggregatedProduct] = []
+        for agg in report.aggregated:
+            ok, reason = passes_gate(agg.product_name, agg.brand, contract)
+            if ok:
+                filtered.append(agg)
+            else:
+                print(f"  REJECTED (subcategory): {agg.product_name} -- {reason}", file=sys.stderr)
+        print(f"  Subcategory gate: {len(report.aggregated)} -> {len(filtered)} products", file=sys.stderr)
+        report.aggregated = filtered
+
     report.shortlist, report.rejected = _build_shortlist(report.aggregated)
 
     multi = [a for a in report.aggregated if a.source_count >= 2]

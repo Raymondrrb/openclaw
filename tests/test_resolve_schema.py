@@ -461,8 +461,8 @@ class TestSerialization(unittest.TestCase):
         self.assertIn("# Edit Notes", notes)
         self.assertIn("## Timeline Layout", notes)
         self.assertIn("## Audio Mix", notes)
-        self.assertIn("## Per-Segment Visuals", notes)
-        self.assertIn("## Resolve Workflow", notes)
+        self.assertIn("## Per-Segment Edit Guide", notes)
+        self.assertIn("## QC Checklist", notes)
 
     def test_manifest_to_notes_duration(self):
         m = generate_manifest("test-001", SAMPLE_SCRIPT, self.vdir)

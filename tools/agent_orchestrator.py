@@ -211,6 +211,7 @@ class NicheStrategist:
             ))
             ctx.paths.niche_txt.parent.mkdir(parents=True, exist_ok=True)
             ctx.paths.niche_txt.write_text(ctx.niche + "\n", encoding="utf-8")
+            self._ensure_contract(ctx)
             return True
 
         # Check niche.txt
@@ -222,6 +223,7 @@ class NicheStrategist:
                     msg_type=MsgType.INFO, stage=Stage.NICHE,
                     content=f"Loaded niche from file: {ctx.niche}",
                 ))
+                self._ensure_contract(ctx)
                 return True
 
         # Pick from pool
@@ -238,7 +240,23 @@ class NicheStrategist:
             content=f"Selected niche: {ctx.niche} (score: {candidate.score:.1f})",
             data={"keyword": ctx.niche, "score": candidate.score, "category": candidate.category},
         ))
+        self._ensure_contract(ctx)
         return True
+
+    def _ensure_contract(self, ctx: RunContext) -> None:
+        """Generate subcategory contract if it doesn't exist yet."""
+        if ctx.paths.subcategory_contract.is_file():
+            return
+        from tools.lib.subcategory_contract import generate_contract, write_contract
+        from tools.lib.dzine_schema import detect_category
+        contract = generate_contract(ctx.niche, detect_category(ctx.niche))
+        ctx.paths.ensure_dirs()
+        write_contract(contract, ctx.paths.subcategory_contract)
+        ctx.bus.post(Message(
+            sender=self.name, receiver="*",
+            msg_type=MsgType.INFO, stage=Stage.NICHE,
+            content=f"Subcategory contract generated for '{ctx.niche}' ({contract.category})",
+        ))
 
 
 class SEOAgent:
@@ -359,7 +377,7 @@ class AmazonVerifyAgent:
 
         from tools.amazon_verify import verify_products, write_verified
 
-        verified_objs = verify_products(shortlist)
+        verified_objs = verify_products(shortlist, video_id=ctx.video_id)
         write_verified(verified_objs, verified_path)
 
         ctx.bus.post(Message(
@@ -423,7 +441,11 @@ class Top5RankerAgent:
         from tools.top5_ranker import select_top5, write_products_json
 
         today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-        top5 = select_top5(verified)
+        contract_path = ctx.paths.subcategory_contract
+        top5 = select_top5(
+            verified,
+            contract_path=contract_path if contract_path.is_file() else None,
+        )
 
         write_products_json(
             top5, ctx.niche, ctx.paths.products_json,
@@ -600,10 +622,12 @@ class DzineAssetAgent:
             ))
             return False
 
-        # Check what's needed
+        # Check what's needed (variant-aware)
+        from tools.lib.dzine_schema import variants_for_rank
         needed = [("thumbnail", ctx.paths.thumbnail_path())]
         for rank in [5, 4, 3, 2, 1]:
-            needed.append((f"product_{rank:02d}", ctx.paths.product_image_path(rank)))
+            for variant in variants_for_rank(rank):
+                needed.append((f"{rank:02d}_{variant}", ctx.paths.product_image_path(rank, variant)))
 
         missing = [(label, p) for label, p in needed if not p.is_file() or p.stat().st_size < 50 * 1024]
 
@@ -830,8 +854,10 @@ class QAGatekeeper:
             return errors
         data = json.loads(shortlist_path.read_text(encoding="utf-8"))
         shortlist = data.get("shortlist", [])
-        if len(shortlist) < 8:
-            errors.append(f"Shortlist has {len(shortlist)} items (minimum 8)")
+        if len(shortlist) < 5:
+            errors.append(f"Shortlist has {len(shortlist)} items (minimum 5)")
+        if len(shortlist) > 7:
+            errors.append(f"Shortlist has {len(shortlist)} items (maximum 7)")
 
         # Domain compliance
         for item in shortlist:
@@ -839,6 +865,21 @@ class QAGatekeeper:
                 url = src.get("url", "")
                 if url and not any(d in url for d in ALLOWED_RESEARCH_DOMAINS):
                     errors.append(f"Domain violation: {url}")
+
+        # Subcategory contract compliance
+        contract_path = ctx.paths.subcategory_contract
+        if contract_path.is_file():
+            from tools.lib.subcategory_contract import load_contract, passes_gate
+            contract = load_contract(contract_path)
+            for item in shortlist:
+                ok, reason = passes_gate(
+                    item.get("product_name", ""),
+                    item.get("brand", ""),
+                    contract,
+                )
+                if not ok:
+                    errors.append(f"Subcategory drift: {item.get('product_name', '?')} -- {reason}")
+
         return errors
 
     def _check_verify(self, ctx: RunContext) -> list[str]:
@@ -851,6 +892,21 @@ class QAGatekeeper:
         products = data.get("products", [])
         if len(products) < 5:
             errors.append(f"Only {len(products)} products verified (minimum 5)")
+
+        # Subcategory contract compliance — HARD FAIL on any drift
+        contract_path = ctx.paths.subcategory_contract
+        if contract_path.is_file():
+            from tools.lib.subcategory_contract import load_contract, passes_gate
+            contract = load_contract(contract_path)
+            for p in products:
+                ok, reason = passes_gate(
+                    p.get("product_name", ""),
+                    p.get("brand", ""),
+                    contract,
+                )
+                if not ok:
+                    errors.append(f"Subcategory drift in verified: {p.get('product_name', '?')} -- {reason}")
+
         return errors
 
     def _check_rank(self, ctx: RunContext) -> list[str]:
@@ -867,6 +923,17 @@ class QAGatekeeper:
                 errors.append(f"Product rank {p.get('rank')} has no name")
             if not p.get("asin") and not p.get("affiliate_url"):
                 errors.append(f"Product '{p.get('name', '?')}' has no ASIN or affiliate link")
+
+        # Subcategory contract compliance — HARD FAIL on any drift
+        contract_path = ctx.paths.subcategory_contract
+        if contract_path.is_file():
+            from tools.lib.subcategory_contract import load_contract, passes_gate
+            contract = load_contract(contract_path)
+            for p in products:
+                ok, reason = passes_gate(p.get("name", ""), p.get("brand", ""), contract)
+                if not ok:
+                    errors.append(f"Subcategory drift in Top 5: {p.get('name', '?')} -- {reason}")
+
         return errors
 
     def _check_script(self, ctx: RunContext) -> list[str]:
@@ -879,14 +946,16 @@ class QAGatekeeper:
         return errors
 
     def _check_assets(self, ctx: RunContext) -> list[str]:
+        from tools.lib.dzine_schema import variants_for_rank
         errors = []
         thumb = ctx.paths.thumbnail_path()
         if not thumb.is_file() or thumb.stat().st_size < 50 * 1024:
             errors.append("Thumbnail missing or too small")
         for rank in [5, 4, 3, 2, 1]:
-            img = ctx.paths.product_image_path(rank)
-            if not img.is_file() or img.stat().st_size < 50 * 1024:
-                errors.append(f"Product image {rank:02d} missing or too small")
+            for variant in variants_for_rank(rank):
+                img = ctx.paths.product_image_path(rank, variant)
+                if not img.is_file() or img.stat().st_size < 50 * 1024:
+                    errors.append(f"Product image {rank:02d}_{variant} missing or too small")
         return errors
 
     def _check_tts(self, ctx: RunContext) -> list[str]:

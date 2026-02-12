@@ -7,10 +7,12 @@ from pathlib import Path
 from tools.lib.dzine_schema import (
     ASSET_TYPES,
     DEFAULT_RESOLUTIONS,
+    IMAGE_VARIANTS,
     MAX_PROMPT_LENGTH,
     NEGATIVE_PROMPTS,
     PROMPT_TEMPLATES,
     STYLES,
+    VARIANT_TEMPLATES,
     DzineRequest,
     build_prompts,
     validate_request,
@@ -159,7 +161,6 @@ class TestBuildPrompts(unittest.TestCase):
         )
         built = build_prompts(req)
         self.assertIn("Test Product A", built.prompt)
-        self.assertIn("Top Pick", built.prompt)
 
     def test_thumbnail_resolution(self):
         req = DzineRequest(
@@ -276,6 +277,17 @@ class TestBuildPrompts(unittest.TestCase):
         )
         built = build_prompts(req)
         self.assertEqual(built.prompt, "My custom prompt text here")
+
+    def test_thumbnail_template_updated(self):
+        """Thumbnail template should not contain 'Add bold headline text'."""
+        self.assertNotIn("Add bold headline text", PROMPT_TEMPLATES["thumbnail"])
+
+    def test_all_variants_have_templates(self):
+        """Every IMAGE_VARIANT must have a 'default' key in VARIANT_TEMPLATES."""
+        for variant in IMAGE_VARIANTS:
+            self.assertIn(variant, VARIANT_TEMPLATES, f"Missing template for {variant}")
+            self.assertIn("default", VARIANT_TEMPLATES[variant],
+                         f"Missing 'default' key in VARIANT_TEMPLATES[{variant!r}]")
 
 
 if __name__ == "__main__":

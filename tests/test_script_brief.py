@@ -197,6 +197,17 @@ class TestGenerateBrief(unittest.TestCase):
         self.assertIn("script_raw.txt", brief)
         self.assertIn("script-review", brief)
 
+    def test_brief_includes_channel_style(self):
+        style = "## Custom Voice\n- Be bold and direct\n- Never use filler words"
+        brief = generate_brief("wireless earbuds", SAMPLE_PRODUCTS, {}, channel_style=style)
+        self.assertIn("## Channel Style", brief)
+        self.assertIn("Be bold and direct", brief)
+        self.assertIn("Never use filler words", brief)
+
+    def test_brief_without_channel_style(self):
+        brief = generate_brief("wireless earbuds", SAMPLE_PRODUCTS, {}, channel_style="")
+        self.assertNotIn("## Channel Style", brief)
+
 
 # ---------------------------------------------------------------------------
 # Tests: review_script

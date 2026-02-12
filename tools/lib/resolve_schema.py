@@ -9,11 +9,9 @@ Stdlib only — no external deps.
 from __future__ import annotations
 
 import json
-import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -304,10 +302,13 @@ def discover_assets(video_dir: Path) -> dict:
         rank_str = f"{rank:02d}"
         prod = {"amazon": [], "dzine": [], "clips": []}
 
-        # New layout: assets/dzine/products/05.png
-        dzine_img = vd / "assets" / "dzine" / "products" / f"{rank_str}.png"
-        if dzine_img.is_file():
-            prod["dzine"].append(f"assets/dzine/products/{rank_str}.png")
+        # New layout: assets/dzine/products/05.png, 05_hero.png, 05_usage1.png, etc.
+        products_dir = vd / "assets" / "dzine" / "products"
+        if products_dir.is_dir():
+            for f in sorted(products_dir.iterdir()):
+                if f.stem == rank_str or f.stem.startswith(rank_str + "_"):
+                    if f.suffix.lower() == ".png":
+                        prod["dzine"].append(f"assets/dzine/products/{f.name}")
 
         # New layout: assets/amazon/05_main.jpg (and similar)
         amazon_dir = vd / "assets" / "amazon"
@@ -702,6 +703,27 @@ def manifest_to_json(m: EditManifest) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _seconds_to_tc(seconds: float, fps: int) -> str:
+    """Convert seconds to HH:MM:SS:FF timecode."""
+    h = int(seconds // 3600)
+    rem = seconds % 3600
+    mi = int(rem // 60)
+    rem = rem % 60
+    s = int(rem)
+    f = int((rem - s) * fps)
+    return f"{h:02d}:{mi:02d}:{s:02d}:{f:02d}"
+
+
+def _broll_insertion_times(seg_start: float, seg_end: float) -> list[float]:
+    """Return B-roll insertion time points within a segment (every 8s, offset 4s)."""
+    times = []
+    t = seg_start + 4.0
+    while t < seg_end - 3.0:
+        times.append(t)
+        t += 8.0
+    return times
+
+
 def manifest_to_markers_csv(m: EditManifest) -> str:
     """Generate a markers CSV for DaVinci Resolve import.
 
@@ -709,16 +731,7 @@ def manifest_to_markers_csv(m: EditManifest) -> str:
     Timecode at the manifest's FPS.
     """
     lines = ["Name,Start TC,Duration,Note,Color"]
-
-    def _tc(seconds: float) -> str:
-        """Convert seconds to HH:MM:SS:FF timecode."""
-        h = int(seconds // 3600)
-        rem = seconds % 3600
-        mi = int(rem // 60)
-        rem = rem % 60
-        s = int(rem)
-        f = int((rem - s) * m.fps)
-        return f"{h:02d}:{mi:02d}:{s:02d}:{f:02d}"
+    _tc = lambda s: _seconds_to_tc(s, m.fps)
 
     # Section markers
     lines.append(f"Hook,{_tc(m.hook_start_s)},00:00:01:00,Hook start,Blue")
@@ -730,6 +743,12 @@ def manifest_to_markers_csv(m: EditManifest) -> str:
             f"Product #{seg.rank} - {seg.product_name},{_tc(seg.start_s)},00:00:01:00,"
             f"{seg.word_count} words {seg.duration_s}s,{color}"
         )
+        # B-roll insertion markers (every 8s within the segment)
+        for broll_idx, broll_t in enumerate(_broll_insertion_times(seg.start_s, seg.end_s), 1):
+            lines.append(
+                f"B-roll {seg.rank}-{broll_idx},{_tc(broll_t)},00:00:01:00,"
+                f"Insert 3-5s B-roll clip,Sky"
+            )
 
     if m.retention_reset_start_s > 0:
         lines.append(f"Retention Reset,{_tc(m.retention_reset_start_s)},00:00:01:00,Pattern interrupt,Cyan")
@@ -743,25 +762,136 @@ def manifest_to_markers_csv(m: EditManifest) -> str:
     return "\n".join(lines)
 
 
+def manifest_to_edl(m: EditManifest) -> str:
+    """Generate an EDL file for DaVinci Resolve marker import.
+
+    Resolve imports markers via: right-click timeline > Timelines >
+    Import > Timeline Markers from EDL.
+
+    EDL format uses |C:ResolveColor*, |M:name, |D:frames for marker data.
+    """
+    _tc = lambda s: _seconds_to_tc(s, m.fps)
+
+    lines = [
+        f"TITLE: {m.video_id} Markers",
+        "FCM: NON-DROP FRAME",
+    ]
+
+    # Collect all markers: (time_s, label, color, duration_frames)
+    markers: list[tuple[float, str, str, int]] = []
+
+    # Hook
+    markers.append((m.hook_start_s, "Hook - Strong opening", "Blue", 30))
+
+    # Avatar
+    markers.append((m.avatar_intro_start_s, "Avatar Intro - 3-5s clip", "Green", 30))
+
+    # Per-segment markers
+    for seg in m.segments:
+        color = "Red" if seg.rank == 1 else "Yellow"
+        markers.append((
+            seg.start_s,
+            f"Product {seg.rank} - {seg.product_name[:30]}",
+            color, 30,
+        ))
+
+        # Benefit overlay markers
+        for ov in seg.overlays:
+            if ov.type == "benefit":
+                markers.append((
+                    ov.time_s,
+                    f"Benefit: {ov.text[:25]}",
+                    "Mint", 30,
+                ))
+
+        # B-roll insertion points (every 8s within segment)
+        for broll_t in _broll_insertion_times(seg.start_s, seg.end_s):
+            markers.append((broll_t, "Insert B-roll 3-5s", "Sky", 30))
+
+    # Retention reset
+    if m.retention_reset_start_s > 0:
+        markers.append((
+            m.retention_reset_start_s,
+            "Retention Reset - Pattern interrupt",
+            "Cyan", 60,
+        ))
+
+    # Global overlays (disclosure, signature)
+    for ov in m.global_overlays:
+        color = "Purple" if ov.type == "disclosure" else "Lavender"
+        markers.append((ov.time_s, f"{ov.type}: {ov.text[:25]}", color, 30))
+
+    # Outro
+    markers.append((m.outro_start_s, "Outro - CTA and disclosure", "Purple", 30))
+
+    # Sort by time and write EDL events
+    markers.sort(key=lambda x: x[0])
+    for idx, (time_s, label, color, dur_frames) in enumerate(markers, 1):
+        tc_in = _tc(time_s)
+        tc_out = _tc(time_s + 1.0 / m.fps)
+        # EDL uses ASCII-safe labels — strip problematic chars
+        safe_label = "".join(c for c in label if c.isascii() and c not in ('"', "'", "|"))
+        lines.append(
+            f"{idx:03d}  001  V  C  {tc_in} {tc_out} {tc_in} {tc_out}"
+        )
+        lines.append(
+            f" |C:ResolveColor{color} |M:{safe_label} |D:{dur_frames}"
+        )
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Edit notes (human-readable instructions)
 # ---------------------------------------------------------------------------
 
 
-def manifest_to_notes(m: EditManifest) -> str:
-    """Generate human-readable editing notes for Resolve."""
+def manifest_to_notes(
+    m: EditManifest,
+    *,
+    product_data: dict[int, dict] | None = None,
+    niche: str = "",
+) -> str:
+    """Generate human-readable editing notes for Resolve.
+
+    Args:
+        m: The edit manifest.
+        product_data: Optional {rank: {benefits, downside, positioning, evidence}} dict.
+        niche: Product niche for B-roll search suggestions.
+    """
+    pd = product_data or {}
+
     lines = [
         f"# Edit Notes — {m.video_id}",
-        f"",
+        "",
+        "## Quick Start (Daily Editing Recipe)",
+        "",
+        "1. Create project: 1920x1080, 29.97fps, DaVinci YRGB, Rec.709",
+        "2. Import all media from this video folder",
+        "3. Right-click timeline > Import > Timeline Markers from EDL > `markers.edl`",
+        "4. Place VO chunks on A1 in order, lock track",
+        "5. Place music on A2, set -26 LUFS, duck under voice (duck 0.3s before, return 0.5s after)",
+        "6. Follow markers below to place visuals on V1 (product) and V2 (B-roll)",
+        "7. Apply Dynamic Zoom (3-7%) to all static images on V1",
+        "8. Create blur-BG duplicates on V4 for hero shots (Zoom 1.5-2.5x, Gaussian Blur 15-25)",
+        "9. Add overlays on V3 from Power Bin templates (rank badge, benefits, disclosure)",
+        "10. Place SFX on A3 (whoosh on transitions, click on benefits)",
+        "11. 0.5s dissolve between segments",
+        "12. Quick color match on B-roll (Color page > Shot Match)",
+        "13. QC checklist pass (see bottom of this file)",
+        "14. Export: H.264, 20 Mbps CBR, AAC 320kbps",
+        "",
+        "---",
+        "",
         f"**Duration:** {m.total_duration_s:.0f}s ({m.total_duration_s/60:.1f} min)",
         f"**Resolution:** {m.resolution[0]}x{m.resolution[1]} @ {m.fps}fps",
         f"**Voiceover:** {m.voiceover_file or 'NOT FOUND'}",
         f"**Music:** {m.music.file or 'NOT FOUND'}",
-        f"",
-        f"## Timeline Layout",
-        f"",
-        f"| Time | Section | Duration |",
-        f"|------|---------|----------|",
+        "",
+        "## Timeline Layout",
+        "",
+        "| Time | Section | Duration |",
+        "|------|---------|----------|",
         f"| {m.hook_start_s:.0f}s | Hook | {m.hook_end_s - m.hook_start_s:.0f}s |",
         f"| {m.avatar_intro_start_s:.0f}s | Avatar Intro | {AVATAR_INTRO_DURATION_S:.0f}s |",
     ]
@@ -775,43 +905,116 @@ def manifest_to_notes(m: EditManifest) -> str:
     lines.append(f"| {m.outro_start_s:.0f}s | Outro | {m.outro_end_s - m.outro_start_s:.0f}s |")
 
     lines.extend([
-        f"",
-        f"## Audio Mix",
-        f"",
-        f"- Voiceover: {VOICEOVER_LUFS} LUFS, {VOICEOVER_PEAK_DB} dB peak",
-        f"- Music bed: {MUSIC_BED_LUFS} LUFS (duck under voice)",
-        f"- SFX: {SFX_LUFS} LUFS",
-        f"- Whoosh SFX on segment transitions, click SFX on benefit highlights",
-        f"",
-        f"## Per-Segment Visuals",
-        f"",
+        "",
+        "## Audio Mix",
+        "",
+        f"- **A1 (VO):** {VOICEOVER_LUFS} LUFS, {VOICEOVER_PEAK_DB} dB peak — apply EQ + De-Esser + Compressor",
+        f"- **A2 (Music):** {MUSIC_BED_LUFS} LUFS under voice, swell to -18 LUFS at transitions",
+        f"- **A3 (SFX):** {SFX_LUFS} LUFS — whoosh on transitions, click on benefits, never stack",
+        "- 3-10 frame audio crossfades on every edit point",
+        "",
+        "## Per-Segment Edit Guide",
+        "",
     ])
 
     for seg in m.segments:
+        p = pd.get(seg.rank, {})
+        benefits = p.get("benefits", [])
+        downside = p.get("downside", "")
+        positioning = p.get("positioning", "")
+
         lines.append(f"### #{seg.rank} — {seg.product_name}")
+        if positioning:
+            lines.append(f"**Positioning:** {positioning}")
+        lines.append(f"**Duration:** {seg.duration_s:.0f}s ({seg.start_s:.0f}s–{seg.end_s:.0f}s)")
+        lines.append("")
+
+        # Visual rhythm recommendation
+        lines.append("**Visual rhythm (repeat every ~15s):**")
+        lines.append("  1. [V1] Hero shot, zoom-in 3-5% (3s) + [V3] Rank badge top-left")
+        lines.append("  2. [V3] Product name lower-third (3s)")
+        lines.append("  3. [V2] B-roll lifestyle clip (3-5s)")
+        lines.append("  4. [V1] Detail close-up, pan-left (4s) + [V3] Benefit callout")
+        lines.append("  5. [V1] Usage scene (5s)")
+        lines.append("  6. [V2] B-roll context clip (3-5s)")
+        lines.append("  7. [V1] Hero shot again, zoom-out (4s) + [V3] Benefit #2 callout")
+        lines.append("")
+
+        # Suggested overlay text
+        if benefits:
+            lines.append("**Overlay text (max 6 words each, V3):**")
+            for i, b in enumerate(benefits[:MAX_BENEFITS_PER_SEGMENT], 1):
+                words = b.split()
+                short = " ".join(words[:OVERLAY_MAX_WORDS])
+                lines.append(f'  - Benefit {i}: "{short}"')
+        if downside:
+            words = downside.split()
+            short = " ".join(words[:OVERLAY_MAX_WORDS])
+            lines.append(f'  - Downside (amber): "{short}"')
+        lines.append("")
+
+        # B-roll search suggestions
+        name_short = seg.product_name.split("(")[0].strip()[:30]
+        lines.append("**B-roll search terms (Pexels/Pixabay):**")
+        lines.append(f'  - "{name_short} in use"')
+        if niche:
+            lines.append(f'  - "{niche} lifestyle"')
+        lines.append(f'  - "hands using {niche or "product"}"')
+        lines.append(f'  - "close up technology" / "modern workspace"')
+        lines.append("")
+
+        # Discovered visuals
         if seg.visuals:
+            lines.append("**Discovered assets:**")
             for v in seg.visuals:
                 lines.append(f"  - [{v.start_s:.1f}s–{v.start_s+v.duration_s:.1f}s] {v.file} ({v.motion})")
         else:
-            lines.append(f"  - No visuals found — add images to visuals/products/{seg.rank:02d}/")
-        if seg.overlays:
-            for o in seg.overlays:
-                lines.append(f"  - Overlay [{o.time_s:.1f}s] \"{o.text}\" ({o.type})")
+            lines.append(f"  - No visuals found — add images to assets/dzine/products/{seg.rank:02d}_*.png")
         lines.append("")
 
+    # Retention reset section
+    if m.retention_reset_start_s > 0:
+        dur = m.retention_reset_end_s - m.retention_reset_start_s
+        lines.extend([
+            "### Retention Reset",
+            f"**Time:** {m.retention_reset_start_s:.0f}s–{m.retention_reset_end_s:.0f}s ({dur:.0f}s)",
+            "",
+            "**Pattern interrupt ideas (pick one):**",
+            "  - Split-screen comparison of #3 vs #2",
+            "  - Quick 5-shot montage (1s each) of all products",
+            "  - Direct question: \"But here is the catch...\" with visual pause",
+            "  - Scale shift: snap zoom 10-15% over 6 frames",
+            "",
+        ])
+
+    # QC Checklist
     lines.extend([
-        f"## Resolve Workflow",
-        f"",
-        f"1. Import all media from the video folder",
-        f"2. Create timeline: {m.resolution[0]}x{m.resolution[1]} @ {m.fps}fps",
-        f"3. Place voiceover on A1",
-        f"4. Place music bed on A2, set volume to {MUSIC_BED_LUFS} LUFS (duck under voice)",
-        f"5. Import markers.csv (Edit > Import > Timeline Markers)",
-        f"6. Follow markers to place visuals and overlays",
-        f"7. Add Fusion titles for rank badges and lower thirds",
-        f"8. Apply light zoom ({ZOOM_PERCENT_MIN}-{ZOOM_PERCENT_MAX}%) to static images",
-        f"9. Add transition (0.5s dissolve) between segments",
-        f"10. Export: H.264, 1080p, {EXPORT_BITRATE_MBPS_MIN}-{EXPORT_BITRATE_MBPS_MAX} Mbps VBR",
+        "---",
+        "",
+        "## QC Checklist (Before Export)",
+        "",
+        "**Visuals:**",
+        "- [ ] No static image held > 8 seconds without motion",
+        "- [ ] Text readable at 480px (mobile test)",
+        "- [ ] Correct product shown for each segment",
+        "- [ ] Blur-BG duplicates have no hard edges",
+        "- [ ] All overlays within safe zones (60px from edges, 120px from bottom)",
+        "",
+        "**Audio:**",
+        "- [ ] No clipping (Bus 1 limiter never exceeds -1 dBTP)",
+        "- [ ] VO loudness consistent across chunks",
+        "- [ ] Music not overpowering VO (test on laptop speakers)",
+        "- [ ] Audio crossfades on all edit points",
+        "",
+        "**Pacing:**",
+        "- [ ] Hook grabs within 5 seconds",
+        "- [ ] Visual change every 3-8 seconds throughout",
+        "- [ ] Pattern interrupt at retention reset",
+        "- [ ] No single product segment > 2:30",
+        "",
+        "**Compliance:**",
+        f'- [ ] Affiliate disclosure on screen in last 8s: "{DISCLOSURE_TEXT}"',
+        "- [ ] No fake discount badges or urgency claims",
     ])
 
     return "\n".join(lines)
