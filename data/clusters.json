@@ -1,0 +1,410 @@
+[
+  {
+    "name": "Office Comfort & Back Pain",
+    "slug": "office_comfort",
+    "micro_niches": [
+      {
+        "subcategory": "ergonomic office chairs",
+        "buyer_pain": "lower back pain from 8+ hours sitting",
+        "intent_phrase": "best ergonomic office chairs for back pain",
+        "price_min": 200,
+        "price_max": 550,
+        "must_have_features": ["lumbar support", "adjustable armrests", "seat depth adjustment"],
+        "forbidden_variants": ["gaming chair", "stool", "kneeling chair", "ball chair"]
+      },
+      {
+        "subcategory": "standing desks",
+        "buyer_pain": "sedentary work lifestyle causing fatigue and back strain",
+        "intent_phrase": "best standing desks for home office",
+        "price_min": 200,
+        "price_max": 500,
+        "must_have_features": ["electric motor", "height memory presets", "cable management"],
+        "forbidden_variants": ["desk converter", "laptop stand", "manual crank"]
+      },
+      {
+        "subcategory": "monitor arms",
+        "buyer_pain": "neck strain from looking down at monitor",
+        "intent_phrase": "best monitor arms for ergonomic setup",
+        "price_min": 100,
+        "price_max": 200,
+        "must_have_features": ["gas spring", "VESA mount", "cable routing"],
+        "forbidden_variants": ["laptop stand", "tablet mount", "TV mount"]
+      },
+      {
+        "subcategory": "ergonomic keyboards",
+        "buyer_pain": "wrist pain and RSI from typing all day",
+        "intent_phrase": "best ergonomic keyboards for wrist pain",
+        "price_min": 120,
+        "price_max": 300,
+        "must_have_features": ["split design", "tenting", "wrist rest"],
+        "forbidden_variants": ["gaming keyboard", "membrane keyboard", "number pad"]
+      },
+      {
+        "subcategory": "ergonomic mice",
+        "buyer_pain": "wrist discomfort from prolonged mouse use",
+        "intent_phrase": "best ergonomic mice for carpal tunnel",
+        "price_min": 100,
+        "price_max": 200,
+        "must_have_features": ["vertical grip", "wireless", "adjustable DPI"],
+        "forbidden_variants": ["gaming mouse", "trackpad", "trackball"]
+      }
+    ]
+  },
+  {
+    "name": "Apartment-Friendly Upgrades",
+    "slug": "apartment_upgrades",
+    "micro_niches": [
+      {
+        "subcategory": "air purifiers",
+        "buyer_pain": "allergies and stale air in small apartments",
+        "intent_phrase": "best air purifiers for apartments",
+        "price_min": 120,
+        "price_max": 350,
+        "must_have_features": ["HEPA filter", "quiet mode", "auto sensor"],
+        "forbidden_variants": ["humidifier", "dehumidifier", "fan", "air conditioner"]
+      },
+      {
+        "subcategory": "robot vacuums",
+        "buyer_pain": "no time to vacuum daily in a small space",
+        "intent_phrase": "best robot vacuums for apartments",
+        "price_min": 200,
+        "price_max": 500,
+        "must_have_features": ["mapping", "app control", "auto-empty base"],
+        "forbidden_variants": ["stick vacuum", "handheld vacuum", "carpet cleaner"]
+      },
+      {
+        "subcategory": "soundbars",
+        "buyer_pain": "terrible TV speakers but no room for surround sound",
+        "intent_phrase": "best soundbars for small rooms",
+        "price_min": 150,
+        "price_max": 400,
+        "must_have_features": ["HDMI eARC", "dialogue mode", "compact design"],
+        "forbidden_variants": ["home theater system", "bookshelf speakers", "portable speaker"]
+      },
+      {
+        "subcategory": "smart locks",
+        "buyer_pain": "fumbling with keys, wanting keyless entry for rental",
+        "intent_phrase": "best smart locks for apartments",
+        "price_min": 120,
+        "price_max": 300,
+        "must_have_features": ["keypad", "auto-lock", "app control"],
+        "forbidden_variants": ["deadbolt only", "padlock", "safe"]
+      },
+      {
+        "subcategory": "compact air fryers",
+        "buyer_pain": "limited counter space but wanting healthier cooking",
+        "intent_phrase": "best compact air fryers for small kitchens",
+        "price_min": 100,
+        "price_max": 200,
+        "must_have_features": ["digital controls", "dishwasher-safe basket", "compact size"],
+        "forbidden_variants": ["toaster oven", "microwave", "deep fryer"]
+      }
+    ]
+  },
+  {
+    "name": "Busy Family Kitchen",
+    "slug": "family_kitchen",
+    "micro_niches": [
+      {
+        "subcategory": "air fryers",
+        "buyer_pain": "weeknight dinners are slow and unhealthy",
+        "intent_phrase": "best air fryers for families",
+        "price_min": 120,
+        "price_max": 250,
+        "must_have_features": ["large capacity", "dishwasher-safe", "preset programs"],
+        "forbidden_variants": ["toaster oven", "microwave", "deep fryer"]
+      },
+      {
+        "subcategory": "food processors",
+        "buyer_pain": "meal prep takes too long with knife work",
+        "intent_phrase": "best food processors for meal prep",
+        "price_min": 120,
+        "price_max": 300,
+        "must_have_features": ["large bowl", "multiple blades", "dishwasher-safe parts"],
+        "forbidden_variants": ["blender", "stand mixer", "juicer"]
+      },
+      {
+        "subcategory": "espresso machines",
+        "buyer_pain": "spending $5/day at coffee shops adds up",
+        "intent_phrase": "best espresso machines under 500",
+        "price_min": 150,
+        "price_max": 500,
+        "must_have_features": ["15-bar pump", "steam wand", "PID temperature"],
+        "forbidden_variants": ["drip coffee maker", "pour over", "french press", "pod machine"]
+      },
+      {
+        "subcategory": "stand mixers",
+        "buyer_pain": "hand mixing is exhausting for bread and baking",
+        "intent_phrase": "best stand mixers for home baking",
+        "price_min": 150,
+        "price_max": 450,
+        "must_have_features": ["tilt-head", "multiple attachments", "large bowl"],
+        "forbidden_variants": ["hand mixer", "blender", "food processor"]
+      },
+      {
+        "subcategory": "nonstick cookware sets",
+        "buyer_pain": "old pans sticking and scratched, need a fresh set",
+        "intent_phrase": "best nonstick cookware sets",
+        "price_min": 120,
+        "price_max": 300,
+        "must_have_features": ["PFOA-free", "oven-safe", "dishwasher-safe"],
+        "forbidden_variants": ["cast iron", "stainless steel", "carbon steel"]
+      }
+    ]
+  },
+  {
+    "name": "Pet Hair & Cleaning",
+    "slug": "pet_cleaning",
+    "micro_niches": [
+      {
+        "subcategory": "robot vacuums for pet hair",
+        "buyer_pain": "pet hair everywhere, vacuuming daily is exhausting",
+        "intent_phrase": "best robot vacuums for pet hair",
+        "price_min": 200,
+        "price_max": 600,
+        "must_have_features": ["rubber brush rollers", "strong suction", "auto-empty base"],
+        "forbidden_variants": ["stick vacuum", "handheld vacuum", "air purifier"]
+      },
+      {
+        "subcategory": "handheld vacuums",
+        "buyer_pain": "quick cleanups on furniture and car seats covered in pet hair",
+        "intent_phrase": "best handheld vacuums for pet hair",
+        "price_min": 100,
+        "price_max": 200,
+        "must_have_features": ["motorized pet tool", "strong suction", "cordless"],
+        "forbidden_variants": ["robot vacuum", "stick vacuum", "upright vacuum"]
+      },
+      {
+        "subcategory": "carpet cleaners",
+        "buyer_pain": "pet stains and odors embedded in carpets",
+        "intent_phrase": "best carpet cleaners for pet stains",
+        "price_min": 150,
+        "price_max": 350,
+        "must_have_features": ["spot cleaning", "heat drying", "pet formula included"],
+        "forbidden_variants": ["steam mop", "robot vacuum", "upright vacuum"]
+      },
+      {
+        "subcategory": "air purifiers for pet owners",
+        "buyer_pain": "pet dander and odor making allergies worse",
+        "intent_phrase": "best air purifiers for pet allergies",
+        "price_min": 120,
+        "price_max": 300,
+        "must_have_features": ["HEPA filter", "activated carbon", "quiet operation"],
+        "forbidden_variants": ["humidifier", "dehumidifier", "fan"]
+      },
+      {
+        "subcategory": "cordless stick vacuums",
+        "buyer_pain": "need a lightweight daily vacuum for pet hair on hard floors",
+        "intent_phrase": "best cordless stick vacuums for pet hair",
+        "price_min": 150,
+        "price_max": 400,
+        "must_have_features": ["motorized floor head", "long battery", "wall mount"],
+        "forbidden_variants": ["robot vacuum", "upright vacuum", "handheld only"]
+      }
+    ]
+  },
+  {
+    "name": "Sleep & Air Quality",
+    "slug": "sleep_air",
+    "micro_niches": [
+      {
+        "subcategory": "white noise machines",
+        "buyer_pain": "light sleeper woken by street noise and neighbors",
+        "intent_phrase": "best white noise machines for sleeping",
+        "price_min": 100,
+        "price_max": 200,
+        "must_have_features": ["real fan sound", "volume control", "timer"],
+        "forbidden_variants": ["bluetooth speaker", "alarm clock", "smart speaker"]
+      },
+      {
+        "subcategory": "cooling mattress toppers",
+        "buyer_pain": "waking up sweating, can't afford a new mattress",
+        "intent_phrase": "best cooling mattress toppers",
+        "price_min": 120,
+        "price_max": 300,
+        "must_have_features": ["gel-infused", "breathable cover", "queen size available"],
+        "forbidden_variants": ["mattress", "pillow", "heated blanket"]
+      },
+      {
+        "subcategory": "humidifiers",
+        "buyer_pain": "dry air causing sore throat and cracked skin in winter",
+        "intent_phrase": "best humidifiers for bedrooms",
+        "price_min": 100,
+        "price_max": 200,
+        "must_have_features": ["ultrasonic", "large tank", "quiet operation"],
+        "forbidden_variants": ["dehumidifier", "air purifier", "diffuser"]
+      },
+      {
+        "subcategory": "weighted blankets",
+        "buyer_pain": "anxiety and restlessness making it hard to fall asleep",
+        "intent_phrase": "best weighted blankets for adults",
+        "price_min": 100,
+        "price_max": 200,
+        "must_have_features": ["glass beads", "breathable fabric", "machine washable"],
+        "forbidden_variants": ["electric blanket", "heated blanket", "comforter"]
+      },
+      {
+        "subcategory": "sunrise alarm clocks",
+        "buyer_pain": "jarring alarm makes mornings miserable, hard to wake in dark months",
+        "intent_phrase": "best sunrise alarm clocks",
+        "price_min": 100,
+        "price_max": 200,
+        "must_have_features": ["gradual light", "multiple colors", "backup alarm sound"],
+        "forbidden_variants": ["smart speaker", "regular alarm clock", "light bulb"]
+      }
+    ]
+  },
+  {
+    "name": "Travel Comfort",
+    "slug": "travel_comfort",
+    "micro_niches": [
+      {
+        "subcategory": "carry-on luggage",
+        "buyer_pain": "overhead bin stress and checked bag fees on every flight",
+        "intent_phrase": "best carry-on luggage for frequent travelers",
+        "price_min": 150,
+        "price_max": 400,
+        "must_have_features": ["spinner wheels", "TSA lock", "expandable"],
+        "forbidden_variants": ["checked luggage", "backpack", "duffel bag"]
+      },
+      {
+        "subcategory": "noise cancelling earbuds",
+        "buyer_pain": "airplane noise and crying babies ruining long flights",
+        "intent_phrase": "best noise cancelling earbuds for flying",
+        "price_min": 120,
+        "price_max": 300,
+        "must_have_features": ["active noise cancelling", "long battery", "compact case"],
+        "forbidden_variants": ["over-ear headphones", "wired earbuds", "speaker"]
+      },
+      {
+        "subcategory": "travel pillows",
+        "buyer_pain": "neck pain from sleeping on planes",
+        "intent_phrase": "best travel pillows for long flights",
+        "price_min": 30,
+        "price_max": 80,
+        "must_have_features": ["memory foam", "washable cover", "compact pack"],
+        "forbidden_variants": ["bed pillow", "camping pillow", "lumbar pillow"]
+      },
+      {
+        "subcategory": "portable chargers",
+        "buyer_pain": "phone dying mid-trip with no outlet in sight",
+        "intent_phrase": "best portable chargers for travel",
+        "price_min": 30,
+        "price_max": 80,
+        "must_have_features": ["20000mAh+", "USB-C PD", "airline approved"],
+        "forbidden_variants": ["wall charger", "wireless charger", "car charger"]
+      },
+      {
+        "subcategory": "packing cubes",
+        "buyer_pain": "messy suitcase, can never find anything while traveling",
+        "intent_phrase": "best packing cubes for carry-on",
+        "price_min": 25,
+        "price_max": 60,
+        "must_have_features": ["compression zippers", "mesh panel", "multiple sizes"],
+        "forbidden_variants": ["garment bag", "toiletry bag", "backpack"]
+      }
+    ]
+  },
+  {
+    "name": "Home Security Basics",
+    "slug": "home_security",
+    "micro_niches": [
+      {
+        "subcategory": "video doorbells",
+        "buyer_pain": "package theft and not knowing who's at the door",
+        "intent_phrase": "best video doorbells for package security",
+        "price_min": 120,
+        "price_max": 250,
+        "must_have_features": ["1080p+ video", "two-way audio", "motion zones"],
+        "forbidden_variants": ["security camera", "smart lock", "intercom"]
+      },
+      {
+        "subcategory": "outdoor security cameras",
+        "buyer_pain": "worrying about break-ins and property damage overnight",
+        "intent_phrase": "best outdoor security cameras",
+        "price_min": 120,
+        "price_max": 300,
+        "must_have_features": ["night vision", "weatherproof", "local storage option"],
+        "forbidden_variants": ["doorbell camera", "indoor camera", "baby monitor"]
+      },
+      {
+        "subcategory": "smart locks",
+        "buyer_pain": "lost keys, wanting to let guests in remotely",
+        "intent_phrase": "best smart locks for home security",
+        "price_min": 150,
+        "price_max": 300,
+        "must_have_features": ["keypad", "auto-lock", "smart home integration"],
+        "forbidden_variants": ["deadbolt only", "padlock", "safe", "lockbox"]
+      },
+      {
+        "subcategory": "indoor security cameras",
+        "buyer_pain": "checking on pets and home while traveling for work",
+        "intent_phrase": "best indoor security cameras",
+        "price_min": 100,
+        "price_max": 200,
+        "must_have_features": ["pan-tilt", "night vision", "two-way audio"],
+        "forbidden_variants": ["outdoor camera", "doorbell", "baby monitor"]
+      },
+      {
+        "subcategory": "mesh wifi systems",
+        "buyer_pain": "dead zones in the house killing camera feeds and smart devices",
+        "intent_phrase": "best mesh wifi for smart home",
+        "price_min": 150,
+        "price_max": 350,
+        "must_have_features": ["tri-band", "easy setup app", "3+ nodes"],
+        "forbidden_variants": ["single router", "range extender", "modem"]
+      }
+    ]
+  },
+  {
+    "name": "Everyday Productivity",
+    "slug": "everyday_productivity",
+    "micro_niches": [
+      {
+        "subcategory": "mechanical keyboards",
+        "buyer_pain": "mushy membrane keyboard making typing feel sluggish",
+        "intent_phrase": "best mechanical keyboards for typing",
+        "price_min": 120,
+        "price_max": 250,
+        "must_have_features": ["hot-swap switches", "wireless", "PBT keycaps"],
+        "forbidden_variants": ["membrane keyboard", "gaming keyboard", "number pad"]
+      },
+      {
+        "subcategory": "wireless mice",
+        "buyer_pain": "desk clutter from wires and imprecise cheap mice",
+        "intent_phrase": "best wireless mice for productivity",
+        "price_min": 100,
+        "price_max": 150,
+        "must_have_features": ["ergonomic shape", "long battery", "multi-device"],
+        "forbidden_variants": ["gaming mouse", "trackball", "trackpad"]
+      },
+      {
+        "subcategory": "desk lamps",
+        "buyer_pain": "eye strain from bad lighting during long work sessions",
+        "intent_phrase": "best desk lamps for home office",
+        "price_min": 100,
+        "price_max": 200,
+        "must_have_features": ["adjustable color temperature", "dimming", "USB charging port"],
+        "forbidden_variants": ["floor lamp", "ring light", "desk fan"]
+      },
+      {
+        "subcategory": "noise cancelling headphones",
+        "buyer_pain": "open office noise destroying focus and deep work",
+        "intent_phrase": "best noise cancelling headphones for office",
+        "price_min": 150,
+        "price_max": 400,
+        "must_have_features": ["ANC", "multipoint bluetooth", "long battery"],
+        "forbidden_variants": ["earbuds", "gaming headset", "speaker", "open-back"]
+      },
+      {
+        "subcategory": "27-inch monitors",
+        "buyer_pain": "squinting at a small screen all day hurts productivity",
+        "intent_phrase": "best 27-inch monitors for work from home",
+        "price_min": 200,
+        "price_max": 500,
+        "must_have_features": ["4K or QHD", "USB-C", "adjustable stand"],
+        "forbidden_variants": ["gaming monitor", "portable monitor", "TV"]
+      }
+    ]
+  }
+]
