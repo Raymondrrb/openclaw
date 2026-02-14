@@ -1861,6 +1861,30 @@ def cmd_metrics(args) -> int:
     return EXIT_OK
 
 
+def cmd_study(args) -> int:
+    """Study a YouTube video — download, analyze, extract knowledge."""
+    from tools.video_study import run_study
+
+    _print_header(f"Video Study")
+    return run_study(
+        url=args.url,
+        file_path=args.file_path,
+        context=args.context,
+        max_frames=args.max_frames,
+        frame_strategy=args.frame_strategy,
+        video_id_override=getattr(args, "video_id", ""),
+    )
+
+
+def cmd_studies(args) -> int:
+    """List or show existing video studies."""
+    from tools.video_study import cmd_list, cmd_show
+
+    if hasattr(args, "show_video_id") and args.show_video_id:
+        return cmd_show(args.show_video_id, as_json=getattr(args, "json", False))
+    return cmd_list()
+
+
 def cmd_errors(args) -> int:
     """Review cross-video error log."""
     from tools.lib.error_log import (
@@ -2042,6 +2066,20 @@ def main() -> int:
     p_metrics.add_argument("--update-scores", action="store_true",
                            help="Recompute niche performance scores")
 
+    # study
+    p_study = sub.add_parser("study", help="Study a YouTube video (download, analyze, extract knowledge)")
+    p_study.add_argument("--url", default="", help="YouTube video URL")
+    p_study.add_argument("--file", default="", dest="file_path", help="Local video file path")
+    p_study.add_argument("--context", default="", help="Context hint for analysis")
+    p_study.add_argument("--max-frames", type=int, default=80, help="Max frames to extract")
+    p_study.add_argument("--frame-strategy", default="scene", choices=("scene", "interval"))
+    p_study.add_argument("--video-id", default="", help="Override video ID")
+
+    # studies
+    p_studies = sub.add_parser("studies", help="List or show existing video studies")
+    p_studies.add_argument("--show", default="", dest="show_video_id", help="Show a specific study")
+    p_studies.add_argument("--json", action="store_true", help="Output as JSON")
+
     # errors
     p_errors = sub.add_parser("errors", help="Review cross-video error log")
     p_errors.add_argument("--stage", default="")
@@ -2077,6 +2115,8 @@ def main() -> int:
         "status": cmd_status,
         "runs": cmd_runs,
         "metrics": cmd_metrics,
+        "study": cmd_study,
+        "studies": cmd_studies,
         "errors": cmd_errors,
     }
 

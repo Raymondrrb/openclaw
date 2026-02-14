@@ -418,12 +418,20 @@ MANDATORY STRUCTURE:
 
 EACH PRODUCT MUST INCLUDE:
 A) Quick positioning — why it made the list
-B) 2–3 specific benefits (no vague adjectives)
-C) Who it's for (specific)
+B) 2–3 specific benefits in REAL-LIFE language (not specs)
+   - BAD: "40dB ANC reduction" → GOOD: "blocks out airplane noise"
+   - BAD: "30-hour battery" → GOOD: "lasts a full work week on one charge"
+C) Who it's for (specific, practical — our audience is 30-65+, NOT tech enthusiasts)
 D) One honest downside (mandatory — builds trust)
-E) Transition line to next product
+E) Warranty/return mention if available in evidence
+F) Transition line to next product
 
-TONE: Confident, grounded, conversational. Not salesy.
+AUDIENCE: Practical buyers aged 30-65+ who want to buy the right thing ONCE.
+They value trust, reliability, and low-regret decisions over novelty.
+Use calm authority. Reduce anxiety with phrases like "safe choice", "easy return",
+"well-established brand". Give price context ("costs about as much as...").
+
+TONE: Confident, grounded, conversational. Not salesy. Not tech-bro.
 
 DO NOT USE: "insane", "crazy", "unbelievable", "game-changer", "mind-blowing",
 "In today's video", "let's dive in", "without further ado", "smash that like button".
@@ -468,7 +476,7 @@ REFINEMENT CHECKLIST:
 
 4. CHECK flow: transitions between products should feel natural, not formulaic.
 
-5. VERIFY tone: confident, grounded, conversational. Not salesy or overhyped.
+5. VERIFY tone: confident, grounded, conversational. Not salesy or overhyped. NOT tech-bro.
 
 6. CHARISMATIC ELEMENT: {charismatic_instructions.get(charismatic_type, charismatic_instructions["reality_check"])}
 
@@ -479,6 +487,13 @@ REFINEMENT CHECKLIST:
 9. VERIFY affiliate disclosure is present in conclusion.
 
 10. NO hype words: "insane", "crazy", "unbelievable", "game-changer", "mind-blowing", "revolutionary", "groundbreaking".
+
+11. BUYER-TRUST CHECK (audience is 30-65+, practical, NOT tech enthusiasts):
+    - Specs must be translated to real-life impact (not raw numbers)
+    - Each product mentions who it's for in practical terms
+    - Warranty/return info included when available
+    - Price context is relational ("costs about as much as...")
+    - No jargon without explanation
 
 Return the refined script in full. Do not summarize or skip sections.
 

@@ -1,0 +1,124 @@
+{
+  "video_id": "vcFvVaCpOpM",
+  "title": "Top Cordless Vacuum 2026 - Best 5 For Less Dusty Home!",
+  "channel": "TechShare",
+  "url": "https://www.youtube.com/watch?v=vcFvVaCpOpM",
+  "study_date": "2026-02-13",
+  "duration_seconds": 484,
+  "upload_date": "2025-06-16",
+  "views": 86935,
+  "likes": 8282,
+  "language": "en",
+  "relevance": "Our exact target format: fully faceless B-roll compilation, Top 5 product ranking with affiliate links. No presenter, no avatar. 87K views and 9.5% like ratio prove this format delivers strong engagement. Closest reference to what Rayviews will produce.",
+  "summary": "Top 5 cordless vacuums for 2026 using entirely faceless B-roll editing. Manufacturer promotional videos and original close-up demo footage with clean white sans-serif text overlays for feature callouts. Products: Levoit LVAC-200, Bissell Cleanview XR Pet 300W, Dyson V8 Plus, Shark Detect Pro, Dyson V11. Description uses amzn.to short links per product.",
+  "key_insights": [
+    {
+      "category": "editing",
+      "insight": "Faceless B-roll compilation with 3-5 second clips delivers 87K views and 9.5% like ratio — outperforms talking-head format for product rankings",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Text overlays are feature-focused ('tangle-resistant roller') not product-focused — clean white sans-serif at bottom of screen, 2-3 second hold",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Hard cuts only, no transitions. Continuous visual flow maintained by matching action between cuts. ~1.5 min per product for 5 products",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Manufacturer B-roll is primary content source — brand YouTube channels, press kits, promo videos. Dzine AI must generate equivalent quality in realistic home environments",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "general",
+      "insight": "All footage in real-world environments (kitchen, living room, hardwood floors) — no studio white-background shots. Critical for 40+/50+ target audience trust",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "affiliate",
+      "insight": "Description uses fire emoji + general link, numbered list with checkmark emojis + individual amzn.to links, 'What You'll Learn' section, hashtags — proven template",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Higher production quality (sharper footage, better text overlays) correlates with higher engagement vs similar faceless channels",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "general",
+      "insight": "Short duration (8 min for 5 products) keeps segments tight and information-dense. Validates our 1300-1800 word script target",
+      "priority": "medium",
+      "actionable": false
+    }
+  ],
+  "editing_style": {
+    "transitions": "hard cuts only",
+    "text_overlays": "feature-callout text in clean white sans-serif at bottom of screen, 2-3s hold — plus manufacturer brand text visible in some promo footage",
+    "graphics": "minimal — no animated graphics, no comparison tables, no spec cards",
+    "pacing": "fast — 3-5 second clips, ~1.5 min per product, continuous flow with no pauses",
+    "camera_work": "no camera — all B-roll footage. Mix of hero shots, close-ups, lifestyle usage, and brand promo clips",
+    "product_presentation": "manufacturer B-roll and original demo footage in real-world environments (kitchen, living room, hardwood floors). Close-ups of roller heads, dustbins, features in action",
+    "structure": "hook (B-roll montage + title) → [product hero → close-up features → lifestyle usage → text overlays] x5 → closing",
+    "music": "subtle background (inferred)",
+    "effects": "none visible"
+  },
+  "production_budget_estimate": {
+    "ray_lip_sync_credits": 0,
+    "product_images_credits": 1000,
+    "product_video_credits": 770,
+    "total_video_credits": 770,
+    "total_image_credits": 1000,
+    "note": "Faceless format — no lip sync needed. 5 products x 5 images x 40 credits (4K) = 1000 image credits; 5 products x 2 video clips x ~77 credits (Hailuo 2.3) = 770 video credits"
+  },
+  "tools_mentioned": [],
+  "action_items": [
+    {
+      "priority": "high",
+      "action": "Create DaVinci Resolve text overlay template: white sans-serif, bottom-positioned, feature-callout style matching this video",
+      "timeline": "next sprint"
+    },
+    {
+      "priority": "high",
+      "action": "Update Dzine prompts to prioritize realistic home environments (kitchen, living room, hardwood) over white studio backgrounds",
+      "timeline": "dzine_schema.py update"
+    },
+    {
+      "priority": "high",
+      "action": "Build faceless B-roll timeline template in DaVinci Resolve: [hook] [product segments x5] [closing] with 3-5s clip pacing",
+      "timeline": "next sprint"
+    },
+    {
+      "priority": "medium",
+      "action": "Add product name + rank number overlays at each segment start as competitive advantage",
+      "timeline": "DaVinci Resolve template"
+    },
+    {
+      "priority": "medium",
+      "action": "Adopt description template: general affiliate link, numbered product list with amzn.to links, What You'll Learn section, hashtags",
+      "timeline": "manifest stage update"
+    },
+    {
+      "priority": "medium",
+      "action": "Generate Minimax Hailuo 2.3 demo clips per product (usage in real environment, feature close-up) to match manufacturer B-roll quality",
+      "timeline": "assets stage"
+    }
+  ],
+  "analysis_meta": {
+    "method": "visual_frame_analysis",
+    "interval_frames": 97,
+    "scene_frames": 0,
+    "total_frames": 97,
+    "transcript_available": false,
+    "transcript_note": "Analysis based on sampled frames, no transcript extracted"
+  }
+}

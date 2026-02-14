@@ -1,0 +1,134 @@
+{
+  "video_id": "iqNykpohDKM",
+  "title": "18 Davinci Resolve Hacks I Wish I Knew Earlier",
+  "channel": "Jacob Nordin",
+  "url": "https://www.youtube.com/watch?v=iqNykpohDKM",
+  "study_date": "2026-02-13",
+  "duration_seconds": 966,
+  "upload_date": "2025-10-30",
+  "views": 178463,
+  "likes": 13369,
+  "language": "en",
+  "relevance": "DaVinci Resolve tutorial — not a competitor format but a direct source of editing techniques for our post-production workflow. Covers Power Bins, Adjustment Clips, Fairlight Presets, Noise Reduction shared nodes, Smart Bins, and multi-track audio organization. All techniques applicable to Rayviews Resolve assembly pipeline.",
+  "summary": "18 DaVinci Resolve productivity hacks demonstrated in Resolve 20 Studio. Screen recordings show complex multi-track timeline (3+ video tracks, 6+ audio tracks), Power Bins with organized folders, Adjustment Clips on V2, Fairlight Configuration Presets, shared Noise Reduction nodes in Color page, and Smart Bins. Cinematic B-roll inserts (keyboard close-ups, nature footage) break up screen recordings. 178K views with 7.5% like ratio indicates high audience value.",
+  "key_insights": [
+    {
+      "category": "workflow",
+      "insight": "Power Bins persist across all projects at the database level — store reusable assets (text templates, transitions, music, SFX) once and access in every new video project",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Adjustment Clips on V2 apply effects (color, zoom, blur) to all clips below without modifying source — critical for batch processing 25-35 product images per video",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Fairlight Configuration Presets save entire audio setup (track layout, bus routing, EQ, levels) as named presets — guarantees consistent audio across all videos",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Shared Noise Reduction nodes in Color page propagate changes to all clips using them — tune denoising once for AI-generated video artifacts",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Smart Bins auto-sort clips by metadata (resolution, file type, duration) — handles our mixed-source assets (4K images, 1080p video, WAV audio) without manual filing",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Professional 6-track audio layout (Camera, Music, SFX Intro, Ambience, AmbienSFX, PracticalSFX) — validates our 4-track approach (VO, Music, SFX, Ambience)",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "tools",
+      "insight": "Keyboard shortcut overlays (OPTION+CMD+Y) shown as large semi-transparent text over timeline — effective tutorial technique and validates custom shortcut workflow",
+      "priority": "low",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Screen recording + cinematic B-roll alternation prevents tutorial monotony — B-roll breaks every 3-5 tips with keyboard close-ups and nature footage",
+      "priority": "low",
+      "actionable": false
+    }
+  ],
+  "editing_style": {
+    "transitions": "hard cuts for screen recordings, cross-dissolves into B-roll inserts",
+    "text_overlays": "keyboard shortcut overlays (large semi-transparent text), minimal tip labels",
+    "graphics": "minimal — no animated intros or branded bumpers",
+    "pacing": "~50 seconds per tip, B-roll breaks every 3-5 tips, screen recordings 20-40s each",
+    "camera_work": "screen recording (primary), cinematic B-roll inserts (Sony FX3, shallow DOF)",
+    "product_presentation": "N/A — tutorial format, not product review",
+    "structure": "hook (B-roll montage) → [B-roll intro → screen recording demo → shortcut overlay] x18 → closing (CTA)",
+    "music": "subtle ambient during B-roll, quieter during screen recordings",
+    "effects": "none visible beyond standard Resolve UI"
+  },
+  "production_budget_estimate": {
+    "ray_lip_sync_credits": 0,
+    "product_images_credits": 0,
+    "total_video_credits": 0,
+    "total_image_credits": 0,
+    "note": "Zero credits — these are DaVinci Resolve configuration techniques, not asset generation. One-time setup (~30 min) then reused across all videos."
+  },
+  "tools_mentioned": [
+    "DaVinci Resolve 20 Studio",
+    "Power Bins",
+    "Adjustment Clips",
+    "Fairlight Configuration Presets",
+    "Smart Bins",
+    "Shared Nodes (Color Page)",
+    "Temporal Noise Reduction",
+    "Spatial Noise Reduction",
+    "Motion Blur (Motion Effects panel)",
+    "Sony FX3 (gear list)"
+  ],
+  "action_items": [
+    {
+      "priority": "high",
+      "action": "Create Power Bins in Resolve: Ray Avatar, Text Templates, Transitions, Music Library, SFX Library",
+      "timeline": "one-time setup"
+    },
+    {
+      "priority": "high",
+      "action": "Save 'Rayviews Standard' Fairlight Preset with 4-track layout (VO -16, Music -26, SFX -18 LUFS) and bus routing",
+      "timeline": "one-time setup"
+    },
+    {
+      "priority": "high",
+      "action": "Create Adjustment Clip template on V2 with standard zoom (3-7%) and color settings for batch product image processing",
+      "timeline": "one-time setup"
+    },
+    {
+      "priority": "medium",
+      "action": "Set up Smart Bins by file type (png/mp4/wav) and resolution (4K/1080p) for auto-sorting imported assets",
+      "timeline": "one-time setup"
+    },
+    {
+      "priority": "medium",
+      "action": "Create shared Noise Reduction node for AI-generated video clips (Dzine/Minimax) with Temporal + Spatial NR settings",
+      "timeline": "one-time setup"
+    },
+    {
+      "priority": "low",
+      "action": "Define keyboard shortcuts for frequent Resolve assembly operations (place clip, ripple delete, blade, etc.)",
+      "timeline": "one-time setup"
+    }
+  ],
+  "analysis_meta": {
+    "method": "visual_frame_analysis",
+    "interval_frames": 193,
+    "scene_frames": 0,
+    "total_frames": 193,
+    "transcript_available": false,
+    "transcript_note": "Visual analysis from 193 sampled frames"
+  }
+}

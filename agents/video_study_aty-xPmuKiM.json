@@ -1,0 +1,135 @@
+{
+  "video_id": "aty-xPmuKiM",
+  "title": "Gaming vs. Office Chairs: You Might Not Like This",
+  "channel": "BTODtv",
+  "url": "https://www.youtube.com/watch?v=aty-xPmuKiM",
+  "study_date": "2026-02-13",
+  "duration_seconds": 360,
+  "upload_date": "2023-10-18",
+  "views": 1419637,
+  "likes": 28172,
+  "language": "en",
+  "relevance": "Highest-performing video studied (1.4M views). Comparison format + curiosity-gap title proves this structure works at massive scale. Professional studio setup is a trust benchmark. BTODtv sells both product categories, so the presenter has genuine expertise. Editing patterns (multi-angle, close-up details, product page intercuts) are directly replicable with Dzine + DaVinci Resolve.",
+  "summary": "Compares gaming chairs (Secretlab) vs. office chairs (Herman Miller Embody) from a seller who stocks both. Professional studio with gray walls, framed art, standing desk, plants. Multiple camera angles (wide, medium, close-up detail). Shows btod.com product pages as trust signal. Close-up shots of chair mechanisms (Embody blue spine, armrest joints, tilt). Extremely concise at 6 minutes. 1.4M views proves comparison format + curiosity title works at scale.",
+  "key_insights": [
+    {
+      "category": "editing",
+      "insight": "Multiple camera angles (wide back view, medium shot, close-up detail) from likely 2-3 positions create professional multi-cam feel. Angle changes every 5-12 seconds.",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Close-up mechanical detail shots (Embody spine, armrest joints, tilt mechanism) build deep trust by showing the presenter understands product engineering",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Extremely tight pacing at 6 minutes for a comparison video. No filler, every second delivers information. Likely contributes to high completion rate.",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "general",
+      "insight": "Professional studio (gray walls, framed art, standing desk, plants, temperature display) is a major trust signal. Deliberate set design, not a bedroom setup.",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "thumbnail",
+      "insight": "Curiosity-gap title ('You Might Not Like This') drives clicks. Comparison format ('Gaming vs. Office') is inherently clickable. Combined = 1.4M views.",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Product page screenshots (btod.com) serve as intercut trust signals showing specs, pricing, and 'Science-backed Engineering' marketing. Could replicate with Amazon page screenshots.",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Hard cuts only -- no dissolves, wipes, or animated transitions. Clean editorial aesthetic with no motion graphics or lower thirds.",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Demonstration shots where presenter sits in, leans back, and adjusts chairs. Physical interaction with product builds authenticity.",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "affiliate",
+      "insight": "Links to own store (btod.com) rather than Amazon. Description includes Presidents Day sale promo, related video links, and gear list with Amazon affiliate links at bottom.",
+      "priority": "medium",
+      "actionable": false
+    },
+    {
+      "category": "general",
+      "insight": "Each product has a distinctive visual anchor (Secretlab black leather + logo, Embody blue woven spine). These signatures are shown repeatedly for visual recognition.",
+      "priority": "medium",
+      "actionable": true
+    }
+  ],
+  "editing_style": {
+    "transitions": "hard cuts only",
+    "text_overlays": "minimal to none -- no lower thirds, no name cards, no spec tables",
+    "graphics": "none -- product page screenshots serve as graphic elements",
+    "pacing": "extremely tight -- 6 min for full comparison, angle changes every 5-12s, no filler",
+    "camera_work": "multiple angles (wide back view, medium shot, close-up detail, standing demonstration, chair isolated)",
+    "product_presentation": "in-studio demonstration + btod.com product page screenshots + close-up mechanical detail shots, 3-8s hold each",
+    "structure": "hook (credibility) -> gaming chair segment (demo + details) -> office chair segment (demo + details) -> product page intercuts -> comparison verdict -> closing (CTA + sale promo)",
+    "music": "subtle or none",
+    "effects": "none visible"
+  },
+  "production_budget_estimate": {
+    "ray_lip_sync_credits": 180,
+    "product_images_credits": 1200,
+    "total_video_credits": 180,
+    "total_image_credits": 1200,
+    "note": "5 products x 6 images x 40 credits (4K) = 1200 image credits; 5 lip sync segments x 36 credits = 180 video credits. Includes extra close-up detail variants per product."
+  },
+  "tools_mentioned": [],
+  "action_items": [
+    {
+      "priority": "high",
+      "action": "Generate Ray avatar at 3 crop levels (wide workspace, medium chest-up, close-up face) for multi-angle variety",
+      "timeline": "next sprint"
+    },
+    {
+      "priority": "high",
+      "action": "Add close-up mechanical/engineering detail variant to Dzine schema for every product category",
+      "timeline": "dzine_schema.py update"
+    },
+    {
+      "priority": "high",
+      "action": "Design professional studio background for Ray avatar per niche (home office for tech, kitchen for kitchen, etc.)",
+      "timeline": "next sprint"
+    },
+    {
+      "priority": "high",
+      "action": "Test comparison format ('X vs Y: curiosity gap') as alternative to Top 5 for select niches",
+      "timeline": "content calendar"
+    },
+    {
+      "priority": "medium",
+      "action": "Include brief Amazon product page screenshot intercuts (3-5s) as trust signal in video timeline",
+      "timeline": "DaVinci Resolve template"
+    },
+    {
+      "priority": "medium",
+      "action": "Emphasize single most distinctive visual feature per product in Dzine prompts (the 'visual anchor' pattern)",
+      "timeline": "dzine_schema.py update"
+    }
+  ],
+  "analysis_meta": {
+    "method": "visual_frame_analysis",
+    "interval_frames": 72,
+    "scene_frames": 0,
+    "total_frames": 72,
+    "transcript_available": false,
+    "transcript_note": "Analysis based on 72 sampled frames"
+  }
+}

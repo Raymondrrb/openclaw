@@ -1,0 +1,137 @@
+{
+  "video_id": "_2IGR79NNF0",
+  "title": "Create Talking AI Characters with Perfect Lip Sync (Dzine Tutorial)",
+  "channel": "Wulfranz",
+  "url": "https://www.youtube.com/watch?v=_2IGR79NNF0",
+  "study_date": "2026-02-13",
+  "relevance": "Demonstrates end-to-end workflow for creating realistic AI characters with Nano Banana Pro and animating them with multi-speaker lip sync in a podcast-style setup. Directly applicable to Ray avatar talking-head segments and provides a complete AI video model catalog with credit pricing for B-roll generation decisions.",
+  "summary": "Wulfranz demonstrates using Dzine's Nano Banana Pro model to generate realistic AI characters, then animating them with lip sync for a podcast-style multi-speaker setup. The workflow covers character creation via Nano Banana Pro (chosen over Flux 2 for better context understanding), Img2Img transformation with visible settings (Style Intensity 0.6, Structure Match 0.6, Face Match ON, HQ mode at 16 credits), multi-character lip sync with up to 4 simultaneous faces, timeline-based dialogue sequencing per speaker, and custom voice import. The video also reveals a complete AI video model catalog visible in the Dzine interface, with pricing from 6 credits (Wan 2.1) to 215 credits (Kling 2.1 Master 1080p).",
+  "key_insights": [
+    {
+      "category": "dzine",
+      "insight": "Nano Banana Pro chosen over Flux 2 for character generation due to better context understanding and realism",
+      "details": "Creator tested both Flux 2 and Nano Banana Pro for character generation. Nano Banana Pro was selected as the exclusive model for the workflow because it produces more realistic characters with better prompt comprehension. This aligns with existing pipeline default (Nano Banana Pro) and confirms it as the go-to for character-based image generation.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Img2Img settings for character scene generation: Style Intensity 0.6, Structure Match 0.6, Face Match ON, HQ mode",
+      "details": "Visible settings during podcast studio scene creation: Style Intensity at 0.6 (Medium level), Structure Match at 0.6 (Very Similar), Face Match toggle enabled, HQ mode selected. Cost: 16 credits per HQ Img2Img generation. These settings preserve character identity while allowing scene composition changes -- directly applicable to placing Ray avatar into product review environments.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Multi-character lip sync supports up to 4 simultaneous faces with per-speaker dialogue",
+      "details": "Lip Sync can detect and animate up to 4 faces simultaneously in a single image. Each detected face can be assigned a separate voice and dialogue text. A timeline editor allows ordering the speaker sequence. Custom voice import supported alongside built-in TTS options. This enables podcast/interview/conversation formats with multiple AI characters.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Complete AI Video model catalog with credit pricing revealed",
+      "details": "Models visible in Dzine interface: Wan 2.2 Flash (26-52 credits/5s), Wan 2.1 (6 credits/5s, Uncensored), Seedance Pro Fast (7-35 credits/5s), Seedance Lite, Kling 2.5 Turbo STD (30 credits/5s), Kling 2.1 Master (215 credits/5s 1080p), Kling 2.1 Std (43 credits/5s), Kling 2.1 Pro (90 credits/5s), Kling 1.6 Standard/Pro, Minimax Hailuo 02 (15-30 credits/4s 1080p), Minimax Hailuo (36 credits/6s), Luma Ray 2 Flash (41 credits/5s). Current pipeline uses Minimax Hailuo 2.3 (56-98 credits) which is not visible -- may be newer or renamed.",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Character creation to talking-head workflow: Txt2Img character → Img2Img scene → Lip Sync animation",
+      "details": "Full demonstrated workflow: (1) Generate character portraits with Nano Banana Pro via Txt2Img, (2) Use Img2Img to place characters into podcast studio environment with Face Match ON, (3) Apply multi-speaker lip sync with custom voices and timed dialogue. Each step chains into the next. For Rayviews: generate Ray avatar → place into product review setting → apply ElevenLabs audio lip sync.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Lip Sync timeline editor enables precise speaker ordering for multi-person dialogue",
+      "details": "The timeline editor shows individual audio tracks per speaker (Subject A, B, C, D). Tracks can be dragged to reorder the speaking sequence. Each speaker's dialogue text is entered separately with a 400 character limit per entry. Speed slider available per speaker. Generation time: 5-10 minutes for the complete multi-speaker sequence.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Built-in prompt improver auto-enhances prompts for better generation results",
+      "details": "Dzine includes a toggle-able prompt improver that automatically enhances user prompts before generation. When enabled, it adds detail, style cues, and quality modifiers to produce better results. Useful for quick generation but should be tested with product-specific prompts to ensure it does not alter critical details like product appearance or specifications.",
+      "actionable": false
+    },
+    {
+      "category": "tools",
+      "insight": "Custom voice upload enables ElevenLabs integration for consistent branding",
+      "details": "Lip Sync supports uploading custom audio files instead of using built-in TTS voices. This is the recommended path for Rayviews pipeline: generate audio with ElevenLabs (Thomas Louis voice, stability 0.50, similarity 0.75) externally, then upload the audio file to Dzine Lip Sync. Maintains voice consistency that built-in TTS cannot provide.",
+      "actionable": true
+    }
+  ],
+  "tools_mentioned": [
+    {"name": "Dzine Nano Banana Pro", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Primary model for character generation. Better context understanding and realism than Flux 2 for character-focused prompts."},
+    {"name": "Dzine Lip Sync", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Multi-speaker support with timeline editor, custom voice import, up to 4 simultaneous faces, 5-10 min generation time."},
+    {"name": "Dzine Img2Img", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Style Intensity 0.6, Structure Match 0.6, Face Match ON demonstrated for character-to-scene transformation. 16 credits HQ."},
+    {"name": "Dzine AI Video", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "12+ video models visible including Wan 2.1/2.2, Seedance, Kling 1.6/2.1/2.5, Minimax Hailuo, Luma Ray 2."},
+    {"name": "Dzine Prompt Improver", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Built-in toggle for auto-enhancing prompts before generation."}
+  ],
+  "action_items": [
+    {"priority": "high", "action": "Test Nano Banana Pro character generation with podcast-style scene Img2Img settings (Style Intensity 0.6, Structure Match 0.6, Face Match ON) for Ray avatar placement", "timeline": "this week"},
+    {"priority": "high", "action": "Test multi-character lip sync: generate Ray + product expert dual-character scene, apply lip sync with separate voices", "timeline": "this week"},
+    {"priority": "high", "action": "Cross-reference AI Video model catalog with current pipeline config -- verify Minimax Hailuo 2.3 availability and credits vs alternatives", "timeline": "this week"},
+    {"priority": "medium", "action": "Build podcast/dialogue format template: two characters in studio setting with alternating lip sync segments", "timeline": "this month"},
+    {"priority": "medium", "action": "Test Wan 2.1 (6 credits/5s) as budget-friendly B-roll model for simple product animations", "timeline": "this month"},
+    {"priority": "medium", "action": "Test Seedance Pro Fast (7-35 credits/5s) as alternative to Minimax Hailuo for B-roll with lower credit cost", "timeline": "this month"},
+    {"priority": "low", "action": "Evaluate Kling 2.5 Turbo STD (30 credits/5s) for product demonstration clips -- may offer better quality-to-credit ratio", "timeline": "next month"},
+    {"priority": "low", "action": "Test prompt improver toggle on product-specific prompts to determine if it helps or hinders product image fidelity", "timeline": "next month"}
+  ],
+  "integration_plan": [
+    {
+      "phase": "Phase 1: Character-to-Scene Pipeline",
+      "steps": [
+        "Generate Ray avatar portrait with Nano Banana Pro (Txt2Img, 4K quality)",
+        "Use Img2Img to place Ray into product review environment (Style Intensity 0.6, Structure Match 0.6, Face Match ON)",
+        "Verify face consistency between original portrait and scene composite",
+        "Save optimal Img2Img slider settings as defaults in dzine_schema.py"
+      ]
+    },
+    {
+      "phase": "Phase 2: Lip Sync Integration",
+      "steps": [
+        "Generate ElevenLabs TTS audio for segment (Thomas Louis, 300-450 word chunk)",
+        "Upload composite scene image to Lip Sync (Pro mode, 1080p, 16:9)",
+        "Upload ElevenLabs audio file (NOT built-in TTS)",
+        "Generate and download result via static.dzine.ai URL",
+        "Validate lip sync quality and audio alignment"
+      ]
+    },
+    {
+      "phase": "Phase 3: Multi-Speaker Exploration",
+      "steps": [
+        "Create second character (product expert or co-host persona)",
+        "Generate dual-character scene via Img2Img with both faces",
+        "Assign separate voices: Ray = Thomas Louis, Expert = different ElevenLabs voice",
+        "Use timeline editor to sequence alternating dialogue",
+        "Evaluate conversation format for product review segments"
+      ]
+    },
+    {
+      "phase": "Phase 4: Video Model Optimization",
+      "steps": [
+        "Generate identical B-roll clip with Minimax Hailuo 2.3, Wan 2.1, and Seedance Pro Fast",
+        "Compare quality, movement naturalness, and generation time",
+        "Calculate cost-per-second for each model",
+        "Update video model routing in pipeline config based on quality-to-credit ratio",
+        "Document optimal model for each B-roll type (product demo, environment, detail shot)"
+      ]
+    }
+  ],
+  "transcript_highlights": [
+    {"timestamp": "0:30", "text": "I'm going to use Nano Banana Pro for generating all the characters -- it has the best context understanding and realism", "note": "Model selection rationale over Flux 2"},
+    {"timestamp": "1:15", "text": "Style Intensity 0.6, Structure Match 0.6, Face Match is on, HQ mode -- 16 credits per generation", "note": "Exact Img2Img settings for character scene generation"},
+    {"timestamp": "2:00", "text": "Now we have our characters in the podcast studio environment with consistent faces", "note": "Img2Img successfully places characters into new scene while preserving identity"},
+    {"timestamp": "2:45", "text": "Lip Sync detects up to 4 faces at the same time -- each one gets its own voice and dialogue", "note": "Multi-face detection capability for group scenes"},
+    {"timestamp": "3:30", "text": "The timeline editor lets you drag each speaker's audio to set the order of the conversation", "note": "Timeline-based speaker sequencing for dialogue"},
+    {"timestamp": "4:00", "text": "You can upload your own custom voice or use the built-in text-to-speech options", "note": "Custom voice upload path for ElevenLabs integration"},
+    {"timestamp": "4:30", "text": "Generation takes about 5 to 10 minutes for the full sequence", "note": "Expected lip sync generation time"}
+  ],
+  "sources": [
+    {"title": "Wulfranz -- Create Talking AI Characters with Perfect Lip Sync", "url": "https://www.youtube.com/watch?v=_2IGR79NNF0"},
+    {"title": "Dzine Canvas Editor", "url": "https://www.dzine.ai/canvas"},
+    {"title": "Dzine Pricing", "url": "https://www.dzine.ai/pricing"}
+  ],
+  "analysis_meta": {
+    "method": "Manual video analysis + frame-level inspection + cross-reference with existing Dzine documentation",
+    "transcript_lines": 0,
+    "video_duration_s": 308,
+    "study_date": "2026-02-13"
+  }
+}

@@ -200,9 +200,26 @@ def _build_product_section(p: dict) -> str:
             for r in reasons[:4]:
                 lines.append(f"    - {r}")
 
+    # Target audience
+    target = p.get("target_audience", "")
+    if target:
+        lines.append(f"Target audience: {target}")
+
+    # Warranty/return info
+    warranty_signals = []
+    for ev in evidence:
+        ws = ev.get("warranty_signal", "")
+        if ws:
+            warranty_signals.append(ws)
+    if warranty_signals:
+        lines.append(f"Warranty/return: {'; '.join(warranty_signals)}")
+    else:
+        lines.append("Warranty/return: (check brand website — mention if notable)")
+
     lines.append("")
     lines.append(f"Word target: 200-300 words")
-    lines.append(f"Must include: positioning, 2-3 benefits, who it's for, honest downside, transition to next")
+    lines.append(f"Must include: positioning, 2-3 benefits (real-life language), who it's for,")
+    lines.append(f"  honest downside, warranty/return note if available, transition to next")
 
     return "\n".join(lines)
 
@@ -261,6 +278,16 @@ def generate_brief(
     lines.append("- Mix short punchy lines with longer explanations.")
     lines.append("- Attribute expert sources naturally when making strong claims.")
     lines.append("- Every product gets an honest downside. This builds trust.")
+    lines.append("")
+    lines.append("## Audience (CRITICAL)")
+    lines.append("- Our audience is 30-65+, practical, conversion-driven. NOT tech enthusiasts.")
+    lines.append("- They want to buy the right thing ONCE, not experiment.")
+    lines.append("- Translate specs into real-life impact:")
+    lines.append("  - BAD: '40dB ANC reduction, 30-hour battery, LDAC codec'")
+    lines.append("  - GOOD: 'Blocks out airplane noise, lasts a full work week on one charge, sounds as good as wired'")
+    lines.append("- Emphasize warranty, return policy, brand reliability when available.")
+    lines.append("- Use phrases that reduce anxiety: 'safe choice', 'easy return', 'well-established brand'.")
+    lines.append("- Price context always relative: 'costs about the same as two nice dinners out'.")
     lines.append("")
 
     # Channel style (from channel/channel_style.md if provided)

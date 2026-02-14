@@ -295,19 +295,54 @@ class TestQAGatekeeper(unittest.TestCase):
         self.assertTrue(len(warnings) > 0, "Expected warning about 4 products")
 
     def test_manifest_gate(self):
+        import json as _json
         ctx = RunContext(video_id="test-001")
         ctx.paths.ensure_dirs()
         # Fail without files
         passed, errors = self.qa.check_gate(ctx, Stage.MANIFEST)
         self.assertFalse(passed)
-        self.assertEqual(len(errors), 3)  # 3 missing files
+        # 3 missing manifest files + publish readiness failures
+        manifest_errors = [e for e in errors if not e.startswith("Publish readiness")]
+        self.assertEqual(len(manifest_errors), 3)
 
-        # Pass with files
+        # Pass with all required files (manifest + publish readiness artifacts)
         ctx.paths.resolve_dir.mkdir(parents=True, exist_ok=True)
         for f in ["edit_manifest.json", "markers.csv", "notes.md"]:
             (ctx.paths.resolve_dir / f).write_text("content")
+
+        # Create products.json with 5 products
+        inputs_dir = ctx.paths.root / "inputs"
+        inputs_dir.mkdir(parents=True, exist_ok=True)
+        products = {"products": [
+            {"rank": i, "name": f"Product {i}",
+             "affiliate_url": f"https://amzn.to/{i}",
+             "downside": "Minor issue", "buy_this_if": "you want X",
+             "evidence": [{"source": "Wirecutter"}, {"source": "RTINGS"}]}
+            for i in range(1, 6)
+        ]}
+        (inputs_dir / "products.json").write_text(_json.dumps(products))
+
+        # Create script with disclosure
+        script_dir = ctx.paths.root / "script"
+        script_dir.mkdir(parents=True, exist_ok=True)
+        words = " ".join(["word"] * 1195)
+        (script_dir / "script.txt").write_text(
+            f"[HOOK]\n{words}\n[CONCLUSION]\naffiliate commission no extra cost"
+        )
+
+        # Create audio chunks
+        chunks = ctx.paths.root / "audio" / "chunks"
+        chunks.mkdir(parents=True, exist_ok=True)
+        for i in range(5):
+            (chunks / f"chunk_{i:02d}.mp3").write_bytes(b"\xff" * 100)
+
+        # Create thumbnail
+        assets_dir = ctx.paths.root / "assets"
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        (assets_dir / "thumbnail.png").write_bytes(b"\x89PNG" + b"\x00" * 60000)
+
         passed, errors = self.qa.check_gate(ctx, Stage.MANIFEST)
-        self.assertTrue(passed)
+        self.assertTrue(passed, f"Manifest gate should pass but got errors: {errors}")
 
 
 class TestSecurityAgent(unittest.TestCase):

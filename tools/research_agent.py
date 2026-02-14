@@ -96,7 +96,9 @@ class ProductEvidence:
     brand: str = ""
     category_label: str = ""     # "best overall", "best budget", etc.
     reasons: list[str] = field(default_factory=list)  # 2-4 key reasons
+    reason_confidence: list[str] = field(default_factory=list)  # parallel: measured/editorial/user_reported
     downside: str = ""           # primary downside/con extracted from review
+    warranty_signal: str = ""    # warranty/return info if found
     source_name: str = ""
     source_url: str = ""
     source_date: str = ""        # publication date if found
@@ -311,16 +313,23 @@ def _extract_products_from_page(
                     continue
                 seen_names.add(name_key)
 
-                # Extract reasons and downside from surrounding lines
+                # Extract reasons, downside, warranty from surrounding lines
                 reasons = _extract_reasons(lines, i, brand)
                 downside = _extract_downside(lines, i, brand)
+                warranty = _extract_warranty(lines, i)
+
+                # Tag confidence for each reason
+                from tools.lib.buyer_trust import confidence_tag
+                reason_conf = [confidence_tag(r) for r in reasons]
 
                 products.append(ProductEvidence(
                     product_name=full_name,
                     brand=brand,
                     category_label=label,
                     reasons=reasons,
+                    reason_confidence=reason_conf,
                     downside=downside,
+                    warranty_signal=warranty,
                     source_name=source_name,
                     source_url=url,
                     source_date=date,
@@ -364,13 +373,19 @@ def _extract_products_from_page(
 
                 reasons = _extract_reasons(lines, i, brand)
                 downside = _extract_downside(lines, i, brand)
+                warranty = _extract_warranty(lines, i)
+
+                from tools.lib.buyer_trust import confidence_tag
+                reason_conf = [confidence_tag(r) for r in reasons]
 
                 products.append(ProductEvidence(
                     product_name=full_name,
                     brand=brand,
                     category_label=label,
                     reasons=reasons,
+                    reason_confidence=reason_conf,
                     downside=downside,
+                    warranty_signal=warranty,
                     source_name=source_name,
                     source_url=url,
                     source_date=date,
@@ -384,7 +399,6 @@ def _extract_reasons(lines: list[str], product_line: int, brand: str) -> list[st
     reasons: list[str] = []
     # Look at the next 10 lines for reason-like sentences
     block = lines[product_line:product_line + 12]
-    brand_lower = brand.lower()
 
     for line in block:
         line = line.strip()
@@ -416,6 +430,23 @@ def _extract_reasons(lines: list[str], product_line: int, brand: str) -> list[st
                 break
 
     return reasons[:4]
+
+
+_WARRANTY_EXTRACT_RE = re.compile(
+    r"(\d+[- ]?year\s+(?:warranty|guarantee)|limited\s+warranty|"
+    r"return\s+polic\w+|money[- ]?back\s+guarantee|replacement\s+(?:warranty|policy))",
+    re.IGNORECASE,
+)
+
+
+def _extract_warranty(lines: list[str], product_line: int) -> str:
+    """Extract warranty/return policy info from lines near a product mention."""
+    block = lines[product_line:product_line + 20]
+    for line in block:
+        m = _WARRANTY_EXTRACT_RE.search(line)
+        if m:
+            return m.group(0).strip()
+    return ""
 
 
 _DOWNSIDE_PATTERNS = [
@@ -780,6 +811,8 @@ def _write_shortlist_json(report: ResearchReport, output_path: Path) -> None:
                     ev.source_name.lower().replace(" ", "_"): {
                         "url": ev.source_url,
                         "key_claims": _filter_generic_reasons(ev.reasons[:3]),
+                        "claim_confidence": ev.reason_confidence[:3] if ev.reason_confidence else [],
+                        "warranty_signal": ev.warranty_signal,
                         "subcategory_proof": [ev.category_label] if ev.category_label else [],
                     }
                     for ev in agg.evidence

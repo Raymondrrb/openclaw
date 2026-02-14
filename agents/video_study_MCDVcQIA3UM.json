@@ -1,0 +1,189 @@
+{
+  "video_id": "MCDVcQIA3UM",
+  "title": "Introduction to DaVinci Resolve - [Full Course] for Beginners (2026)",
+  "channel": "Casey Faris",
+  "url": "https://www.youtube.com/watch?v=MCDVcQIA3UM",
+  "study_date": "2026-02-13",
+  "relevance": "Comprehensive 5-hour DaVinci Resolve course covering all 7 pages. Provides the foundational knowledge for every editing decision in the Rayviews pipeline: timeline assembly, Fairlight audio mixing with bus routing, Color Page node architecture, Fusion compositing for text overlays, and Deliver Page export settings including the H.265 + 4K upres trick for YouTube.",
+  "summary": "Casey Faris (Blackmagic Certified Trainer, 554K subscribers) delivers a complete DaVinci Resolve 20 course covering Media Page (import, bins, metadata), Edit Page (insert modes, trim operations, Inspector properties, keyframe animation, Dynamic Zoom), Cut Page (dual-timeline rough assembly), Fusion Page (node compositing, Text+, Merge, masks, templates/macros), Color Page (YRGB Color Managed, node types, color wheels, curves, scopes, windows/qualifiers, gallery stills for batch grading), Fairlight Page (bus routing, EQ, Dialogue Compression preset, volume automation, Sound Library), and Deliver Page (H.265 Master + Ultra HD upres for YouTube, ProRes 422 HQ + Linear PCM archive, Render Queue batching). The course provides the conceptual model that maps directly to DaVinci Resolve's Python scripting API for pipeline automation.",
+  "key_insights": [
+    {
+      "category": "editing",
+      "insight": "H.265 + 4K upres trick for YouTube",
+      "details": "Export with H.265 Master preset at 3840x2160 (Ultra HD) instead of native 1080p. YouTube applies VP9/AV1 compression at higher quality for 4K uploads, resulting in noticeably better playback even though the source is 1080p.",
+      "actionable": true
+    },
+    {
+      "category": "audio",
+      "insight": "Fairlight bus routing architecture",
+      "details": "Create dedicated Dialogue Bus, Music Bus, and SFX Bus, all routing to Bus 1 (main output). Apply shared effects per bus (compressor on Dialogue Bus affects all VO tracks). This replaces per-track processing with bus-level control.",
+      "actionable": true
+    },
+    {
+      "category": "audio",
+      "insight": "Dialogue Compression preset as starting point",
+      "details": "Fairlight Dynamics panel has a built-in 'Dialogue Compression' preset in the dropdown. Low ratio, gentle threshold, small gain reduction + makeup gain. Good starting point for ElevenLabs TTS voiceover processing.",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Dynamic Zoom + Paste Attributes for batch application",
+      "details": "Set Dynamic Zoom on one image clip, copy it, select all other image clips, Paste Attributes (Alt+V) with only Dynamic Zoom checked. Maps to API: loop over timeline items and set DynamicZoomEase property.",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Power Bins persist across all projects",
+      "details": "Store rank badge templates, benefit callout templates, FTC disclosure text, standard SFX in Power Bins (Media Page > Master > Power Bins). Available in every project in the same Resolve database. Essential for pipeline template reuse.",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Track Presets save full audio chains",
+      "details": "Save complete channel strip (EQ + compression + effects) as Track Preset. Load in new projects with one click. Save separate presets for VO, music, SFX, and Bus 1 master limiter.",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Color Managed workflow for Resolve 20",
+      "details": "Project Settings: Color Science = DaVinci YRGB Color Managed, Intermediate = HDR DaVinci Wide Gamut, Output = Rec 709. Resolve handles all internal color space conversions automatically. Upgrade from simple YRGB.",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Timeline vs Clip nodes in Color Page",
+      "details": "Timeline nodes apply global grade to all clips (use for overall look). Clip nodes are per-clip (use for shot matching). Toggle between them with dots at top-right of node graph. Maps to pipeline: timeline node for brand look, clip nodes for product-specific corrections.",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Archive export with separate audio tracks",
+      "details": "ProRes 422 HQ + Linear PCM 32-bit float + 'All Timeline Tracks' renders each Fairlight track as a separate audio stream. Preserves VO/music/SFX separation for future remixing or corrections.",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Render Queue batching for multi-format delivery",
+      "details": "Stack YouTube (H.265 4K), archive (ProRes), and Shorts (9:16 via Smart Reframe) as separate render jobs. Render All processes entire queue sequentially. One-pass multi-format delivery.",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Fusion template creation via Macros",
+      "details": "Build node tree (Background + Text+ + Merge), select all, right-click > Macro > Create Macro, expose adjustable controls (text, colors, position), save to Templates folder. Access from Edit page Effects Library > Titles.",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Compound Clips for per-product segments",
+      "details": "Select all clips for a product segment, right-click > New Compound Clip. Bundles into single timeline item. Double-click to edit contents. Useful for packaging the 90-second product segment as a reusable unit.",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Gallery Stills for batch color grading",
+      "details": "Grade hero shot first, right-click viewer > Grab Still. Use split-screen compare against other clips. Right-click still > Apply Grade copies entire node tree. Middle mouse button click for quick copy between adjacent clips in thumbnail strip.",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Keyframe easing with Bezier handles",
+      "details": "In Keyframe Editor curve mode: flatten Bezier handles = ease in/out (slow start/stop). Pointy handles = linear (mechanical). For Ken Burns zoom on product images, flatten handles for smooth, professional-looking motion.",
+      "actionable": true
+    },
+    {
+      "category": "audio",
+      "insight": "Volume automation via Alt+Click control points",
+      "details": "Alt+click on clip volume line to add control points. Drag up/down to automate level changes. Ctrl+Alt+click to remove points. Use for fine-tuning music ducking points that AI tools miss.",
+      "actionable": false
+    },
+    {
+      "category": "editing",
+      "insight": "Custom keyboard shortcuts for ripple trimming",
+      "details": "Casey maps Q = ripple trim start to playhead, W = ripple trim end to playhead, S = split at playhead. These three shortcuts handle 90% of editing operations and are faster than default Ctrl+Shift+[ / ] bindings.",
+      "actionable": false
+    }
+  ],
+  "tools_mentioned": [
+    {"name": "DaVinci Resolve 20", "category": "editing", "url": "https://www.blackmagicdesign.com/products/davinciresolve", "note": "Free version covers almost everything in the course. Studio required for H.265 on Windows, AI tools, and some effects."},
+    {"name": "Ground Control Courses", "category": "education", "url": "https://www.groundcontrol.film/", "note": "Casey's paid follow-up courses ($199 each): End-to-End filmmaking, Fusion 101-401, Color 101, Fairlight 101."},
+    {"name": "DaVinci Resolve Scripting API", "category": "automation", "url": "https://deric.github.io/DaVinciResolve-API-Docs/", "note": "Python/Lua API for automating project creation, media import, timeline assembly, render settings."}
+  ],
+  "action_items": [
+    {"priority": "high", "action": "Test H.265 + 4K upres YouTube export and compare quality vs current H.264 1080p", "timeline": "this week"},
+    {"priority": "high", "action": "Set up Fairlight bus routing template (Dialogue/Music/SFX buses → main)", "timeline": "this week"},
+    {"priority": "high", "action": "Test 'Dialogue Compression' preset on ElevenLabs TTS output", "timeline": "this week"},
+    {"priority": "high", "action": "Create Power Bins with rank badge, benefit callout, and FTC disclosure templates", "timeline": "this week"},
+    {"priority": "medium", "action": "Update resolve_editing_rules.md with H.265 export, bus routing, Color Managed workflow", "timeline": "this month"},
+    {"priority": "medium", "action": "Build Fusion macro templates for product name lower-third and rank badge overlay", "timeline": "this month"},
+    {"priority": "medium", "action": "Add archive export (ProRes 422 HQ + Linear PCM + separate tracks) to pipeline", "timeline": "this month"},
+    {"priority": "medium", "action": "Switch from simple YRGB to YRGB Color Managed + HDR Wide Gamut + Rec 709", "timeline": "this month"},
+    {"priority": "low", "action": "Automate project creation with all Casey settings via Python API", "timeline": "next month"},
+    {"priority": "low", "action": "Create DRP template timeline with pre-configured tracks, buses, and presets", "timeline": "next month"},
+    {"priority": "low", "action": "Script 3-job Render Queue (YouTube + archive + Shorts) via API", "timeline": "next month"}
+  ],
+  "integration_plan": [
+    {
+      "phase": "Phase 1: Export Upgrade",
+      "steps": [
+        "Test H.265 Master + Ultra HD upres on a completed video",
+        "Compare YouTube playback quality at 1080p vs 4K-upres at 1080p display",
+        "If quality improvement confirmed, update resolve_editing_rules.md Section 11",
+        "Add archive export job (ProRes 422 HQ) to standard render workflow"
+      ]
+    },
+    {
+      "phase": "Phase 2: Audio Bus Architecture",
+      "steps": [
+        "Create Fairlight bus layout: Dialogue Bus + Music Bus + SFX Bus → Bus 1",
+        "Apply 'Dialogue Compression' preset on Dialogue Bus",
+        "Test with existing ElevenLabs TTS chunks — measure LUFS before/after",
+        "Save as Track Preset for instant loading in new projects",
+        "Update resolve_editing_rules.md Section 6 with bus-based workflow"
+      ]
+    },
+    {
+      "phase": "Phase 3: Template System",
+      "steps": [
+        "Create Power Bins with rank badge, benefit callout, disclosure text",
+        "Build Fusion macros for product name lower-third and rank badge overlay",
+        "Create DRP template project with all settings pre-configured",
+        "Test template-based project creation end-to-end"
+      ]
+    },
+    {
+      "phase": "Phase 4: API Automation",
+      "steps": [
+        "Script project creation with color management, track layout, bus routing",
+        "Script media import into organized bins",
+        "Script 3-job Render Queue setup (YouTube + archive + Shorts)",
+        "Test headless rendering with DaVinciResolve -nogui"
+      ]
+    }
+  ],
+  "transcript_highlights": [
+    {"timestamp": "4:53:00", "text": "Click H.265 master and call it good... change resolution to Ultra HD", "note": "The 4K upres trick for YouTube — key export strategy change"},
+    {"timestamp": "4:16:55", "text": "We create a bus called Dialogue Bus... route all dialogue tracks to it", "note": "Bus-based audio architecture for shared processing"},
+    {"timestamp": "4:30:00", "text": "Turn on compressor, set threshold below average, low ratio... just a little bit of gain reduction", "note": "Dialogue Compression technique for consistent VO levels"},
+    {"timestamp": "2:50:20", "text": "DaVinci YRGB Color Managed... HDR DaVinci Wide Gamut... Rec 709 output", "note": "Recommended color science setup for Resolve 20"},
+    {"timestamp": "1:43:14", "text": "Every Fusion composition starts with MediaIn and ends with MediaOut", "note": "Fusion node architecture foundation"},
+    {"timestamp": "0:28:57", "text": "Inspector has Transform, Cropping, Composite... Dynamic Zoom toggle", "note": "Inspector properties for Ken Burns automation"},
+    {"timestamp": "5:05:42", "text": "The best way to learn Resolve: pick a project and just make it", "note": "Project-based learning approach"}
+  ],
+  "sources": [
+    {"title": "Casey Faris YouTube Course", "url": "https://www.youtube.com/watch?v=MCDVcQIA3UM"},
+    {"title": "Ground Control", "url": "https://www.groundcontrol.film/"},
+    {"title": "Ground Control Free Practice Media", "url": "https://www.groundcontrol.film/intro-to-resolve-2025-project-media-free-download"},
+    {"title": "Blackmagic DaVinci Resolve", "url": "https://www.blackmagicdesign.com/products/davinciresolve"},
+    {"title": "Blackmagic Official Training", "url": "https://www.blackmagicdesign.com/products/davinciresolve/training"},
+    {"title": "DaVinci Resolve Scripting API (Unofficial)", "url": "https://deric.github.io/DaVinciResolve-API-Docs/"},
+    {"title": "DaVinci Resolve 20.3.2 Release Notes", "url": "https://www.newsshooter.com/2026/02/11/davinci-resolve-20-3-2-update/"},
+    {"title": "Blackmagic Free Webinar Series 2026", "url": "https://ymcinema.com/2026/02/09/blackmagic-free-davinci-resolve-training/"}
+  ],
+  "analysis_meta": {
+    "method": "yt-dlp transcript extraction + web research + manual analysis",
+    "transcript_lines": 8751,
+    "video_duration_s": 18655,
+    "study_date": "2026-02-13"
+  }
+}

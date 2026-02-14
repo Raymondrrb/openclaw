@@ -1,0 +1,131 @@
+{
+  "video_id": "vMA7nddve-s",
+  "title": "7 EPIC Davinci Resolve Effects In 300 Seconds",
+  "channel": "Jamie Fenn",
+  "url": "https://www.youtube.com/watch?v=vMA7nddve-s",
+  "study_date": "2026-02-13",
+  "duration_seconds": 298,
+  "upload_date": "2025-08-14",
+  "views": 243317,
+  "likes": 15007,
+  "language": "en",
+  "relevance": "DaVinci Resolve effects tutorial — not a competitor format but directly applicable to our post-production pipeline. Demonstrates Dynamic Zoom, MagicMask, Fusion Templates, and Adjustment Clips, all usable in Rayviews product video assembly. Strong engagement (243K views, 6.2% like ratio) validates the fast-paced tutorial format.",
+  "summary": "Speed-run of 7 creative DaVinci Resolve effects in under 5 minutes. Covers Tunnel Effect, Action Zoom (Dynamic Zoom), Reveal Wipe, Shadow Titles (Fusion Templates), Zoom Through Effect, MagicMask object isolation, and creative composites. Screen recording alternates between Edit page (Inspector, Effects Library, timeline) and Fusion page (node graphs). All effects achievable in Resolve Studio 20.",
+  "key_insights": [
+    {
+      "category": "tools",
+      "insight": "Dynamic Zoom is a built-in Inspector toggle with Zoom Ease options (Linear, Ease In/Out) — no manual keyframing needed for Ken Burns-style product image zoom",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Adjustment Clips apply effects to all clips below them on the timeline — use for consistent color/brightness/zoom across entire product image sequences",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Fusion Composition templates with Shading Elements and Gradient controls on 1920x1080 transparent canvas — build once, reuse for product name + rank number overlays",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "tools",
+      "insight": "MagicMask in Fusion isolates objects from backgrounds via AI tracking (Faster/Better modes) — fallback for cleaning up imperfect Dzine-generated product backgrounds",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "tools",
+      "insight": "Fusion Effects Library includes DSLR (depth-of-field blur), DVE (picture-in-picture), Drone Overlay, and dozens more — ready-made effects applicable to product shots",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Fusion node graphs (MediaIn -> Effect -> MediaOut) can be saved as reusable presets — build a library of product zoom, text overlay, and isolation presets once, reuse every video",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "YouTube chapters per effect segment enables fast navigation and matches our Top 5 per-product chapter structure",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "All 7 effects are built into DaVinci Resolve Studio (no plugins required) — zero additional cost to implement in our pipeline",
+      "priority": "high",
+      "actionable": true
+    }
+  ],
+  "editing_style": {
+    "transitions": "hard cuts only between effect demonstrations",
+    "text_overlays": "minimal — brief chapter titles at segment starts, Resolve UI provides visual content",
+    "graphics": "none — pure screen recording tutorial format",
+    "pacing": "extremely fast — 7 effects in 298 seconds, ~42 seconds per effect, no filler",
+    "camera_work": "100% screen recording of DaVinci Resolve Studio 20 (macOS), no webcam",
+    "product_presentation": "n/a — tutorial format, not product review",
+    "structure": "hook (visual preview) -> [effect demo with screen recording] x7 -> closing (CTA + store link)",
+    "music": "likely background music (common for Jamie Fenn)",
+    "effects": "demonstrates 7 effects: Tunnel, Dynamic Zoom, Reveal Wipe, Shadow Titles, Zoom Through, MagicMask, Creative Composites"
+  },
+  "production_budget_estimate": {
+    "ray_lip_sync_credits": 0,
+    "product_images_credits": 0,
+    "total_video_credits": 0,
+    "total_image_credits": 0,
+    "note": "This is a technique reference — no Dzine credits needed. The effects learned here apply to DaVinci Resolve post-production at zero additional cost (all built-in to Resolve Studio)."
+  },
+  "tools_mentioned": [
+    "DaVinci Resolve Studio 20",
+    "Fusion (node-based compositing)",
+    "Dynamic Zoom (Inspector)",
+    "MagicMask (AI object isolation)",
+    "Adjustment Clips",
+    "Fusion Compositions / Templates",
+    "Fusion Effects Library (DSLR, DVE, Drone Overlay, etc.)"
+  ],
+  "action_items": [
+    {
+      "priority": "high",
+      "action": "Apply Dynamic Zoom (Inspector toggle, Ease In/Out) to every product image clip in the timeline for automatic 3-7% Ken Burns zoom",
+      "timeline": "DaVinci Resolve template setup"
+    },
+    {
+      "priority": "high",
+      "action": "Build reusable Fusion Composition template for product name + rank number overlay (transparent 1920x1080, shadow/gradient styling)",
+      "timeline": "one-time setup, next sprint"
+    },
+    {
+      "priority": "high",
+      "action": "Save Fusion node presets for: product zoom, text overlay, product isolation — reuse across all videos",
+      "timeline": "one-time setup, next sprint"
+    },
+    {
+      "priority": "medium",
+      "action": "Use Adjustment Clips above product image sequences for consistent color grading and brightness across each product segment",
+      "timeline": "DaVinci Resolve template setup"
+    },
+    {
+      "priority": "medium",
+      "action": "Test MagicMask on Dzine-generated product images to evaluate background cleanup quality as a post-production fallback",
+      "timeline": "exploration"
+    },
+    {
+      "priority": "low",
+      "action": "Explore DSLR Fusion effect for adding depth-of-field to flat product images and DVE for side-by-side product comparisons",
+      "timeline": "exploration"
+    }
+  ],
+  "analysis_meta": {
+    "method": "visual_frame_analysis",
+    "interval_frames": 60,
+    "scene_frames": 0,
+    "total_frames": 60,
+    "transcript_available": false,
+    "transcript_note": "Analysis based on 60 sampled frames from video"
+  }
+}

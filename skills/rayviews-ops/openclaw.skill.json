@@ -1,0 +1,67 @@
+{
+  "name": "rayviews-ops",
+  "version": "1.0.0",
+  "description": "Rayviews Lab pipeline ops and job control via Telegram",
+  "commands": [
+    {
+      "name": "task",
+      "description": "Create a new task/job",
+      "handler": "scripts/ops.py"
+    },
+    {
+      "name": "status",
+      "description": "Show job or pipeline status",
+      "handler": "scripts/ops.py"
+    },
+    {
+      "name": "logs",
+      "description": "Show job logs",
+      "handler": "scripts/ops.py"
+    },
+    {
+      "name": "list",
+      "description": "List recent jobs",
+      "handler": "scripts/ops.py"
+    },
+    {
+      "name": "cancel",
+      "description": "Cancel a job",
+      "handler": "scripts/ops.py"
+    },
+    {
+      "name": "continue",
+      "description": "Add instruction to a running job",
+      "handler": "scripts/ops.py"
+    },
+    {
+      "name": "artifacts",
+      "description": "List job artifacts",
+      "handler": "scripts/ops.py"
+    },
+    {
+      "name": "approve",
+      "description": "Approve a permission request",
+      "handler": "scripts/ops.py"
+    },
+    {
+      "name": "deny",
+      "description": "Deny a permission request",
+      "handler": "scripts/ops.py"
+    },
+    {
+      "name": "pending",
+      "description": "List pending permission requests",
+      "handler": "scripts/ops.py"
+    },
+    {
+      "name": "pipeline_status",
+      "description": "Show pipeline status for a video",
+      "handler": "scripts/ops.py"
+    },
+    {
+      "name": "run",
+      "description": "Run a pipeline stage",
+      "handler": "scripts/ops.py"
+    }
+  ]
+}

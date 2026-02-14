@@ -1,8 +1,9 @@
 """Fetch and extract text content from web pages.
 
 Cheapest method first:
-1. HTTP fetch via urllib (works for most review sites)
-2. Playwright browser fallback (for dynamic/JS-required pages)
+1. Markdown via content negotiation (Cloudflare "Markdown for Agents")
+2. HTTP fetch via urllib (works for most review sites)
+3. Playwright browser fallback (for dynamic/JS-required pages)
 
 Returns clean text suitable for product extraction.
 Stdlib only (+ optional Playwright).
@@ -164,20 +165,46 @@ def _browser_fetch(url: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def fetch_page_text(url: str) -> tuple[str, str]:
+def fetch_page_text(
+    url: str,
+    *,
+    persist_to: str | Path | None = None,
+    cache: object | None = None,
+) -> tuple[str, str]:
     """Fetch a page and return (text_content, method_used).
 
-    Tries HTTP first (cheap), falls back to browser (expensive).
-    Returns ("", "failed") if both fail.
+    Cost-ordered pipeline:
+    0. Cache lookup (free — no HTTP at all)
+    1. Markdown via content negotiation (cheapest HTTP)
+    2. HTTP HTML fetch + local conversion
+    3. Playwright browser fallback (most expensive)
+
+    Returns ("", "failed") if all methods fail.
+
+    Args:
+        url: Page URL to fetch.
+        persist_to: Optional dir path to save .md + .json artifacts.
+        cache: Optional FetchCache instance for TTL-based caching.
     """
-    # Try HTTP first
+    # 1. Try markdown-first with cache (Cloudflare "Markdown for Agents")
+    try:
+        from tools.lib.markdown_fetch import fetch_markdown
+        result = fetch_markdown(url, persist_to=persist_to, cache=cache)
+        if result.ok and len(result.text) > 200:
+            return result.text, result.method  # "markdown", "html", or "cached:*"
+    except ImportError:
+        pass
+    except Exception as exc:
+        print(f"  [page_reader] Markdown fetch error: {exc}", file=sys.stderr)
+
+    # 2. Try HTTP HTML fetch
     html = _http_fetch(url)
     if html and len(html) > 500:
         text = html_to_text(html)
         if len(text) > 200:
             return text, "http"
 
-    # Fall back to browser
+    # 3. Fall back to browser
     html = _browser_fetch(url)
     if html and len(html) > 500:
         text = html_to_text(html)

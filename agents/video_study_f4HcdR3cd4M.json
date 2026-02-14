@@ -1,0 +1,147 @@
+{
+  "video_id": "f4HcdR3cd4M",
+  "title": "Consistent Character Sheets in Nano Banana (Prompts Included!)",
+  "channel": "AI Video School",
+  "url": "https://www.youtube.com/watch?v=f4HcdR3cd4M",
+  "study_date": "2026-02-13",
+  "relevance": "Demonstrates the EXACT technique needed for Ray avatar consistency across all Rayviews videos. A single character reference sheet (multi-angle views) generated in Nano Banana Pro serves as the master ingredient for every subsequent scene and video generation, ensuring consistent identity through wardrobe changes and different environments. This is the foundational technique for the Ray Avatar Plan.",
+  "summary": "AI Video School demonstrates creating character reference sheets in Nano Banana Pro using a single reference photo plus a specialized prompt. The sheet shows the character from multiple angles (full body: front, left side, right side, back; face close-ups: front, 3/4, side) in 16:9 format. This sheet then serves as an 'ingredient' (element/reference) when generating scenes or videos, maintaining character consistency. Critical discovery: ALWAYS include the character sheet as an ingredient even when you already have a start frame for video generation. The technique supports wardrobe changes (same face/body, different clothing) and multi-character scenes (upload multiple character sheets). The workflow uses the 'Add To Prompt' button and the Scenebuilder view within the Flow interface.",
+  "key_insights": [
+    {
+      "category": "dzine",
+      "insight": "Character reference sheet structure: multi-angle views in 16:9 format for maximum reusability",
+      "details": "The character sheet is generated in 16:9 format containing: top row = full body views (front, left side, right side, back), bottom row = face close-ups (front, 3/4, side). Nano Banana Pro generates this from a single reference photo plus the character sheet prompt. Output is incredibly detailed -- Nano Banana Pro excels at this structured multi-view generation. The 16:9 format is optimal because it provides enough horizontal space for all angle views.",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Character sheet workflow: reference photo + specific prompt + 16:9 + x2 outputs + select best",
+      "details": "Step-by-step: (1) Upload a reference photo of the character, (2) Select 'Create Image' mode, (3) Choose Nano Banana Pro model, (4) Paste the character sheet prompt (available in video description), (5) Set 16:9 aspect ratio, (6) Set x2 outputs for selection, (7) Generate, (8) Select the best sheet from the two outputs. The specific prompt is key -- it instructs the model to create the multi-angle reference layout.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "CRITICAL: Always include character sheet as ingredient even when you already have a start frame for video",
+      "details": "When generating video from a start image, adding the character sheet as an additional ingredient dramatically improves character consistency in the output video. Without the sheet, the video model may drift from the character's appearance. With the sheet as reference, face, body proportions, and distinguishing features remain stable throughout the video clip. This is the single most important finding for the Ray avatar video pipeline.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Character sheet enables wardrobe changes while maintaining face/body consistency",
+      "details": "Same character can appear in completely different outfits (demonstrated: casual clothing to military gear) while maintaining recognizable face and body proportions. The character sheet serves as the identity anchor -- the scene prompt specifies the new wardrobe. This enables Ray to look slightly different per video (different shirt, different setting) while remaining unmistakably the same person.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Two-character scenes via multiple character sheets uploaded as references",
+      "details": "Upload both character reference sheets as ingredients, then write a scene prompt describing both characters interacting. Dzine maintains both identities in the output -- each character looks like their respective sheet. This enables comparison review scenes with Ray and a second character, or product demonstration scenes with two distinct AI presenters.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Add To Prompt button chains character sheet into scene generation without manual re-upload",
+      "details": "After generating a character sheet, click the 'Add To Prompt' button directly on the result. This adds the sheet as a reference for the next generation. Then write a scene prompt to generate the character in a new environment. The sheet becomes the identity reference for the scene. This streamlines the workflow: generate sheet → Add To Prompt → write scene → generate scene.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Scenebuilder view in Flow interface for structured character-to-scene pipeline",
+      "details": "The UI shows a 'Flow > Character Reference Sheets > Scenebuilder' navigation path. This structured view helps organize the workflow: character sheets feed into scene generation which feeds into video generation. The Scenebuilder is part of the Flow interface within Nano Banana Pro's workspace.",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Ingredients to Video mode: character sheet + start image + video prompt for consistent animated output",
+      "details": "For video generation: (1) Add a start image (the scene you want to animate), (2) Add the character sheet as an ingredient, (3) Write a video prompt describing the desired motion/action, (4) Select 'ingredients to video' mode, (5) Generate. The character sheet ingredient ensures the video maintains character consistency even as the character moves and the camera angle changes.",
+      "actionable": true
+    }
+  ],
+  "tools_mentioned": [
+    {"name": "Dzine Nano Banana Pro", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Primary model for character sheet generation. Excels at structured multi-angle layouts from a single reference photo."},
+    {"name": "Dzine Create Image (Txt2Img)", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Mode used for character sheet generation with reference photo + character sheet prompt."},
+    {"name": "Dzine Add To Prompt", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Button on generated results that adds the image as a reference/ingredient for the next generation."},
+    {"name": "Dzine Scenebuilder (Flow)", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Structured view for chaining character sheets into scene generation. Part of the Flow interface."},
+    {"name": "Dzine AI Video (Ingredients to Video)", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Video generation mode that accepts character sheet as ingredient alongside start image for consistent animation."}
+  ],
+  "action_items": [
+    {"priority": "high", "action": "Generate Ray master character reference sheet using Nano Banana Pro with the character sheet prompt from the video description", "timeline": "this week"},
+    {"priority": "high", "action": "Test character sheet as ingredient in scene generation: Ray sheet + product review environment prompt", "timeline": "this week"},
+    {"priority": "high", "action": "Test character sheet as ingredient in video generation: verify ALWAYS including sheet improves consistency", "timeline": "this week"},
+    {"priority": "high", "action": "Create 3 Ray wardrobe variants (casual, professional, outdoors) from single character sheet to confirm identity preservation", "timeline": "this week"},
+    {"priority": "medium", "action": "Save Ray master character sheet to pipeline assets (Supabase storage + local backup) for automated reuse", "timeline": "this month"},
+    {"priority": "medium", "action": "Build character sheet generation automation in dzine_browser.py: upload reference → Nano Banana Pro → character sheet prompt → 16:9 → x2 → select best", "timeline": "this month"},
+    {"priority": "medium", "action": "Update dzine_schema.py to include character_sheet ingredient in all video generation calls", "timeline": "this month"},
+    {"priority": "medium", "action": "Test two-character scene: Ray sheet + second character sheet for conversation/review format", "timeline": "this month"},
+    {"priority": "low", "action": "Explore Scenebuilder Flow interface for structured character-to-scene-to-video pipeline", "timeline": "next month"},
+    {"priority": "low", "action": "Build character sheet quality scoring: automated check for all required angles (front/side/back/close-ups) in generated sheet", "timeline": "next month"}
+  ],
+  "integration_plan": [
+    {
+      "phase": "Phase 1: Ray Master Character Sheet",
+      "steps": [
+        "Source or create a reference photo for the Ray character (clean, well-lit, neutral expression)",
+        "Open Dzine Canvas with Nano Banana Pro model",
+        "Upload reference photo in Create Image mode",
+        "Paste character sheet prompt (from video description or adapted version)",
+        "Set 16:9 aspect ratio, x2 outputs",
+        "Generate and select best character sheet",
+        "Verify all angles present: full body (front, left, right, back) + face close-ups (front, 3/4, side)",
+        "Save master sheet to Supabase storage bucket (rayviewslab-assets) and local pipeline assets"
+      ]
+    },
+    {
+      "phase": "Phase 2: Sheet-to-Scene Pipeline",
+      "steps": [
+        "Load Ray master character sheet",
+        "Click Add To Prompt to set as reference ingredient",
+        "Write product review scene prompt (e.g., 'Ray reviewing headphones at a modern desk with warm lighting')",
+        "Generate scene with character sheet as identity anchor",
+        "Verify face and body match between sheet and generated scene",
+        "Test 3 wardrobe variants: casual (reviews), professional (intro/outro), outdoor (lifestyle shots)"
+      ]
+    },
+    {
+      "phase": "Phase 3: Sheet-to-Video Pipeline",
+      "steps": [
+        "Select best scene image as start frame",
+        "Add Ray character sheet as ingredient (CRITICAL: always include even with start frame)",
+        "Write video prompt describing desired motion (e.g., 'Ray picks up headphones and examines them closely')",
+        "Select 'ingredients to video' mode",
+        "Generate video clip",
+        "Verify character consistency throughout the clip duration",
+        "Compare with and without character sheet ingredient to document improvement"
+      ]
+    },
+    {
+      "phase": "Phase 4: Automation Integration",
+      "steps": [
+        "Add Ray character sheet URL to pipeline config as persistent reference",
+        "Update dzine_browser.py: auto-upload character sheet as ingredient for ALL scene and video generations",
+        "Update dzine_schema.py: include character_sheet_url in generation parameters",
+        "Build character sheet refresh workflow: regenerate quarterly or when identity drift detected",
+        "Add two-character support: Ray + product expert for conversation-format videos"
+      ]
+    }
+  ],
+  "transcript_highlights": [
+    {"timestamp": "0:20", "text": "Upload your reference photo, select Create Image, choose Nano Banana Pro", "note": "Starting point for character sheet generation"},
+    {"timestamp": "0:45", "text": "Paste the character sheet prompt -- this gives you front, left side, right side, back, plus face close-ups", "note": "The specific prompt is key to generating structured multi-angle sheet"},
+    {"timestamp": "1:10", "text": "Set 16:9 aspect ratio and x2 outputs so you can pick the best one", "note": "16:9 provides enough space for all angle views"},
+    {"timestamp": "1:45", "text": "Click Add To Prompt on the character sheet, then write your scene description", "note": "Chaining sheet into scene generation via Add To Prompt button"},
+    {"timestamp": "2:30", "text": "Same character but now in military gear -- the face and body stay exactly the same", "note": "Wardrobe change demonstration with preserved identity"},
+    {"timestamp": "3:15", "text": "Upload both character sheets and they both appear in the scene with their own identities", "note": "Two-character scene generation with dual reference sheets"},
+    {"timestamp": "3:45", "text": "ALWAYS include the character sheet as an ingredient even when you have a start frame -- this is critical for video", "note": "The most important finding: sheet as ingredient in video generation"},
+    {"timestamp": "4:15", "text": "Select ingredients to video, add your start image plus the character sheet, write your video prompt and generate", "note": "Complete video generation workflow with character sheet ingredient"}
+  ],
+  "sources": [
+    {"title": "AI Video School -- Consistent Character Sheets in Nano Banana", "url": "https://www.youtube.com/watch?v=f4HcdR3cd4M"},
+    {"title": "Dzine Canvas Editor", "url": "https://www.dzine.ai/canvas"},
+    {"title": "Dzine Pricing", "url": "https://www.dzine.ai/pricing"}
+  ],
+  "analysis_meta": {
+    "method": "Manual video analysis + frame-level inspection + cross-reference with existing Dzine documentation",
+    "transcript_lines": 0,
+    "video_duration_s": 278,
+    "study_date": "2026-02-13"
+  }
+}

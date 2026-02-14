@@ -393,10 +393,22 @@ def pick_niche(date_str: str | None = None) -> NicheCandidate:
     if not available:
         raise RuntimeError("No available niches — all used recently")
 
-    # Score each candidate: static_score + rotation bonus
+    # Load performance bonuses from Supabase channel_memory (graceful degradation)
+    perf_scores: dict = {}
+    try:
+        from tools.lib.supabase_pipeline import get_channel_memory
+        perf_scores = get_channel_memory("niche_performance_scores") or {}
+    except Exception:
+        pass
+
+    # Score each candidate: static_score + rotation bonus + performance bonus (up to +15)
     scored: list[tuple[float, NicheCandidate]] = []
     for n in available:
         total = n.static_score + _rotation_penalties(n, history)
+        # Performance bonus from past video metrics (capped at 15 points)
+        perf = perf_scores.get(n.keyword, {})
+        perf_bonus = min(perf.get("performance_bonus", 0), 15.0)
+        total += perf_bonus
         scored.append((total, n))
 
     # Filter to candidates >= 70 total score

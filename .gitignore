@@ -87,6 +87,14 @@ local/
 # Python tools
 .pytest_cache/
 venv/
-artifacts/dzine/
-artifacts/downloads/
-artifacts/videos/
+.cache/
+
+# RayviewsLab — generated/transient (NEVER COMMIT)
+artifacts/
+assets/ray_avatar/
+logs/
+runs/
+data/error_log.json
+data/niche_history.json
+supabase/.temp/
+agents/checkpoint.json

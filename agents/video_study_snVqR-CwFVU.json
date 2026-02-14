@@ -1,0 +1,113 @@
+{
+  "video_id": "snVqR-CwFVU",
+  "title": "TOP 7 MELHORES SmartWatch CUSTO-BENEFICIO em 2026 com GPS!!! (SOMENTE OS MELHORES)",
+  "channel": "Top Tech",
+  "url": "https://www.youtube.com/watch?v=snVqR-CwFVU",
+  "study_date": "2026-02-13",
+  "duration_seconds": 933,
+  "upload_date": "2026-02-03",
+  "views": 45337,
+  "likes": 2582,
+  "language": "pt-BR",
+  "relevance": "Direct competitor format: Brazilian tech channel doing Top 7 product rankings with affiliate links (Amazon, ML, AliExpress). Same niche, same model, same audience. Key learning: simple editing works when content is strong.",
+  "summary": "Top 7 budget smartwatches with GPS for 2026. Presenter uses talking-head-to-product-image alternating format with minimal editing. Hard cuts only, no text overlays per product, manufacturer press-kit images. 45K views in 10 days despite simple production.",
+  "key_insights": [
+    {
+      "category": "editing",
+      "insight": "Simple hard-cut editing works for product ranking videos — no transitions, no animated graphics needed",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Zoom punch-in (switching between wider and tighter crop) is the only technique used for visual variety from single camera angle",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Product images held 3-8 seconds each, 2-4 images per product. Fast pacing ~2 min per product",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "thumbnail",
+      "insight": "Hook uses bold multi-color text overlay (white/yellow/red/green) on talking head — only significant graphic element in entire video",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "affiliate",
+      "insight": "All affiliate links in description only — Amazon, MercadoLivre, AliExpress per product. Plus Telegram promo groups for additional monetization",
+      "priority": "medium",
+      "actionable": false
+    },
+    {
+      "category": "workflow",
+      "insight": "Product images sourced from manufacturer press kits (clean white backgrounds), NOT Amazon screenshots. Dzine Img2Img can replicate this from Amazon product photos",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "No product name/price text overlays on screen — everything conveyed verbally. This is a competitive weakness we can exploit with minimal text overlays",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "general",
+      "insight": "Tech setup background (monitors, PC, LEDs) serves as visual trust signal. Ray avatar needs appropriate background per niche",
+      "priority": "medium",
+      "actionable": true
+    }
+  ],
+  "editing_style": {
+    "transitions": "hard cuts only",
+    "text_overlays": "minimal — only in hook, none during product segments",
+    "graphics": "none",
+    "pacing": "fast — jump cuts remove pauses, ~2 min per product",
+    "camera_work": "single angle with zoom punch-in alternation (wide/tight crop)",
+    "product_presentation": "full-screen manufacturer images, 2-4 per product, 3-8s hold each",
+    "structure": "hook (text overlay) → intro (talking head) → [talking head → product images] x7 → closing (talking head)",
+    "music": "subtle background",
+    "effects": "none visible"
+  },
+  "production_budget_estimate": {
+    "ray_lip_sync_credits": 252,
+    "product_images_credits": 1120,
+    "total_video_credits": 252,
+    "total_image_credits": 1120,
+    "note": "7 products x 4 images x 40 credits (4K) = 1120 image credits; 7 lip sync segments x 36 credits = 252 video credits"
+  },
+  "tools_mentioned": [],
+  "action_items": [
+    {
+      "priority": "high",
+      "action": "Generate Ray avatar at 2 crop levels (medium shot + close-up) for zoom punch-in variety",
+      "timeline": "next sprint"
+    },
+    {
+      "priority": "high",
+      "action": "Add minimal text overlays (product name + rank number) as competitive advantage over this channel",
+      "timeline": "DaVinci Resolve template"
+    },
+    {
+      "priority": "medium",
+      "action": "Use manufacturer-style clean white backgrounds for product images via Dzine Img2Img",
+      "timeline": "dzine_schema.py update"
+    },
+    {
+      "priority": "medium",
+      "action": "Target 2-4 product images per product in the Dzine variant system",
+      "timeline": "current"
+    }
+  ],
+  "analysis_meta": {
+    "method": "visual_frame_analysis",
+    "interval_frames": 187,
+    "scene_frames": 127,
+    "total_frames": 314,
+    "transcript_available": false,
+    "transcript_note": "YouTube rate-limited subtitle download"
+  }
+}

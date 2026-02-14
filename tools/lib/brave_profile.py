@@ -127,9 +127,9 @@ LOGIN_CHECKS: dict[str, dict] = {
         "logged_out": 'a[href*="sign-in"], a[href*="login"], button:has-text("Sign in"), input[type="email"]',
     },
     "dzine": {
-        "url": "https://www.dzine.ai/tools/z-image/",
-        "logged_in": 'button.avatar, [data-testid="user-avatar"], .user-profile',
-        "logged_out": 'a[href*="login"], button:has-text("Log in"), button:has-text("Sign in")',
+        "url": "https://www.dzine.ai/canvas?id=19797967",
+        "logged_in": 'button:has-text("Dashboard")',
+        "logged_out": 'button:has-text("Log in"), button:has-text("Sign in"), a[href*="login"]',
     },
 }
 
@@ -266,6 +266,7 @@ def connect_or_launch(*, headless: bool = False):
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-sync",
+            "--disable-blink-features=AutomationControlled",
         ],
     )
     # Persistent context has no separate browser object

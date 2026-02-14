@@ -28,7 +28,7 @@ from tools.lib.notify import (
 
 
 class TestRayviewsPrefix(unittest.TestCase):
-    """Every message type starts with '[Rayviews]'."""
+    """Every message type starts with '[Rayviews Lab]'."""
 
     def _assert_prefix(self, msg_type, stage="", milestone=""):
         msg = _format_message(
@@ -36,8 +36,8 @@ class TestRayviewsPrefix(unittest.TestCase):
             next_action="Do something",
         )
         self.assertTrue(
-            msg.startswith("[Rayviews]"),
-            f"{msg_type} message doesn't start with [Rayviews]: {msg[:60]}",
+            msg.startswith("[Rayviews Lab]"),
+            f"{msg_type} message doesn't start with [Rayviews Lab]: {msg[:80]}",
         )
 
     def test_start_prefix(self):

@@ -1,0 +1,160 @@
+{
+  "video_id": "Zvw0Fk9FVl4",
+  "title": "The Best AI Image Models of 2026 (Same Prompts) | Dzine",
+  "channel": "Dzine",
+  "url": "https://www.youtube.com/watch?v=Zvw0Fk9FVl4",
+  "study_date": "2026-02-13",
+  "relevance": "Official Dzine channel comparison of 6 AI image models using identical prompts across 6 categories. Confirms Nano Banana Pro as best for text-heavy infographics, validates model routing decisions in dzine_schema.py, and documents Expression Edit sliders, Enhance & Upscale capabilities, and current pricing tiers.",
+  "summary": "Dzine's official channel tests MidJourney V7, GPT Image 1.5, Flux 2 Pro, Nano Banana Pro, Dzine Realistic V3, and Seedream 4.5 with identical prompts across 6 categories: portraits, infographics, landscapes, character sheets, image-to-image (character sheet to movie poster), and image editing (color/brightness changes). Nano Banana Pro dominates infographics with perfect text rendering. MidJourney V7 wins portraits (emotion/depth) and image editing (precise object changes). Dzine Realistic V3 excels at landscapes. Seedream 4.5 handles character sheets best. Flux 2 Pro wins Img2Img with legible poster text. Also demonstrates Expression Edit (10+ sliders for eyes/mouth/head), Enhance & Upscale (up to 4x, max 6144x3392), AI Expand, AI Eraser, Hand Repair, Background Remove, layers panel, Chat Editor, and Text tool. Pricing ranges from Free (32 credits/day) to Master ($59.99/mo unlimited images).",
+  "key_insights": [
+    {
+      "category": "dzine",
+      "insight": "Nano Banana Pro is the clear winner for text accuracy in infographics",
+      "details": "When tested with an identical LinkedIn profile infographic prompt, Nano Banana Pro rendered ALL text correctly — even tiny text was readable and LinkedIn profile details were accurate. GPT Image 1.5 came second (readable text). MidJourney V7 and Dzine Realistic V3 produced unreadable text. This confirms Nano Banana Pro as the right default for any image requiring text overlays or spec callouts.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "MidJourney V7 produces the most emotionally compelling portraits",
+      "details": "For cinematic close-up portraits, MidJourney V7 delivered the best emotion, depth, and realism. Dzine Realistic V3 showed excellent skin pore detail. GPT Image 1.5 had incredible iris and tear detail. Flux 2 Pro was very expressive. For Ray avatar hero shots requiring emotional impact, MidJourney V7 is optimal.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Seedream 4.5 is best for character consistency sheets",
+      "details": "For character sheet generation (front/side/back views), Seedream 4.5 produced proper multi-angle views with correct face sizing. GPT Image 1.5 was comprehensive but cramped. MidJourney gave useful front+side+fullbody. No model was perfect, but Seedream 4.5 was the most reliable for the task. Relevant for generating consistent Ray avatar reference sheets.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Dzine Realistic V3 excels at landscapes and environmental scenes",
+      "details": "All models performed well on landscapes, but Dzine Realistic V3 stood out for natural beauty. MidJourney had a filmic quality. Results were very close across all models. For product environment backgrounds (kitchen, living room, desk, garage), Dzine Realistic V3 is the best choice.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Flux 2 Pro is best for Img2Img with text requirements",
+      "details": "When converting a character sheet to a movie poster via Img2Img, Flux 2 Pro was the only model that actually wrote legible text ('THE UNBROKEN PRINCE IN CINEMAS'). MidJourney and Nano Banana Pro produced incredible cinematic quality but no readable text. For Img2Img tasks where text must be preserved or added, use Flux 2 Pro.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "MidJourney V7 is best for precise image editing",
+      "details": "For image editing tasks (change horse color from brown to white, brighten face), MidJourney V7 produced a perfect white horse with brightened face at stunning quality. Flux 2 Pro was also very good. Nano Banana Pro failed to change the horse color. For targeted edits to generated images, MidJourney V7 is the top choice.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Expression Edit has 10+ granular sliders for face manipulation",
+      "details": "Expression Edit Custom mode provides: Eyes (Openness, Horizontal Gaze, Vertical Gaze, Eyebrow, Wink) + Mouth (Lip Openness, Pouting, Pursing, Grin, Smile, Roundness) + Head (Pitch, Yaw, Roll). Template mode also available for preset expressions. Costs 4 credits. Output placed on canvas via 'Place on canvas' button.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Enhance & Upscale supports up to 4x with max 6144x3392 output",
+      "details": "Images can be upscaled up to 4x resolution with maximum output of 6144x3392. Export formats include PNG and JPEG. This is essential for producing high-resolution product images from Txt2Img or Img2Img outputs.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Output quality and aspect ratio options are extensive",
+      "details": "Output Quality slider offers 2K and 4K options. Aspect Ratio presets include 9:16, 1:1, 16:9, Auto, plus more via dropdown. Per-model controls include Face Match and Color Match sliders. Prompt Improver toggle available for AI-enhanced prompting.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Dzine pricing: Master plan at $59.99/mo gives unlimited images",
+      "details": "Free tier: 32 credits/day. Beginner: $8.99/mo. Creator: $24.99/mo. Master: $59.99/mo (unlimited images). Annual Master: $50/mo. Rayviews account is on Master plan with unlimited fast image credits, confirming no need to economize on generation count or quality settings.",
+      "actionable": false
+    },
+    {
+      "category": "tools",
+      "insight": "AI Expand, Eraser, Hand Repair, Background Remove available in top toolbar",
+      "details": "Beyond core generation, Dzine provides: AI Expand (extends canvas content naturally), AI Eraser (remove unwanted elements), Hand Repair (fix AI hand artifacts), Background Remove, Edit Cutout, Transform, and Crop — all accessible from the top toolbar. Layers panel provides Photoshop-like layer management.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Model routing matrix confirmed for Rayviews pipeline",
+      "details": "Based on head-to-head testing: Nano Banana Pro for text/infographics/specs, MidJourney V7 for portraits/emotion/editing, Dzine Realistic V3 for environments/landscapes, Seedream 4.5 for character sheets/consistency, Flux 2 Pro for Img2Img with text. This should update the model routing in dzine_schema.py.",
+      "actionable": true
+    }
+  ],
+  "tools_mentioned": [
+    {"name": "Dzine Canvas Editor", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Full AI image generation platform with 6+ models, Img2Img, Expression Edit, Enhance & Upscale, AI Expand, layers, and Chat Editor."},
+    {"name": "MidJourney V7", "category": "dzine", "url": "https://www.midjourney.com", "note": "Best for portraits and image editing. Available within Dzine platform."},
+    {"name": "GPT Image 1.5", "category": "dzine", "url": "https://openai.com", "note": "Strong text rendering, incredible iris/tear detail in portraits. Available within Dzine."},
+    {"name": "Flux 2 Pro", "category": "dzine", "url": "https://blackforestlabs.ai", "note": "Best for Img2Img with text requirements. Very expressive portraits."},
+    {"name": "Nano Banana Pro", "category": "dzine", "url": "https://www.dzine.ai", "note": "Dzine's default model. Clear winner for text accuracy and infographics."},
+    {"name": "Dzine Realistic V3", "category": "dzine", "url": "https://www.dzine.ai", "note": "Best for landscapes and natural environments. Excellent skin pore detail in portraits."},
+    {"name": "Seedream 4.5", "category": "dzine", "url": "https://www.dzine.ai", "note": "Best for character consistency sheets (front/side/back views)."}
+  ],
+  "action_items": [
+    {"priority": "high", "action": "Update dzine_schema.py model routing to match confirmed rankings: Nano Banana Pro for text/specs, MidJourney V7 for portraits/editing, Dzine Realistic V3 for environments, Seedream 4.5 for character sheets, Flux 2 Pro for Img2Img with text", "timeline": "this week"},
+    {"priority": "high", "action": "Update dzine_models_guide.md with head-to-head results from this official comparison", "timeline": "this week"},
+    {"priority": "high", "action": "Generate Ray character sheet using Seedream 4.5 for front/side/back consistency reference", "timeline": "this week"},
+    {"priority": "medium", "action": "Test Nano Banana Pro for product spec overlay images (text accuracy confirmed)", "timeline": "this week"},
+    {"priority": "medium", "action": "Build model selection logic: detect prompt intent (text-heavy vs portrait vs environment) and route to optimal model automatically", "timeline": "this month"},
+    {"priority": "medium", "action": "Test Expression Edit sliders on Ray avatar for varied expressions across video segments", "timeline": "this month"},
+    {"priority": "low", "action": "Integrate Enhance & Upscale (4x, max 6144x3392) into asset pipeline for hero product shots", "timeline": "this month"},
+    {"priority": "low", "action": "Evaluate AI Expand for extending product scene backgrounds beyond original frame", "timeline": "next month"}
+  ],
+  "integration_plan": [
+    {
+      "phase": "Phase 1: Model Routing Update",
+      "steps": [
+        "Update dzine_schema.py model mapping based on confirmed test results",
+        "Add prompt-intent detection: text_heavy → Nano Banana Pro, portrait → MidJourney V7, environment → Dzine Realistic V3, character_sheet → Seedream 4.5, img2img_text → Flux 2 Pro",
+        "Update dzine_models_guide.md with comparison results and routing rationale",
+        "Test updated routing on 3 product categories to validate"
+      ]
+    },
+    {
+      "phase": "Phase 2: Character Consistency",
+      "steps": [
+        "Generate Ray character sheet using Seedream 4.5 (front/side/back)",
+        "Use character sheet as reference for all Ray avatar generations",
+        "Test Expression Edit sliders for 5 common expressions (neutral, explaining, surprised, approving, concluding)",
+        "Build expression preset library for consistent Ray expressions across segments"
+      ]
+    },
+    {
+      "phase": "Phase 3: Product Image Enhancement",
+      "steps": [
+        "Use Nano Banana Pro for any product image requiring text overlays or spec callouts",
+        "Use Dzine Realistic V3 for product environment backgrounds",
+        "Apply Enhance & Upscale (4x) to hero product shots",
+        "Test AI Expand for extending product scene compositions"
+      ]
+    },
+    {
+      "phase": "Phase 4: Image Editing Pipeline",
+      "steps": [
+        "Use MidJourney V7 for post-generation edits (color changes, lighting adjustments)",
+        "Use Flux 2 Pro for Img2Img transformations that must preserve text",
+        "Integrate AI Eraser and Hand Repair into QA pass for generated images",
+        "Build automated quality check: verify text legibility in text-heavy generations"
+      ]
+    }
+  ],
+  "transcript_highlights": [
+    {"timestamp": "3:12", "text": "For infographics, Nano Banana Pro is the clear winner — all text is correct, even tiny text is readable", "note": "Confirms Nano Banana Pro as best-in-class for text rendering accuracy"},
+    {"timestamp": "1:45", "text": "MidJourney V7 gives the best emotion, depth, and realism for portraits", "note": "Portrait model ranking established"},
+    {"timestamp": "7:30", "text": "Seedream 4.5 gives proper front, back, and side views with good face sizing", "note": "Character sheet model ranking"},
+    {"timestamp": "10:15", "text": "Flux 2 Pro actually wrote THE UNBROKEN PRINCE IN CINEMAS legibly on the poster", "note": "Img2Img text preservation capability"},
+    {"timestamp": "12:40", "text": "MidJourney V7 — perfect white horse, brightened face, stunning quality", "note": "Image editing precision ranking"},
+    {"timestamp": "14:20", "text": "Expression Edit: Eyes openness, gaze, eyebrow, wink; Mouth: lip openness, pouting, pursing, grin", "note": "Full Expression Edit slider inventory"},
+    {"timestamp": "15:50", "text": "Enhance & Upscale up to 4x, maximum 6144x3392, export PNG or JPEG", "note": "Upscale capabilities and limits"}
+  ],
+  "sources": [
+    {"title": "Dzine Official YouTube — Best AI Image Models 2026", "url": "https://www.youtube.com/watch?v=Zvw0Fk9FVl4"},
+    {"title": "Dzine Canvas Editor", "url": "https://www.dzine.ai/canvas"},
+    {"title": "Dzine Pricing", "url": "https://www.dzine.ai/pricing"}
+  ],
+  "analysis_meta": {
+    "method": "Manual video analysis + cross-reference with existing Dzine documentation",
+    "transcript_lines": 0,
+    "video_duration_s": 1115,
+    "study_date": "2026-02-13"
+  }
+}

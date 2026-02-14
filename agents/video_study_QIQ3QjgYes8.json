@@ -1,0 +1,168 @@
+{
+  "video_id": "QIQ3QjgYes8",
+  "title": "INSANE DZINE AI Tools - Lip Sync, Storyboards, Image Generation & More",
+  "channel": "Blog With Ben",
+  "url": "https://www.youtube.com/watch?v=QIQ3QjgYes8",
+  "study_date": "2026-02-13",
+  "relevance": "Comprehensive Dzine platform walkthrough covering Img2Img workflow details, Lip Sync Pro with multi-speaker support and timeline editor, the new Instant Storyboard tool for combining multiple images into cohesive scenes, and results panel shortcut workflow. Directly applicable to Ray avatar Lip Sync pipeline, product scene composition, and chained generation workflows.",
+  "summary": "Blog With Ben provides a 20-minute walkthrough of Dzine's full platform. Covers Img2Img workflow (upload base image, select style, adjust sliders for Style Intensity/Structure Match/Face Match/Color Match, generate 4 variations). Deep-dives into Lip Sync (Normal/Pro modes, 720p/1080p output, 36 credits for Pro 720p, up to 4 simultaneous faces, multi-speaker timeline editor with subjects A/B/C/D, TTS voices with speed slider, multi-language support, aspect ratio cropping). Introduces the new Instant Storyboard tool (V1/V2, combine up to 3 images into one scene using @mentions, shot angle presets, 15 credits). Documents the results panel shortcut buttons (1-4 per variation for Chat Editor, AI Editor, AI Video, Lip Sync, Expression Edit, Face Swap, Enhance & Upscale) and updated sidebar tool order including new Instant Storyboard and Product Background entries.",
+  "key_insights": [
+    {
+      "category": "dzine",
+      "insight": "Lip Sync Pro mode provides significantly better movement and clarity than Normal",
+      "details": "Lip Sync has two generation modes: Normal (basic quality) and Pro (better movement and clarity). Output quality: 720p or 1080p. Cost is 36 credits for Pro at 720p. Pro mode is strongly recommended for production content. Up to 4 faces can be simultaneously detected and animated in a single image.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Lip Sync supports multi-speaker with timeline editor for speaker sequencing",
+      "details": "Multi-speaker mode supports subjects A, B, C, D — each with separate voice assignment and dialogue text. A timeline editor allows dragging audio tracks to order the speaker sequence. This enables conversation-style scenes. Combined with ElevenLabs audio upload (not TTS), this creates professional talking-head segments.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Lip Sync TTS has built-in voices, speed slider, and multi-language support",
+      "details": "Built-in TTS voices include presets: Britney, James, narrators, social media, conversational styles. 400 character limit per TTS input. Speed slider available. Multi-language support via dropdown with many languages. However, for Rayviews pipeline, upload ElevenLabs audio (Thomas Louis voice) instead of using built-in TTS for voice consistency.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Lip Sync supports aspect ratio cropping before generation",
+      "details": "Before generating Lip Sync video, aspect ratio can be set to: Original, 1:1, 3:4, 4:5, 9:16, 16:9. This allows generating vertical (9:16) or horizontal (16:9) talking-head clips from the same source image without separate cropping. Generation time: 5-10 minutes per clip.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Instant Storyboard combines up to 3 separate images into one cohesive scene",
+      "details": "New tool (V1 and V2 available). Upload up to 3 images, use @mentions to reference them in the prompt. 'Describe your shot' prompt area with 4 shot angle presets (icons). Output quality: 720p/1080p. Aspect ratio: 9:16, 1:1, 16:9 + more. Advanced settings section. 15 credits per generation. Results show unified lighting, matched shadows, and coherent environment.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Instant Storyboard enables Ray + product composite scenes",
+      "details": "Example from video: two separate headshots combined into candlelit dinner scene with unified lighting and shadows. For Rayviews: upload Ray avatar image + product image + environment background = unified product review scene. Then apply Lip Sync on top for talking-head segment within the composite scene.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Results panel shortcuts enable chained workflow without navigating sidebar",
+      "details": "Each generated image shows numbered buttons (1-4, one per variation). Clicking a button reveals shortcut actions: Chat Editor, AI Editor, AI Video, Lip Sync, Expression Edit, Face Swap, Enhance & Upscale. This enables rapid chaining: generate image → apply Lip Sync → add Expression Edit, all from the results panel without switching sidebar tools.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Img2Img sliders: Style Intensity, Structure Match, Face Match, Color Match",
+      "details": "Img2Img workflow: upload base image → select style (e.g., Dzine Realistic V3) → type description → adjust sliders. Style Intensity controls how much the chosen style affects output. Structure Match preserves original image composition. Face Match maintains facial features. Color Match preserves original color palette. All four sliders crucial for product image variations that stay faithful to Amazon originals.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Face Match slider is critical for maintaining Ray avatar consistency through Img2Img",
+      "details": "The Face Match slider in Img2Img specifically controls how closely the generated face matches the input face. For Ray avatar variations (different poses, clothing, environments), keep Face Match high to maintain recognizable face across all generated images. Structure Match separately controls body/composition preservation.",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Lip Sync access via both sidebar AND results panel shortcut buttons",
+      "details": "Lip Sync can be accessed two ways: (1) sidebar tool in the left panel, (2) shortcut buttons on each generated variation in the results panel. The results panel shortcut is faster for chaining — generate an image then immediately apply Lip Sync to a specific variation. Same pattern applies to Expression Edit, Face Swap, etc.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Updated sidebar tool order includes Instant Storyboard and Product Background",
+      "details": "Updated sidebar order: Upload, Assets, Txt2Img, Img2Img, Instant Storyboard (NEW), Character (HOT), AI Video, Lip Sync, Video Editor, AI Editor, Face Kit, Enhance & Upscale, Product Background. Two new entries since previous documentation: Instant Storyboard and Product Background. Face Kit replaces separate Face Swap/Expression Edit entries.",
+      "actionable": true
+    },
+    {
+      "category": "dzine",
+      "insight": "Pencil sketch to photorealistic transformation demonstrated via Img2Img",
+      "details": "Video shows a pencil sketch uploaded to Img2Img, then transformed to photorealistic using Dzine Realistic V3 style with appropriate slider settings. This confirms Img2Img can handle extreme style transformations while preserving composition. Applicable for converting simple product sketches or wireframes into realistic product imagery.",
+      "actionable": false
+    }
+  ],
+  "tools_mentioned": [
+    {"name": "Dzine Canvas Editor", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Full platform with Txt2Img, Img2Img, Lip Sync, Storyboard, Character, AI Video, Expression Edit, Face Swap, Enhance & Upscale."},
+    {"name": "Dzine Lip Sync", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Normal and Pro modes, up to 4 faces, multi-speaker timeline, TTS + audio upload, 36 credits Pro 720p."},
+    {"name": "Dzine Instant Storyboard", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "NEW tool. V1/V2. Combine 3 images into cohesive scene. 15 credits. @mentions for image references."},
+    {"name": "Dzine Img2Img", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Upload base image, 4 slider controls (Style Intensity, Structure Match, Face Match, Color Match), 4 variations per generation."},
+    {"name": "Dzine Results Panel", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Shortcut buttons per variation for chaining: Chat Editor, AI Editor, AI Video, Lip Sync, Expression Edit, Face Swap, Enhance & Upscale."},
+    {"name": "Dzine Face Kit", "category": "dzine", "url": "https://www.dzine.ai/canvas", "note": "Sidebar entry consolidating Face Swap and Expression Edit tools."}
+  ],
+  "action_items": [
+    {"priority": "high", "action": "Test Lip Sync Pro with ElevenLabs audio upload (not built-in TTS) for Ray talking-head segments at 1080p 16:9", "timeline": "this week"},
+    {"priority": "high", "action": "Test Instant Storyboard: combine Ray avatar + product image + environment into unified review scene", "timeline": "this week"},
+    {"priority": "high", "action": "Update dzine_workspace_guide.md and dzine_playbook.md with Instant Storyboard tool and updated sidebar order", "timeline": "this week"},
+    {"priority": "high", "action": "Document results panel shortcut workflow in dzine_playbook.md for chained generation → lip sync → expression edit", "timeline": "this week"},
+    {"priority": "medium", "action": "Build Lip Sync automation in dzine_browser.py: navigate to Lip Sync, upload face image, upload audio file, set Pro + 1080p + 16:9, generate", "timeline": "this month"},
+    {"priority": "medium", "action": "Build Instant Storyboard automation: upload 3 images, set @mentions in prompt, generate composite scene", "timeline": "this month"},
+    {"priority": "medium", "action": "Test multi-speaker Lip Sync for potential conversation-style segments (Ray + guest format)", "timeline": "this month"},
+    {"priority": "low", "action": "Evaluate Product Background tool for isolating products and placing on clean backgrounds", "timeline": "next month"},
+    {"priority": "low", "action": "Map results panel shortcut button selectors for automated chained workflows", "timeline": "next month"}
+  ],
+  "integration_plan": [
+    {
+      "phase": "Phase 1: Lip Sync Pipeline",
+      "steps": [
+        "Generate Ray avatar image via Character tool or Txt2Img (MidJourney V7 for best emotion)",
+        "Upload ElevenLabs TTS audio file (Thomas Louis, per-segment chunks)",
+        "Set Lip Sync to Pro mode, 1080p, 16:9 aspect ratio",
+        "Generate talking-head clip (5-10 min generation time, 36+ credits)",
+        "Download result via static.dzine.ai URL",
+        "Test audio sync quality and lip movement accuracy"
+      ]
+    },
+    {
+      "phase": "Phase 2: Instant Storyboard Scenes",
+      "steps": [
+        "Generate Ray avatar in neutral pose (Txt2Img, MidJourney V7)",
+        "Generate or download product image from Amazon (Img2Img with high Structure Match)",
+        "Select environment background (Dzine Realistic V3 for kitchen/desk/garage)",
+        "Combine via Instant Storyboard: @ray_avatar + @product + @environment",
+        "Prompt: describe the desired scene composition and lighting",
+        "Generate at 1080p 16:9 for video-ready output (15 credits)"
+      ]
+    },
+    {
+      "phase": "Phase 3: Chained Results Workflow",
+      "steps": [
+        "Generate product scene via Instant Storyboard",
+        "Apply Lip Sync to Ray avatar in the composite scene via results panel shortcut",
+        "Apply Expression Edit for segment-appropriate expression via results panel shortcut",
+        "Apply Enhance & Upscale for hero shots via results panel shortcut",
+        "Download all outputs via static.dzine.ai URLs"
+      ]
+    },
+    {
+      "phase": "Phase 4: Automation",
+      "steps": [
+        "Add Lip Sync Pro automation to dzine_browser.py (face upload + audio upload + settings + generate)",
+        "Add Instant Storyboard automation (multi-image upload + @mention prompt + generate)",
+        "Add results panel shortcut click automation for chained workflows",
+        "Update sidebar tool y-coordinates in dzine_playbook.md for new tool order",
+        "Update dzine_selectors.py with Lip Sync and Storyboard form selectors"
+      ]
+    }
+  ],
+  "transcript_highlights": [
+    {"timestamp": "2:15", "text": "Upload your base image, select a style, adjust the sliders — Style Intensity, Structure Match, Face Match, Color Match", "note": "Img2Img slider workflow documented"},
+    {"timestamp": "5:30", "text": "Lip Sync Pro gives you much better movement and clarity... 36 credits for Pro at 720p", "note": "Lip Sync Pro mode and pricing"},
+    {"timestamp": "7:45", "text": "You can have up to 4 faces detected and animated simultaneously", "note": "Multi-face Lip Sync capability"},
+    {"timestamp": "9:20", "text": "The timeline editor lets you drag the audio tracks to set the speaker sequence — Subject A, B, C, D", "note": "Multi-speaker timeline editor"},
+    {"timestamp": "11:00", "text": "Instant Storyboard lets you combine up to 3 separate images into one cohesive scene", "note": "New Instant Storyboard tool introduction"},
+    {"timestamp": "13:15", "text": "Use @mentions to reference your uploaded images in the prompt — describe the shot you want", "note": "Storyboard @mention workflow"},
+    {"timestamp": "14:40", "text": "The results are incredible — unified lighting, matched shadows, coherent environment from separate images", "note": "Storyboard output quality"},
+    {"timestamp": "16:00", "text": "Each variation has shortcut buttons — Chat Editor, AI Editor, AI Video, Lip Sync, Expression Edit, Face Swap, Enhance", "note": "Results panel shortcut buttons"},
+    {"timestamp": "17:30", "text": "Two separate headshots became a candlelit dinner scene, then we added Lip Sync on top", "note": "Chained workflow: Storyboard → Lip Sync"}
+  ],
+  "sources": [
+    {"title": "Blog With Ben — INSANE DZINE AI Tools", "url": "https://www.youtube.com/watch?v=QIQ3QjgYes8"},
+    {"title": "Dzine Canvas Editor", "url": "https://www.dzine.ai/canvas"},
+    {"title": "Dzine Pricing", "url": "https://www.dzine.ai/pricing"}
+  ],
+  "analysis_meta": {
+    "method": "Manual video analysis + cross-reference with existing Dzine documentation",
+    "transcript_lines": 0,
+    "video_duration_s": 1201,
+    "study_date": "2026-02-13"
+  }
+}

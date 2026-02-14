@@ -35,6 +35,7 @@ WEIGHT_EVIDENCE = 3.0       # number + quality of review sources
 WEIGHT_CONFIDENCE = 2.0     # Amazon ASIN match confidence
 WEIGHT_PRICE = 1.0          # prefer mid-to-premium range
 WEIGHT_REVIEWS = 0.5        # Amazon review count as tiebreaker
+WEIGHT_REGRET = 2.5         # regret risk penalty (subtracted from score)
 
 # Buyer-centric labels (Rayviews ranking framework)
 CATEGORY_SLOTS = [
@@ -163,13 +164,22 @@ def _category_label(product: dict, rank: int = 0) -> str:
 
 
 def score_product(product: dict) -> float:
-    """Calculate total score for ranking."""
-    return (
+    """Calculate total score for ranking.
+
+    Includes regret penalty: products that are risky recommendations
+    (single source, no downside, no warranty info, price extremes)
+    get penalized — making the final Top 5 safer for the audience.
+    """
+    from tools.lib.buyer_trust import regret_score
+
+    base = (
         _evidence_score(product) * WEIGHT_EVIDENCE
         + _confidence_score(product) * WEIGHT_CONFIDENCE
         + _price_score(product) * WEIGHT_PRICE
         + _reviews_score(product) * WEIGHT_REVIEWS
     )
+    rs = regret_score(product)
+    return base - (rs.total * WEIGHT_REGRET)
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +389,11 @@ def write_products_json(
     date: str = "",
 ) -> None:
     """Write the final ranked products.json for the pipeline."""
+    from tools.lib.buyer_trust import (
+        ScoreCard, regret_score, target_audience_text,
+        confidence_tag,
+    )
+
     products_out = []
     for p in sorted(top5, key=lambda x: -x.get("rank", 0)):  # 5 down to 1
         # Extract benefits from evidence reasons (real review data)
@@ -388,6 +403,31 @@ def write_products_json(
         # Build buy/avoid guidance
         label = p.get("category_label", "")
         buy_this_if, avoid_this_if = _build_buy_avoid(p, label)
+
+        # Build scorecard with regret penalty for transparency
+        rs = regret_score(p)
+        card = ScoreCard(
+            evidence_score=round(_evidence_score(p) * WEIGHT_EVIDENCE, 1),
+            confidence_score=round(_confidence_score(p) * WEIGHT_CONFIDENCE, 1),
+            price_score=round(_price_score(p) * WEIGHT_PRICE, 1),
+            reviews_score=round(_reviews_score(p) * WEIGHT_REVIEWS, 1),
+            regret_penalty=round(rs.total * WEIGHT_REGRET, 1),
+            total=round(score_product(p), 1),
+            regret_detail=rs,
+        )
+
+        # Tag evidence claims with confidence levels
+        tagged_evidence = []
+        for ev in p.get("evidence", []):
+            tagged_reasons = []
+            for reason in ev.get("reasons", []):
+                tagged_reasons.append({
+                    "text": reason,
+                    "confidence": confidence_tag(reason),
+                })
+            tagged_ev = dict(ev)
+            tagged_ev["tagged_reasons"] = tagged_reasons
+            tagged_evidence.append(tagged_ev)
 
         products_out.append({
             "rank": p.get("rank", 0),
@@ -402,12 +442,13 @@ def write_products_json(
             "image_url": p.get("amazon_image_url", ""),
             "positioning": p.get("category_label", ""),
             "benefits": benefits,
-            "target_audience": "",
+            "target_audience": target_audience_text(p, label),
             "downside": downside,
             "buy_this_if": buy_this_if,
             "avoid_this_if": avoid_this_if,
-            "evidence": p.get("evidence", []),
+            "evidence": tagged_evidence,
             "key_claims": p.get("key_claims", []),
+            "scorecard": card.to_dict(),
         })
 
     wrapper = {

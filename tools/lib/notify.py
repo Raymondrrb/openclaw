@@ -76,7 +76,7 @@ def _format_message(
     label = _type_label(msg_type)
 
     # Header line
-    prefix = "[Rayviews]"
+    prefix = "[Rayviews Lab]"
     if milestone:
         header = f"{prefix} {emoji} {video_id} — {label} / {milestone}"
     else:

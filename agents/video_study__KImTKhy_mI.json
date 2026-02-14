@@ -1,0 +1,146 @@
+{
+  "video_id": "_KImTKhy_mI",
+  "title": "Colour Grading For BEGINNERS (DaVinci Resolve Tutorial)",
+  "channel": "Declan Jenkinson",
+  "url": "https://www.youtube.com/watch?v=_KImTKhy_mI",
+  "study_date": "2026-02-13",
+  "duration_seconds": 1203,
+  "upload_date": "2025-07-03",
+  "views": 284182,
+  "likes": 13926,
+  "language": "en",
+  "relevance": "DaVinci Resolve Color Page tutorial directly applicable to our post-production workflow. Teaches node chain structure (WB->EXP->SAT), PowerGrades for brand consistency, and color matching techniques critical for unifying Dzine-generated images and Ray avatar segments.",
+  "summary": "Comprehensive beginner DaVinci Resolve Color Page tutorial covering project setup (YRGB, Rec.709-A), node chains, Primaries (Color Wheels + Log Wheels), Hue vs Hue curves, Color Warper, AI Cinematic Haze, Stills Gallery, PowerGrades, and CST nodes. Screen recording with circular webcam overlay, five diverse B-roll clips as examples. 284K views in ~7 months.",
+  "key_insights": [
+    {
+      "category": "workflow",
+      "insight": "Node chain WB -> EXP -> SAT is the foundational structure for every grade — should be our default Resolve project template",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "PowerGrades enable reusable grade presets — create a 'Rayviews Standard' PowerGrade and apply to every video for brand consistency",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "tools",
+      "insight": "Log Wheels (Shadow/Midtone/Highlights) give per-range control ideal for matching Dzine images and Ray avatar exposure into a cohesive look",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "tools",
+      "insight": "Hue vs Hue curves allow selective hue correction — critical for fixing per-product color drift from Dzine generation without affecting other colors",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Project color management: DaVinci YRGB color science with Rec.709-A timeline/output color space is standard for YouTube delivery",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "tools",
+      "insight": "AI Cinematic Haze (Depth Map + Near Limit + Atmospheric Scattering) adds subtle depth to flat Dzine-generated product images",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "tools",
+      "insight": "CST (Color Space Transform) node handles input color space conversion when mixing sRGB (Dzine), webcam, and other sources",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Scopes (Vectorscope, Waveform, Parade) provide objective measurement for consistent exposure and color across all clips — use as QA check before export",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Color Warper (Chroma Warp) enables advanced chroma manipulation for fine-tuning product image saturation and hue in specific color regions",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Stills Gallery allows saving and comparing reference grades across clips — useful for matching product segments to each other",
+      "priority": "medium",
+      "actionable": true
+    }
+  ],
+  "editing_style": {
+    "transitions": "hard cuts between Resolve panels and B-roll clips",
+    "text_overlays": "minimal — relies on Resolve UI as visual reference",
+    "graphics": "circular webcam overlay (top-right, teal/green border) — no animated graphics",
+    "pacing": "steady tutorial pace — ~2 minutes per concept, 10 major topics in 20 minutes",
+    "camera_work": "screen recording with fixed circular webcam overlay, occasional full-screen presenter",
+    "product_presentation": "five diverse cinematic B-roll clips as color grading examples (torii gate, beach, night city, greenhouse, desert)",
+    "structure": "hook → project setup → node chain → color wheels → log wheels → hue vs hue → color warper → AI haze → stills/PowerGrades → windows/CST → closing",
+    "music": "no background music during instruction",
+    "effects": "none — clean tutorial format"
+  },
+  "production_budget_estimate": {
+    "ray_lip_sync_credits": 0,
+    "product_images_credits": 0,
+    "total_video_credits": 0,
+    "total_image_credits": 0,
+    "note": "This is a workflow/tools study — no direct asset production. Investment is time: ~30 min for initial PowerGrade creation, ~5-10 min per video for adjustments"
+  },
+  "tools_mentioned": [
+    "DaVinci Resolve Studio 20",
+    "Color Page",
+    "Primaries - Color Wheels",
+    "Primaries - Log Wheels",
+    "Curves - Hue vs Hue",
+    "Color Warper - Chroma Warp",
+    "Node Graph",
+    "Vectorscope",
+    "Waveform Monitor",
+    "Parade Scope",
+    "AI Cinematic Haze",
+    "Stills Gallery",
+    "PowerGrades",
+    "CST (Color Space Transform)",
+    "Power Windows"
+  ],
+  "action_items": [
+    {
+      "priority": "high",
+      "action": "Create DaVinci Resolve project template with DaVinci YRGB color science, Rec.709-A output, and default node chain (CST -> WB -> EXP -> SAT)",
+      "timeline": "next sprint"
+    },
+    {
+      "priority": "high",
+      "action": "Grade one reference Rayviews video and save as 'Rayviews Standard' PowerGrade for reuse across all future videos",
+      "timeline": "after first video export"
+    },
+    {
+      "priority": "high",
+      "action": "Establish per-video QA check using Vectorscope + Waveform to verify consistent exposure/color before export",
+      "timeline": "DaVinci Resolve workflow"
+    },
+    {
+      "priority": "medium",
+      "action": "Create separate 'Ray Skin Tone' PowerGrade focused on consistent avatar skin rendering across Lip Sync segments",
+      "timeline": "after Ray avatar finalized"
+    },
+    {
+      "priority": "medium",
+      "action": "Test AI Cinematic Haze on flat Dzine product images to evaluate depth enhancement at subtle settings",
+      "timeline": "experimentation"
+    }
+  ],
+  "analysis_meta": {
+    "method": "visual_frame_analysis",
+    "interval_frames": 241,
+    "scene_frames": 0,
+    "total_frames": 241,
+    "transcript_available": false,
+    "transcript_note": "Description-only metadata — free LUT download and color grading lesson booking links"
+  }
+}

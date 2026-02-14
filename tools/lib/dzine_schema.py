@@ -14,7 +14,7 @@ from pathlib import Path
 # Constants
 # ---------------------------------------------------------------------------
 
-ASSET_TYPES = ("thumbnail", "product", "background", "avatar_base")
+ASSET_TYPES = ("thumbnail", "product", "background", "avatar_base", "product_faithful")
 
 STYLES = (
     "photorealistic",
@@ -28,6 +28,7 @@ DEFAULT_RESOLUTIONS: dict[str, tuple[int, int]] = {
     "product": (2048, 2048),
     "background": (2048, 1152),
     "avatar_base": (2048, 2048),
+    "product_faithful": (2048, 1152),
 }
 
 # ---------------------------------------------------------------------------
@@ -81,7 +82,7 @@ _VARIANT_PREFIX = (
     "Preserve exact geometry, shape, buttons, ports, branding and color. "
     "Do NOT modify the product in any way."
 )
-_VARIANT_SUFFIX = "No redesign. No fake features. No logo distortion."
+_VARIANT_SUFFIX = "Photorealistic, ultra-detailed, 8K quality. No redesign. No fake features. No logo distortion."
 _REF_PRESERVATION_SUFFIX = (
     " Match the real product design accurately from the reference image. "
     "Do not modify shape, color, or branding."
@@ -343,6 +344,10 @@ NEGATIVE_PROMPTS: dict[str, str] = {
         "uncanny valley, deformed face, extra limbs, sunglasses, "
         "cartoon style"
     ),
+    "product_faithful": (
+        "cartoon, anime style, watermark, altered product shape, "
+        "wrong colors, extra objects, cluttered background"
+    ),
 }
 
 # Single combined prompt per asset type (Dzine uses one main prompt box).
@@ -395,6 +400,12 @@ PROMPT_TEMPLATES: dict[str, str] = {
         "No watermark, no exaggerated facial features, no AI artifacts.\n\n"
         "Tech reviewer aesthetic, subtle rim light, modern dark or neutral background."
     ),
+    "product_faithful": (
+        "Clean white studio backdrop with soft professional lighting, "
+        "subtle shadow underneath product. "
+        "No extra objects, no watermarks, no text. "
+        "Preserve the real product exactly as shown in the reference image."
+    ),
 }
 
 # Fields required per asset type
@@ -403,9 +414,96 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "product": ("product_name",),
     "background": (),
     "avatar_base": (),
+    "product_faithful": (),
 }
 
 MAX_PROMPT_LENGTH = 3000
+
+# ---------------------------------------------------------------------------
+# Model routing — which Dzine model for which asset type
+# Based on Phases 91-152 testing + web research (Feb 2026).
+# Model names must match exactly what appears in the Dzine style picker.
+# ---------------------------------------------------------------------------
+
+MODEL_ROUTING: dict[str, dict[str, str]] = {
+    "thumbnail": {
+        "primary": "Seedream 4.5",       # best material rendering for product photography
+        "fallback": "Nano Banana Pro",    # versatile, good text accuracy
+        "test": "Z-Image Turbo",          # 3-6s, for rapid prompt testing
+    },
+    "product": {
+        "primary": "Seedream 4.5",
+        "fallback": "Realistic Product",  # studio product shots
+        "test": "Z-Image Turbo",
+    },
+    "background": {
+        "primary": "Nano Banana Pro",     # versatile, clean gradients
+        "fallback": "Dzine General",      # all-purpose default
+        "test": "Z-Image Turbo",
+    },
+    "avatar_base": {
+        "primary": "Seedream 4.5",        # photorealistic faces
+        "fallback": "Dzine Realistic v3",
+        "test": "Z-Image Turbo",
+    },
+    "product_faithful": {
+        "primary": None,                  # BG Remove + Expand, not model-dependent
+        "fallback": None,
+        "test": None,
+    },
+}
+
+# Per-variant model overrides (more specific than per-asset-type)
+VARIANT_MODEL_ROUTING: dict[str, dict[str, str]] = {
+    "hero": {
+        "primary": "Seedream 4.5",
+        "fallback": "Realistic Product",
+    },
+    "usage1": {
+        "primary": "Seedream 4.5",
+        "fallback": "Dzine Realistic v3",
+    },
+    "usage2": {
+        "primary": "Seedream 4.5",
+        "fallback": "Dzine Realistic v3",
+    },
+    "detail": {
+        "primary": "Nano Banana Pro",     # excellent for close-ups with text/detail
+        "fallback": "Seedream 4.5",
+    },
+    "mood": {
+        "primary": "Seedream 4.5",
+        "fallback": "Dzine Realistic v3",
+    },
+}
+
+
+def recommended_model(
+    asset_type: str,
+    variant: str = "",
+    *,
+    testing: bool = False,
+) -> str:
+    """Return the recommended Dzine model name for an asset/variant.
+
+    Args:
+        asset_type: "thumbnail", "product", "background", etc.
+        variant: "hero", "usage1", "detail", etc. (overrides asset_type routing)
+        testing: if True, return the fast test model instead
+
+    Returns the model name as it appears in the Dzine style picker.
+    """
+    # Variant-specific routing takes priority
+    if variant and variant in VARIANT_MODEL_ROUTING:
+        route = VARIANT_MODEL_ROUTING[variant]
+        if testing:
+            return MODEL_ROUTING.get(asset_type, {}).get("test", "Z-Image Turbo") or "Z-Image Turbo"
+        return route.get("primary", "Seedream 4.5") or "Seedream 4.5"
+
+    route = MODEL_ROUTING.get(asset_type, {})
+    if testing:
+        return route.get("test", "Z-Image Turbo") or "Z-Image Turbo"
+    return route.get("primary", "Seedream 4.5") or "Seedream 4.5"
 
 # ---------------------------------------------------------------------------
 # Category detection

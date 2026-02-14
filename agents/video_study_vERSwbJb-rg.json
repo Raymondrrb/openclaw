@@ -1,0 +1,180 @@
+{
+  "video_id": "vERSwbJb-rg",
+  "title": "TOP 5 Best Vacuum Cleaners 2025",
+  "channel": "Product Guide",
+  "url": "https://www.youtube.com/watch?v=vERSwbJb-rg",
+  "study_date": "2026-02-13",
+  "duration_seconds": 523,
+  "upload_date": "2025-02-18",
+  "views": 24042,
+  "likes": 174,
+  "language": "en",
+  "tags": [
+    "vacuum",
+    "dyson vacuum",
+    "vacuum cleaner",
+    "best vacuum for pet hair",
+    "best vacuum",
+    "vacuum cleaners",
+    "hoover vacuum",
+    "shark vacuum",
+    "best upright vacuum",
+    "best vacuum cleaner",
+    "best vacuum cleaner 2025"
+  ],
+  "relevance": "Most relevant video studied — nearly identical to the Rayviews production format. Fully faceless, manufacturer B-roll with clean text overlays, TTS-style voiceover, Amazon affiliate links. Every visual element maps 1:1 to our pipeline (Dzine AI, DaVinci Resolve, ElevenLabs).",
+  "summary": "Top 5 vacuum cleaners for 2025 using fully faceless B-roll compilation format. No presenter on camera. All footage is manufacturer B-roll with clean white sans-serif text overlays highlighting features and specs. Fast cuts (3-5s per clip), ~1.5 min per product. Description uses numbered list with affiliate links (amzn.to + geni.us).",
+  "products": [
+    {
+      "rank": 1,
+      "name": "Dyson V15 Detect",
+      "affiliate_link": "amzn.to/3wFNQWD"
+    },
+    {
+      "rank": 2,
+      "name": "Simplicity S20EZM",
+      "affiliate_link": "geni.us/R15e"
+    },
+    {
+      "rank": 3,
+      "name": "Shark Stratos IZ862H",
+      "affiliate_link": "amzn.to/4hHIIDk"
+    },
+    {
+      "rank": 4,
+      "name": "Hoover ONEPWR Evolve",
+      "affiliate_link": "amzn.to/4i277U5"
+    },
+    {
+      "rank": 5,
+      "name": "Tineco Pure ONE S11",
+      "affiliate_link": "amzn.to/4i5Hvpw"
+    }
+  ],
+  "key_insights": [
+    {
+      "category": "editing",
+      "insight": "Fully faceless B-roll compilation format — no presenter on camera, entire video is manufacturer promo footage with text overlays and TTS voiceover. This IS the Rayviews format.",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Clean white sans-serif text overlays with decorative line/arrow elements for feature callouts. Positioned upper-left or center-left, 2-5 words max, on screen 2-3 seconds. Should become the Rayviews standard template.",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Fast clip pacing: 3-5 seconds per B-roll clip, continuous visual flow with no pauses. ~15-20 visual changes per minute keeps engagement high.",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Search-bar-style title card with hand cursor icon — mimics a Google search to imply 'I searched so you don't have to.' Smart trust-building hook worth adapting.",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "All footage is manufacturer B-roll (promo videos, lifestyle demos, product close-ups). Dzine AI can replicate this exactly — no Amazon screenshots, no webcam, no screen recordings.",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Spec numbers in overlays ('450 Watt Motor', '15,000 Times per Second', 'Retractable 30 Foot Cord') drive perceived authority through specificity. Research pipeline already extracts these — should flow into overlay templates.",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "affiliate",
+      "insight": "Description uses numbered list with checkmark emojis, product name, 'Check Prices' text, and short affiliate links. Mix of amzn.to and geni.us formats. Amazon Associates disclosure at bottom.",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "general",
+      "insight": "No talking head means full end-to-end automation is possible — no Lip Sync needed, no avatar consistency issues, no character management overhead. Simpler pipeline path.",
+      "priority": "high",
+      "actionable": true
+    }
+  ],
+  "editing_style": {
+    "transitions": "hard cuts only — no dissolves, wipes, or animated transitions",
+    "text_overlays": "clean white sans-serif with decorative line/arrow elements, 2-5 words, upper-left or center-left, on screen 2-3 seconds over action footage",
+    "graphics": "search-bar-style title card with cursor icon; decorative brackets/lines on feature text",
+    "pacing": "fast — 3-5s per clip, ~1.5 min per product, continuous visual flow, no dead air",
+    "camera_work": "no camera — all manufacturer B-roll footage",
+    "product_presentation": "manufacturer B-roll: promo videos, lifestyle demos (living room, hardwood floors), product close-ups, feature highlights with text overlays",
+    "structure": "title card (search bar) → [manufacturer B-roll + feature text overlays] x5 → closing",
+    "music": "subtle background (inferred from format)",
+    "effects": "none visible — occasional slow zoom on static product shots"
+  },
+  "text_overlay_examples": [
+    "Laser Slim Fluffy Head",
+    "Odor Neutralizer Technology",
+    "450 Watt Motor",
+    "Tangle Guard",
+    "Retractable 30 Foot Cord",
+    "Piezo Sensor",
+    "15,000 Times per Second"
+  ],
+  "production_budget_estimate": {
+    "product_images_credits": 1000,
+    "product_video_credits": 1050,
+    "ray_lip_sync_credits": 0,
+    "total_video_credits": 1050,
+    "total_image_credits": 1000,
+    "note": "5 products x 5 images x 40 credits (4K) = 1000 image credits; 5 products x 3 video clips x ~70 credits (Minimax Hailuo 2.3) = 1050 video credits; no Lip Sync needed (faceless format)"
+  },
+  "description_format": {
+    "header": "Best Vacuum Cleaner 2025 | Links To Products",
+    "product_list_style": "numbered with checkmark emojis",
+    "link_format": "product name followed by 'Check Prices' with short link",
+    "link_types": ["amzn.to", "geni.us"],
+    "disclosure": "Amazon Associates Program disclosure paragraph at bottom"
+  },
+  "tools_mentioned": [],
+  "action_items": [
+    {
+      "priority": "high",
+      "action": "Create DaVinci Resolve Fusion template for feature text overlays: white sans-serif + decorative line elements, upper-left positioning, 2-3s duration",
+      "timeline": "DaVinci Resolve template"
+    },
+    {
+      "priority": "high",
+      "action": "Build automated timeline assembly: alternate Dzine product images (3-5s each) with text overlay keyframes pulled from products.json specs",
+      "timeline": "next sprint"
+    },
+    {
+      "priority": "high",
+      "action": "Create search-bar-style title card template for video intros (category name as search query + cursor icon)",
+      "timeline": "DaVinci Resolve template"
+    },
+    {
+      "priority": "medium",
+      "action": "Add rank number overlay (#1-#5) and product name lower-third as competitive advantage over this channel",
+      "timeline": "DaVinci Resolve template"
+    },
+    {
+      "priority": "medium",
+      "action": "Extract spec numbers from products.json research data and auto-generate text overlay list for each product segment",
+      "timeline": "pipeline enhancement"
+    },
+    {
+      "priority": "medium",
+      "action": "Adopt description format: numbered checkmark list with product name + 'Check Prices' + amzn.to link + Associates disclosure",
+      "timeline": "script_schema.py update"
+    }
+  ],
+  "analysis_meta": {
+    "method": "visual_frame_analysis",
+    "total_frames": 105,
+    "interval_frames": 105,
+    "scene_frames": 0,
+    "transcript_available": false,
+    "transcript_note": "Analysis based on visual frame sampling"
+  }
+}

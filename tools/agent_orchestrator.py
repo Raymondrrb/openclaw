@@ -1160,6 +1160,16 @@ class QAGatekeeper:
         for fname in ["edit_manifest.json", "markers.csv", "notes.md"]:
             if not (ctx.paths.resolve_dir / fname).is_file():
                 errors.append(f"Missing {fname}")
+
+        # Publish readiness check — final buyer-trust QA gate
+        try:
+            from tools.lib.buyer_trust import publish_readiness_check
+            pr = publish_readiness_check(ctx.paths.root)
+            for item in pr.failures:
+                errors.append(f"Publish readiness: {item.name} — {item.detail}")
+        except Exception as exc:
+            errors.append(f"Publish readiness check failed: {exc}")
+
         return errors
 
 

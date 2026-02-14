@@ -1,0 +1,122 @@
+{
+  "video_id": "wIvxZDkLqrA",
+  "title": "I Bought 5 Top Rated Office Chairs On Amazon (Under $300)",
+  "channel": "BTODtv",
+  "url": "https://www.youtube.com/watch?v=wIvxZDkLqrA",
+  "study_date": "2026-02-13",
+  "duration_seconds": 477,
+  "upload_date": "2025-10-24",
+  "views": 123589,
+  "likes": 948,
+  "language": "en",
+  "relevance": "Hands-on expert affiliate review: 20+ year office chair specialist buys Amazon products, tests on camera, gives blunt verdicts. Same Top 5 model as Rayviews. Key learning: Amazon PDP screenshots build purchase intent, product name lower-thirds are essential, physical verdict props create memorable moments.",
+  "summary": "Presenter buys 5 highly rated Amazon office chairs under $300, tests hands-on in professional studio with multiple camera angles. Amazon PDP screenshots shown on screen, product name lower-thirds, and a physical NO stop sign prop for negative verdicts. Fast pacing (~1.5 min per product), hard cuts only, expert credibility throughout. Cross-promotes btod.com and downloadable cheat sheet.",
+  "key_insights": [
+    {
+      "category": "editing",
+      "insight": "Amazon PDP screenshots shown on screen (price, rating, Amazon's Choice badge) anchor viewer in buying context. Rayviews should replicate this effect with Dzine product images + price/rating text overlays (not screenshots, to avoid TOS risk)",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Multiple camera angles per product (3-5): wide back view, medium front, close-up detail, extreme close-up mechanism. Maps directly to Dzine variant system",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Product name lower-third in lower-left corner (clean white sans-serif) persists throughout each product segment. Simple and highly effective for viewer orientation",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Physical NO stop sign prop used as negative verdict indicator. Memorable visual element that creates a signature moment. Rayviews can replicate with SKIP/TOP PICK graphic overlays",
+      "priority": "medium",
+      "actionable": true
+    },
+    {
+      "category": "editing",
+      "insight": "Extremely fast pacing: 5+ chairs in under 8 minutes (~1-1.5 min per product). Hard cuts only, no transitions, jump cuts remove all dead air",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "workflow",
+      "insight": "Expert credibility (20+ years) is the primary trust driver, not production value. For Rayviews (no real expert), script must compensate with evidence density, source citations, and specific data points",
+      "priority": "high",
+      "actionable": true
+    },
+    {
+      "category": "affiliate",
+      "insight": "Multiple revenue streams: Amazon affiliate links, own store (btod.com), downloadable cheat sheet (email capture), brand partnership (Steelcase sale). Description is monetization-dense",
+      "priority": "medium",
+      "actionable": false
+    },
+    {
+      "category": "general",
+      "insight": "Professional studio setup (concrete wall, standing desk, bookshelf, plants) serves as trust signal. Presenter wears branded BTOD.com polo for additional credibility. Ray avatar needs appropriate environment per niche",
+      "priority": "medium",
+      "actionable": true
+    }
+  ],
+  "editing_style": {
+    "transitions": "hard cuts only",
+    "text_overlays": "product name lower-third (lower-left, white sans-serif) persistent per product segment",
+    "graphics": "physical NO stop sign prop for negative verdicts, Amazon PDP screenshots, Reddit community screenshots",
+    "pacing": "very fast — ~1-1.5 min per product, 5+ chairs in under 8 min, 2-5s per shot during demos",
+    "camera_work": "multiple static angles per product: wide back view, medium front/side, close-up detail, extreme close-up mechanism",
+    "product_presentation": "Amazon PDP screenshots for context, then hands-on demonstration with multiple angles, physical interaction (pushing foam, adjusting mechanisms)",
+    "structure": "hook (premise) → [Amazon PDP screenshot → back view at desk → detail close-ups → verdict] x5+ → bonus chairs → closing (CTA + sale promo)",
+    "music": "none discernible during segments",
+    "effects": "none visible"
+  },
+  "production_budget_estimate": {
+    "ray_lip_sync_credits": 252,
+    "product_images_credits": 1000,
+    "total_video_credits": 252,
+    "total_image_credits": 1000,
+    "note": "5 products x 5 images x 40 credits (4K) = 1000 image credits; 7 lip sync segments (5 products + intro + closing) x 36 credits = 252 video credits"
+  },
+  "tools_mentioned": [
+    "btod.com",
+    "Amazon",
+    "Reddit"
+  ],
+  "action_items": [
+    {
+      "priority": "high",
+      "action": "Create DaVinci Resolve template for product name + rank number lower-third (lower-left, white sans-serif, persistent per segment)",
+      "timeline": "DaVinci Resolve template"
+    },
+    {
+      "priority": "high",
+      "action": "Create verdict overlay graphics: TOP PICK badge for winners, SKIP/PASS for losers, inspired by the NO stop sign technique",
+      "timeline": "DaVinci Resolve template"
+    },
+    {
+      "priority": "high",
+      "action": "Add price and star-rating text overlay to product intro shots (replicate Amazon PDP context without screenshots)",
+      "timeline": "DaVinci Resolve template"
+    },
+    {
+      "priority": "medium",
+      "action": "Generate Dzine close-up detail variants for product features (mechanisms, foam, mesh, build quality) in addition to standard hero/lifestyle shots",
+      "timeline": "dzine_schema.py update"
+    },
+    {
+      "priority": "medium",
+      "action": "Target 1-1.5 min per product in script generation for tighter pacing (current target is 1.5-2 min)",
+      "timeline": "script_brief.py update"
+    }
+  ],
+  "analysis_meta": {
+    "method": "visual_frame_analysis",
+    "interval_frames": 95,
+    "scene_frames": 0,
+    "total_frames": 95,
+    "transcript_available": false,
+    "transcript_note": "Analysis based on 95 sampled frames"
+  }
+}

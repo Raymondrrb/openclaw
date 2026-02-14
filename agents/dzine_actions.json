@@ -1,0 +1,116 @@
+{
+  "_meta": {
+    "version": "1.0",
+    "purpose": "Minimal action map for Dzine automation — RayviewsLab production only",
+    "viewport": "1440x900",
+    "cdp_port": 18800
+  },
+  "close_dialogs": {
+    "description": "Dismiss all popups/tutorials on page load",
+    "steps": [
+      "Loop up to 8 rounds",
+      "Click any visible button with text: Not now, Close, Got it, Skip, Later, Never show again"
+    ],
+    "selectors": ["button:has-text('Not now')", "button:has-text('Close')", "button:has-text('Got it')"],
+    "success": "No dismissible dialogs remain"
+  },
+  "product_faithful": {
+    "description": "Preserve real product from Amazon photo using BG Remove + Generative Expand",
+    "steps": [
+      "Home → 'Start from an image' → upload product photo",
+      "close_dialogs",
+      "Click BG Remove in action bar (y~82)",
+      "Wait 11s for background removal",
+      "Handle 'Fit to Content and Continue' dialog",
+      "Click Image Editor sidebar (40, 698)",
+      "Click Expand sub-tool",
+      "Select 16:9 aspect ratio",
+      "Fill prompt: studio backdrop",
+      "Click Generate (8 credits)"
+    ],
+    "selectors": {
+      "start_from_image": ".project-item:has-text('start from an image')",
+      "bg_remove": "button:has-text('BG Remove'), .item.removebg",
+      "fit_to_content": "button:has-text('Fit to Content and Continue')",
+      "image_editor_sidebar": {"click": [40, 698]},
+      "expand_option": "text=Expand inside .collapse-panel",
+      "ratio_16_9": ".c-options button:has-text('16:9')",
+      "generate": ".generative.ready, div.btn-generate"
+    },
+    "credits": 8,
+    "time_seconds": 90,
+    "success": "New result images with src containing 'static.dzine.ai/stylar_product' appear in Results panel"
+  },
+  "product_video": {
+    "description": "Generate b-roll video from a product image result",
+    "steps": [
+      "Click AI Video [1] button on result image (auto-populates start frame)",
+      "Select video model (Wan 2.1 for learning, Hailuo 2.3 for production)",
+      "Set camera: Static Shot",
+      "Fill prompt describing product showcase",
+      "Click Generate"
+    ],
+    "selectors": {
+      "ai_video_btn": ".btn-container .btn (inside row containing 'AI Video')",
+      "model_selector": ".custom-selector-wrapper (click center 212, 458)",
+      "camera_btn": ".camera-movement-btn (click center 212, 578)",
+      "static_shot": "selection-item containing 'Static Shot' → click .selection-options center",
+      "generate": ".generative.ready"
+    },
+    "credits": {"wan_2_1": 6, "hailuo_2_3": "56-98"},
+    "time_seconds": 70,
+    "success": "New .result-item.image-to-video-result.completed appears in Results panel",
+    "warnings": ["Each AI Video button click QUEUES a new generation — never double-click", "Use page.mouse.click for model selection, NOT JS el.click()"]
+  },
+  "ray_avatar": {
+    "description": "Generate Ray avatar frame via Consistent Character",
+    "steps": [
+      "Click Character sidebar (40, 306)",
+      "Click 'Generate Images' card",
+      "Select Ray character",
+      "Fill scene prompt (scene only, NOT character description)",
+      "Set aspect ratio to 'canvas' (16:9)",
+      "Click Generate (4 credits, 2 variants)"
+    ],
+    "selectors": {
+      "character_sidebar": {"click": [40, 306]},
+      "generate_images_card": "element with text 'Generate Images' + 'With your character'",
+      "ray_button": "button with exact text 'Ray'",
+      "ray_fallback": ".c-character-list .item containing 'Ray'",
+      "scene_textarea": {"click": [101, 200]},
+      "canvas_ratio": "element with text 'canvas', x>60, y>400",
+      "generate": "button containing 'Generate', x:60-350, not disabled"
+    },
+    "credits": 4,
+    "time_seconds": 39,
+    "success": "2 new result images appear in Results panel with src containing 'static.dzine.ai'"
+  },
+  "download_result": {
+    "description": "Download result image from Results panel",
+    "steps": [
+      "Extract src URL from newest img matching static.dzine.ai pattern",
+      "Fetch via urllib.request with User-Agent header",
+      "Save to output path"
+    ],
+    "selectors": {
+      "result_images": "img[src*='static.dzine.ai/stylar_product/p/']"
+    },
+    "success": "File on disk > 50 KB"
+  },
+  "export_canvas": {
+    "description": "Export canvas as PNG (fallback when direct download fails)",
+    "steps": [
+      "Click Export button in top bar",
+      "Verify PNG format selected",
+      "Ensure watermark OFF",
+      "Click 'Export canvas as image'"
+    ],
+    "selectors": {
+      "export_btn": "button.export",
+      "png_format": "button with text 'PNG'",
+      "watermark_off": "button.watermark.watermark-remove",
+      "export_action": "button with text 'Export canvas as image'"
+    },
+    "success": "Download triggered via page.expect_download()"
+  }
+}

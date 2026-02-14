@@ -9,12 +9,15 @@ from tools.lib.dzine_schema import (
     DEFAULT_RESOLUTIONS,
     IMAGE_VARIANTS,
     MAX_PROMPT_LENGTH,
+    MODEL_ROUTING,
     NEGATIVE_PROMPTS,
     PROMPT_TEMPLATES,
     STYLES,
+    VARIANT_MODEL_ROUTING,
     VARIANT_TEMPLATES,
     DzineRequest,
     build_prompts,
+    recommended_model,
     validate_request,
 )
 
@@ -288,6 +291,40 @@ class TestBuildPrompts(unittest.TestCase):
             self.assertIn(variant, VARIANT_TEMPLATES, f"Missing template for {variant}")
             self.assertIn("default", VARIANT_TEMPLATES[variant],
                          f"Missing 'default' key in VARIANT_TEMPLATES[{variant!r}]")
+
+
+class TestModelRouting(unittest.TestCase):
+    """Test model selection logic."""
+
+    def test_thumbnail_default_is_seedream(self):
+        self.assertEqual(recommended_model("thumbnail"), "Seedream 4.5")
+
+    def test_product_default_is_seedream(self):
+        self.assertEqual(recommended_model("product"), "Seedream 4.5")
+
+    def test_background_is_nano_banana(self):
+        self.assertEqual(recommended_model("background"), "Nano Banana Pro")
+
+    def test_detail_variant_is_nano_banana(self):
+        self.assertEqual(recommended_model("product", variant="detail"), "Nano Banana Pro")
+
+    def test_hero_variant_is_seedream(self):
+        self.assertEqual(recommended_model("product", variant="hero"), "Seedream 4.5")
+
+    def test_testing_mode_returns_turbo(self):
+        self.assertEqual(recommended_model("thumbnail", testing=True), "Z-Image Turbo")
+
+    def test_all_asset_types_have_routing(self):
+        for at in ASSET_TYPES:
+            self.assertIn(at, MODEL_ROUTING, f"Missing model routing for {at}")
+
+    def test_all_variants_have_routing(self):
+        for v in IMAGE_VARIANTS:
+            self.assertIn(v, VARIANT_MODEL_ROUTING, f"Missing variant model routing for {v}")
+
+    def test_product_faithful_has_no_model(self):
+        """product_faithful uses BG Remove + Expand, not a generation model."""
+        self.assertIsNone(MODEL_ROUTING["product_faithful"]["primary"])
 
 
 if __name__ == "__main__":
