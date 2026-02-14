@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism prompts prompts-verify run-handoff run-status products-fetch products-fetch-dry render-config run-cleanup run-cleanup-apply
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism prompts prompts-verify run-handoff run-status products-fetch products-fetch-dry render-config claims final-validate final-validate-no-video upload-receipt upload-verify verify verify-manual verify-uploads verify-uploads-manual run-cleanup run-cleanup-apply
 
 # --- Morning routine ---
 doctor:
@@ -249,6 +249,42 @@ products-fetch-dry:
 # --- Render config generation ---
 render-config:
 	python3 -m rayvault.render_config_generate --run-dir state/runs/$(RUN_ID) --min-truth-products 4
+
+# --- Claims guardrail (anti-lie firewall) ---
+claims:
+	python3 -m rayvault.claims_guardrail --run-dir state/runs/$(RUN_ID)
+
+# --- Final validator (last gate before upload) ---
+final-validate:
+	python3 -m rayvault.final_validator --run-dir state/runs/$(RUN_ID)
+
+final-validate-no-video:
+	python3 -m rayvault.final_validator --run-dir state/runs/$(RUN_ID) --no-video
+
+# --- Upload receipt (HMAC-signed proof of publish) ---
+VIDEO_ID ?=
+CHANNEL_ID ?=
+UPLOADER ?= manual
+
+upload-receipt:
+	python3 -m rayvault.youtube_upload_receipt --run-dir state/runs/$(RUN_ID) --video-id $(VIDEO_ID) --channel-id $(CHANNEL_ID) --uploader $(UPLOADER)
+
+upload-verify:
+	python3 -m rayvault.youtube_upload_receipt --run-dir state/runs/$(RUN_ID) --verify
+
+# --- Verify visibility (UPLOADED -> VERIFIED) ---
+verify:
+	python3 -m rayvault.verify_visibility --run-dir state/runs/$(RUN_ID)
+
+verify-manual:
+	python3 -m rayvault.verify_visibility --run-dir state/runs/$(RUN_ID) --manual
+
+# --- Cron: batch verify all UPLOADED runs ---
+verify-uploads:
+	python3 -m rayvault.cron_verify_visibility
+
+verify-uploads-manual:
+	python3 -m rayvault.cron_verify_visibility --manual
 
 # --- Run cleanup (post-publish purge) ---
 run-cleanup:

@@ -11333,23 +11333,29 @@ class TestCleanupRun(unittest.TestCase):
         path.write_text(json.dumps(data))
 
     def _write_receipt(self, status="UPLOADED"):
-        self._write_json(
-            self.run_dir / "publish" / "upload_receipt.json",
-            {"status": status, "url": "https://youtube.com/watch?v=test"},
-        )
+        from rayvault.youtube_upload_receipt import sign_receipt
+        receipt = {
+            "version": "1.0", "run_id": "TEST", "status": status,
+            "uploader": "test", "uploaded_at_utc": "2026-01-01T00:00:00Z",
+            "inputs": {"video_sha256": "abc", "video_size_bytes": 1000},
+            "youtube": {"video_id": "test123", "channel_id": "UC000"},
+        }
+        hmac_val = sign_receipt(receipt)
+        receipt["integrity"] = {"method": "hmac_sha256", "hmac_sha256": hmac_val}
+        self._write_json(self.run_dir / "publish" / "upload_receipt.json", receipt)
 
     def test_refuses_without_receipt(self):
         from rayvault.cleanup_run import cleanup
         ok, info = cleanup(self.run_dir)
         self.assertFalse(ok)
-        self.assertEqual(info, "missing_or_not_uploaded_receipt")
+        self.assertEqual(info, "missing_receipt")
 
     def test_refuses_non_uploaded_receipt(self):
         self._write_receipt("PENDING")
         from rayvault.cleanup_run import cleanup
         ok, info = cleanup(self.run_dir)
         self.assertFalse(ok)
-        self.assertEqual(info, "missing_or_not_uploaded_receipt")
+        self.assertIn("PENDING", info)
 
     def test_force_bypasses_receipt(self):
         from rayvault.cleanup_run import cleanup
@@ -11840,6 +11846,994 @@ class TestHandoffProductGates(unittest.TestCase):
                           visual_fail_reason="teeth_visible")
         self.assertIn("patient_zero", m)
         self.assertEqual(m["patient_zero"]["code"], "VISUAL_QC_FAIL")
+
+
+# ── final validator tests ─────────────────────────────────────────────────────
+
+class TestFinalValidator(unittest.TestCase):
+    """Tests for rayvault/final_validator.py — last gate before upload."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "state" / "runs" / "RUN_VAL_01"
+        self.run_dir.mkdir(parents=True)
+        (self.run_dir / "publish").mkdir()
+        # Create minimal manifest
+        manifest = {
+            "schema_version": "1.1",
+            "run_id": "RUN_VAL_01",
+            "status": "READY_FOR_RENDER",
+            "stability": {"stability_score": 100, "fallback_level": 0, "attempts": 1},
+            "metadata": {
+                "identity": {"confidence": "HIGH", "reason": "test"},
+                "visual_qc_result": "PASS",
+            },
+        }
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+        # Core assets
+        (self.run_dir / "01_script.txt").write_text("Test script for validation.")
+        (self.run_dir / "02_audio.wav").write_bytes(b"RIFF" + b"\x00" * 100)
+        (self.run_dir / "03_frame.png").write_bytes(b"\x89PNG" + b"\x00" * 100)
+        # Render config
+        rc = {"version": "1.1", "segments": [{"type": "intro", "t0": 0, "t1": 2}]}
+        self._write_json(self.run_dir / "05_render_config.json", rc)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def _make_video(self, size=2048):
+        v = self.run_dir / "publish" / "video_final.mp4"
+        v.write_bytes(b"\x00" * size)
+
+    def test_all_gates_pass(self):
+        from rayvault.final_validator import validate_run
+        self._make_video()
+        v = validate_run(self.run_dir)
+        self.assertTrue(v.all_passed)
+        self.assertEqual(len(v.failed_gates), 0)
+
+    def test_missing_manifest_fails(self):
+        from rayvault.final_validator import validate_run
+        (self.run_dir / "00_manifest.json").unlink()
+        v = validate_run(self.run_dir)
+        self.assertFalse(v.all_passed)
+        self.assertIn("manifest_exists", v.failed_gates)
+
+    def test_wrong_status_fails(self):
+        from rayvault.final_validator import validate_run
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        m["status"] = "BLOCKED"
+        self._write_json(self.run_dir / "00_manifest.json", m)
+        self._make_video()
+        v = validate_run(self.run_dir)
+        self.assertFalse(v.all_passed)
+        self.assertIn("manifest_status", v.failed_gates)
+
+    def test_missing_audio_fails(self):
+        from rayvault.final_validator import validate_run
+        (self.run_dir / "02_audio.wav").unlink()
+        self._make_video()
+        v = validate_run(self.run_dir)
+        self.assertFalse(v.all_passed)
+        self.assertIn("core_assets", v.failed_gates)
+
+    def test_missing_render_config_fails(self):
+        from rayvault.final_validator import validate_run
+        (self.run_dir / "05_render_config.json").unlink()
+        self._make_video()
+        v = validate_run(self.run_dir)
+        self.assertFalse(v.all_passed)
+        self.assertIn("render_config", v.failed_gates)
+
+    def test_low_identity_fails(self):
+        from rayvault.final_validator import validate_run
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        m["metadata"]["identity"]["confidence"] = "LOW"
+        self._write_json(self.run_dir / "00_manifest.json", m)
+        self._make_video()
+        v = validate_run(self.run_dir)
+        self.assertFalse(v.all_passed)
+        self.assertIn("identity_confidence", v.failed_gates)
+
+    def test_visual_qc_fail(self):
+        from rayvault.final_validator import validate_run
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        m["metadata"]["visual_qc_result"] = "FAIL"
+        self._write_json(self.run_dir / "00_manifest.json", m)
+        self._make_video()
+        v = validate_run(self.run_dir)
+        self.assertFalse(v.all_passed)
+        self.assertIn("visual_qc", v.failed_gates)
+
+    def test_missing_video_fails(self):
+        from rayvault.final_validator import validate_run
+        v = validate_run(self.run_dir)
+        self.assertFalse(v.all_passed)
+        self.assertIn("final_video", v.failed_gates)
+
+    def test_no_video_flag_skips(self):
+        from rayvault.final_validator import validate_run
+        v = validate_run(self.run_dir, require_video=False)
+        self.assertTrue(v.all_passed)
+
+    def test_low_stability_fails(self):
+        from rayvault.final_validator import validate_run
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        m["stability"]["stability_score"] = 30
+        self._write_json(self.run_dir / "00_manifest.json", m)
+        self._make_video()
+        v = validate_run(self.run_dir, stability_threshold=40)
+        self.assertFalse(v.all_passed)
+        self.assertIn("stability_score", v.failed_gates)
+
+    def test_patient_zero_is_first_failure(self):
+        from rayvault.final_validator import validate_run
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        m["status"] = "BLOCKED"
+        self._write_json(self.run_dir / "00_manifest.json", m)
+        self._make_video()
+        v = validate_run(self.run_dir)
+        self.assertIsNotNone(v.patient_zero)
+        self.assertEqual(v.patient_zero, "manifest_status")
+
+    def test_verdict_to_dict(self):
+        from rayvault.final_validator import validate_run
+        self._make_video()
+        v = validate_run(self.run_dir)
+        d = v.to_dict()
+        self.assertIn("run_id", d)
+        self.assertIn("gates", d)
+        self.assertIn("checked_at_utc", d)
+
+    def test_validation_written_to_manifest(self):
+        from rayvault.final_validator import validate_run
+        self._make_video()
+        validate_run(self.run_dir)
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        self.assertIn("validation", m)
+        self.assertTrue(m["validation"]["passed"])
+
+    def test_claims_review_required_blocks(self):
+        from rayvault.final_validator import validate_run
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        m["claims_validation"] = {"status": "REVIEW_REQUIRED", "violations": [{"x": 1}]}
+        self._write_json(self.run_dir / "00_manifest.json", m)
+        self._make_video()
+        v = validate_run(self.run_dir)
+        self.assertFalse(v.all_passed)
+        self.assertIn("claims_validation", v.failed_gates)
+
+    def test_claims_pass_ok(self):
+        from rayvault.final_validator import validate_run
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        m["claims_validation"] = {"status": "PASS", "violations": []}
+        self._write_json(self.run_dir / "00_manifest.json", m)
+        self._make_video()
+        v = validate_run(self.run_dir)
+        self.assertTrue(v.all_passed)
+
+    def test_no_claims_block_is_pass(self):
+        """If claims_guardrail hasn't run yet, don't block."""
+        from rayvault.final_validator import validate_run
+        self._make_video()
+        v = validate_run(self.run_dir)
+        self.assertTrue(v.all_passed)
+
+    def test_cli_exit_0_on_pass(self):
+        from rayvault.final_validator import main
+        self._make_video()
+        rc = main(["--run-dir", str(self.run_dir)])
+        self.assertEqual(rc, 0)
+
+    def test_cli_exit_2_on_fail(self):
+        from rayvault.final_validator import main
+        # No video
+        rc = main(["--run-dir", str(self.run_dir)])
+        self.assertEqual(rc, 2)
+
+
+# ── youtube upload receipt tests ──────────────────────────────────────────────
+
+class TestYoutubeUploadReceipt(unittest.TestCase):
+    """Tests for rayvault/youtube_upload_receipt.py — HMAC-signed receipt."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "state" / "runs" / "RUN_REC_01"
+        self.run_dir.mkdir(parents=True)
+        publish = self.run_dir / "publish"
+        publish.mkdir()
+        # Create manifest
+        manifest = {
+            "schema_version": "1.1",
+            "run_id": "RUN_REC_01",
+            "status": "READY_FOR_RENDER",
+            "stability": {"stability_score": 100},
+            "metadata": {},
+        }
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+        # Create video
+        (publish / "video_final.mp4").write_bytes(b"\x00\x00\x01\xb3" + b"\xff" * 5000)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def test_generate_receipt(self):
+        from rayvault.youtube_upload_receipt import generate_receipt
+        r = generate_receipt(self.run_dir, video_id="abc123", channel_id="UC000")
+        self.assertEqual(r["status"], "UPLOADED")
+        self.assertEqual(r["youtube"]["video_id"], "abc123")
+        self.assertIn("hmac_sha256", r["integrity"])
+
+    def test_receipt_file_written(self):
+        from rayvault.youtube_upload_receipt import generate_receipt
+        generate_receipt(self.run_dir, video_id="abc123")
+        rp = self.run_dir / "publish" / "upload_receipt.json"
+        self.assertTrue(rp.exists())
+        data = json.loads(rp.read_text())
+        self.assertEqual(data["status"], "UPLOADED")
+
+    def test_hmac_verifies(self):
+        from rayvault.youtube_upload_receipt import generate_receipt, verify_receipt
+        r = generate_receipt(self.run_dir, video_id="abc123")
+        self.assertTrue(verify_receipt(r))
+
+    def test_tampered_receipt_fails(self):
+        from rayvault.youtube_upload_receipt import generate_receipt, verify_receipt
+        r = generate_receipt(self.run_dir, video_id="abc123")
+        r["status"] = "VERIFIED"  # tamper
+        self.assertFalse(verify_receipt(r))
+
+    def test_manifest_updated_to_uploaded(self):
+        from rayvault.youtube_upload_receipt import generate_receipt
+        generate_receipt(self.run_dir, video_id="abc123")
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        self.assertEqual(m["status"], "UPLOADED")
+        self.assertIn("publish", m)
+        self.assertEqual(m["publish"]["video_id"], "abc123")
+
+    def test_preflight_fails_no_manifest(self):
+        from rayvault.youtube_upload_receipt import generate_receipt
+        (self.run_dir / "00_manifest.json").unlink()
+        with self.assertRaises(ValueError):
+            generate_receipt(self.run_dir, video_id="abc123")
+
+    def test_preflight_fails_no_video(self):
+        from rayvault.youtube_upload_receipt import generate_receipt
+        (self.run_dir / "publish" / "video_final.mp4").unlink()
+        with self.assertRaises(ValueError):
+            generate_receipt(self.run_dir, video_id="abc123")
+
+    def test_empty_video_id_fails(self):
+        from rayvault.youtube_upload_receipt import generate_receipt
+        with self.assertRaises(ValueError):
+            generate_receipt(self.run_dir, video_id="")
+
+    def test_receipt_has_video_hash(self):
+        from rayvault.youtube_upload_receipt import generate_receipt
+        r = generate_receipt(self.run_dir, video_id="test123")
+        self.assertTrue(len(r["inputs"]["video_sha256"]) == 64)
+        self.assertGreater(r["inputs"]["video_size_bytes"], 0)
+
+    def test_receipt_schema_version(self):
+        from rayvault.youtube_upload_receipt import generate_receipt
+        r = generate_receipt(self.run_dir, video_id="test123")
+        self.assertEqual(r["version"], "1.0")
+
+    def test_no_video_check_flag(self):
+        from rayvault.youtube_upload_receipt import generate_receipt
+        (self.run_dir / "publish" / "video_final.mp4").unlink()
+        r = generate_receipt(self.run_dir, video_id="abc123", require_video=False)
+        self.assertEqual(r["status"], "UPLOADED")
+
+    def test_cli_verify_mode(self):
+        from rayvault.youtube_upload_receipt import generate_receipt, main
+        generate_receipt(self.run_dir, video_id="abc123")
+        rc = main(["--run-dir", str(self.run_dir), "--verify"])
+        self.assertEqual(rc, 0)
+
+    def test_cli_verify_no_receipt(self):
+        from rayvault.youtube_upload_receipt import main
+        rc = main(["--run-dir", str(self.run_dir), "--verify"])
+        self.assertEqual(rc, 2)
+
+    def test_sign_deterministic(self):
+        from rayvault.youtube_upload_receipt import generate_receipt, sign_receipt
+        r = generate_receipt(self.run_dir, video_id="abc123")
+        sig1 = sign_receipt(r)
+        sig2 = sign_receipt(r)
+        self.assertEqual(sig1, sig2)
+
+    def test_different_run_id_different_hmac(self):
+        from rayvault.youtube_upload_receipt import sign_receipt
+        r1 = {"version": "1.0", "run_id": "RUN_A", "status": "UPLOADED",
+               "inputs": {"video_sha256": "aaa", "video_size_bytes": 100},
+               "youtube": {"video_id": "x", "channel_id": "c"},
+               "uploaded_at_utc": "2026-01-01T00:00:00Z"}
+        r2 = dict(r1)
+        r2["run_id"] = "RUN_B"
+        self.assertNotEqual(sign_receipt(r1), sign_receipt(r2))
+
+
+# ── cleanup with HMAC tests ──────────────────────────────────────────────────
+
+class TestCleanupHMAC(unittest.TestCase):
+    """Tests for HMAC-verified cleanup in cleanup_run.py."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "state" / "runs" / "RUN_CL_HMAC"
+        self.run_dir.mkdir(parents=True)
+        (self.run_dir / "publish").mkdir()
+        manifest = {"schema_version": "1.1", "run_id": "RUN_CL_HMAC", "status": "UPLOADED"}
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+        # Create heavy assets
+        (self.run_dir / "02_audio.wav").write_bytes(b"\x00" * 100)
+        (self.run_dir / "03_frame.png").write_bytes(b"\x00" * 100)
+        # Create valid receipt with HMAC
+        self._create_valid_receipt()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def _create_valid_receipt(self):
+        from rayvault.youtube_upload_receipt import sign_receipt
+        receipt = {
+            "version": "1.0",
+            "run_id": "RUN_CL_HMAC",
+            "status": "UPLOADED",
+            "uploader": "test",
+            "uploaded_at_utc": "2026-01-01T00:00:00Z",
+            "inputs": {"video_sha256": "abc", "video_size_bytes": 1000},
+            "youtube": {"video_id": "test123", "channel_id": "UC000"},
+        }
+        hmac_val = sign_receipt(receipt)
+        receipt["integrity"] = {"method": "hmac_sha256", "hmac_sha256": hmac_val,
+                                 "signed_fields": "version|run_id|status|..."}
+        self._write_json(self.run_dir / "publish" / "upload_receipt.json", receipt)
+
+    def _create_tampered_receipt(self):
+        receipt = {
+            "version": "1.0",
+            "run_id": "RUN_CL_HMAC",
+            "status": "UPLOADED",
+            "uploader": "test",
+            "uploaded_at_utc": "2026-01-01T00:00:00Z",
+            "inputs": {"video_sha256": "abc", "video_size_bytes": 1000},
+            "youtube": {"video_id": "test123", "channel_id": "UC000"},
+            "integrity": {"method": "hmac_sha256", "hmac_sha256": "deadbeef",
+                          "signed_fields": "version|run_id|status|..."},
+        }
+        self._write_json(self.run_dir / "publish" / "upload_receipt.json", receipt)
+
+    def test_valid_hmac_allows_cleanup(self):
+        from rayvault.cleanup_run import cleanup
+        ok, info = cleanup(self.run_dir)
+        self.assertTrue(ok)
+
+    def test_tampered_hmac_refuses_cleanup(self):
+        from rayvault.cleanup_run import cleanup
+        self._create_tampered_receipt()
+        ok, info = cleanup(self.run_dir)
+        self.assertFalse(ok)
+        self.assertEqual(info, "receipt_hmac_invalid")
+
+    def test_force_bypasses_hmac(self):
+        from rayvault.cleanup_run import cleanup
+        self._create_tampered_receipt()
+        ok, info = cleanup(self.run_dir, force=True)
+        self.assertTrue(ok)
+
+    def test_missing_receipt_refuses(self):
+        from rayvault.cleanup_run import cleanup
+        (self.run_dir / "publish" / "upload_receipt.json").unlink()
+        ok, info = cleanup(self.run_dir)
+        self.assertFalse(ok)
+        self.assertEqual(info, "missing_receipt")
+
+    def test_verified_status_accepted(self):
+        from rayvault.youtube_upload_receipt import sign_receipt
+        from rayvault.cleanup_run import cleanup
+        receipt = {
+            "version": "1.0", "run_id": "RUN_CL_HMAC", "status": "VERIFIED",
+            "uploader": "test", "uploaded_at_utc": "2026-01-01T00:00:00Z",
+            "inputs": {"video_sha256": "abc", "video_size_bytes": 1000},
+            "youtube": {"video_id": "v", "channel_id": "c"},
+        }
+        receipt["integrity"] = {"method": "hmac_sha256", "hmac_sha256": sign_receipt(receipt)}
+        self._write_json(self.run_dir / "publish" / "upload_receipt.json", receipt)
+        ok, info = cleanup(self.run_dir)
+        self.assertTrue(ok)
+
+    def test_receipt_wrong_status_refuses(self):
+        from rayvault.cleanup_run import cleanup
+        receipt = {
+            "version": "1.0", "run_id": "RUN_CL_HMAC", "status": "PROCESSING",
+            "inputs": {}, "youtube": {},
+            "integrity": {"hmac_sha256": "x"},
+        }
+        self._write_json(self.run_dir / "publish" / "upload_receipt.json", receipt)
+        ok, info = cleanup(self.run_dir)
+        self.assertFalse(ok)
+        self.assertIn("PROCESSING", info)
+
+
+# ── claims guardrail tests ───────────────────────────────────────────────────
+
+class TestClaimsGuardrail(unittest.TestCase):
+    """Tests for rayvault/claims_guardrail.py — anti-lie firewall."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "run"
+        self.run_dir.mkdir()
+        (self.run_dir / "products").mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def _setup_products(self, bullets=None):
+        items = [
+            {"rank": 1, "asin": "B001", "title": "Wireless Earbuds Waterproof IPX7",
+             "bullets": bullets or ["Waterproof IPX7 rated", "8 hours battery life", "Bluetooth 5.3"]},
+        ]
+        self._write_json(self.run_dir / "products" / "products.json", {"items": items})
+
+    def test_pass_when_script_matches_products(self):
+        from rayvault.claims_guardrail import guardrail
+        self._setup_products()
+        (self.run_dir / "01_script.txt").write_text(
+            "These earbuds are waterproof with an IPX7 rating."
+        )
+        r = guardrail(self.run_dir)
+        self.assertEqual(r["status"], "PASS")
+
+    def test_review_required_when_claim_unsupported(self):
+        from rayvault.claims_guardrail import guardrail
+        self._setup_products(bullets=["Basic earbuds", "Good sound"])
+        (self.run_dir / "01_script.txt").write_text(
+            "These earbuds come with a lifetime warranty."
+        )
+        r = guardrail(self.run_dir)
+        self.assertEqual(r["status"], "REVIEW_REQUIRED")
+        self.assertGreater(len(r["violations"]), 0)
+
+    def test_missing_script_returns_error(self):
+        from rayvault.claims_guardrail import guardrail
+        self._setup_products()
+        r = guardrail(self.run_dir)
+        self.assertEqual(r["status"], "ERROR")
+        self.assertEqual(r["code"], "MISSING_SCRIPT")
+
+    def test_missing_products_returns_error(self):
+        from rayvault.claims_guardrail import guardrail
+        (self.run_dir / "01_script.txt").write_text("Test script.")
+        (self.run_dir / "products" / "products.json").unlink(missing_ok=True)
+        r = guardrail(self.run_dir)
+        self.assertEqual(r["status"], "ERROR")
+
+    def test_no_trigger_sentences_pass(self):
+        from rayvault.claims_guardrail import guardrail
+        self._setup_products()
+        (self.run_dir / "01_script.txt").write_text(
+            "Here are some nice earbuds for everyday use."
+        )
+        r = guardrail(self.run_dir)
+        self.assertEqual(r["status"], "PASS")
+        self.assertEqual(r["trigger_sentences_count"], 0)
+
+    def test_trigger_with_evidence_passes(self):
+        from rayvault.claims_guardrail import guardrail
+        self._setup_products(bullets=["FDA certified medical grade"])
+        (self.run_dir / "01_script.txt").write_text(
+            "This product is certified by strict standards."
+        )
+        r = guardrail(self.run_dir)
+        self.assertEqual(r["status"], "PASS")
+
+    def test_multiple_violations(self):
+        from rayvault.claims_guardrail import guardrail
+        self._setup_products(bullets=["Basic product"])
+        (self.run_dir / "01_script.txt").write_text(
+            "This is waterproof. It has a lifetime warranty. It is FDA certified."
+        )
+        r = guardrail(self.run_dir)
+        self.assertEqual(r["status"], "REVIEW_REQUIRED")
+        self.assertGreaterEqual(len(r["violations"]), 2)
+
+    def test_result_file_written(self):
+        from rayvault.claims_guardrail import guardrail, atomic_write_json
+        self._setup_products()
+        (self.run_dir / "01_script.txt").write_text("Nice product.")
+        r = guardrail(self.run_dir)
+        atomic_write_json(self.run_dir / "claims_guardrail.json", r)
+        self.assertTrue((self.run_dir / "claims_guardrail.json").exists())
+
+    def test_manifest_updated(self):
+        from rayvault.claims_guardrail import guardrail, update_manifest
+        self._setup_products()
+        (self.run_dir / "01_script.txt").write_text("Nice product.")
+        manifest = {"run_id": "TEST", "status": "READY"}
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+        r = guardrail(self.run_dir)
+        update_manifest(self.run_dir, r)
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        self.assertIn("claims_validation", m)
+        self.assertEqual(m["claims_validation"]["status"], "PASS")
+
+    def test_normalize_text(self):
+        from rayvault.claims_guardrail import normalize_text
+        self.assertEqual(normalize_text("  Hello   World  "), "hello world")
+
+    def test_find_trigger_sentences(self):
+        from rayvault.claims_guardrail import find_trigger_sentences
+        script = "This is waterproof. Normal sentence. Has battery life."
+        hits = find_trigger_sentences(script)
+        self.assertGreaterEqual(len(hits), 2)
+
+    def test_check_evidence_with_keywords(self):
+        from rayvault.claims_guardrail import check_evidence
+        ok, missing = check_evidence("waterproof earbuds", "waterproof ipx7 rated earbuds")
+        self.assertTrue(ok)
+        self.assertEqual(missing, [])
+
+    def test_check_evidence_missing(self):
+        from rayvault.claims_guardrail import check_evidence
+        ok, missing = check_evidence("waterproof earbuds", "basic earbuds good sound")
+        self.assertFalse(ok)
+        self.assertIn("waterproof", missing)
+
+
+# ── verify visibility tests ──────────────────────────────────────────────────
+
+class TestVerifyVisibility(unittest.TestCase):
+    """Tests for rayvault/verify_visibility.py — UPLOADED -> VERIFIED."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "state" / "runs" / "RUN_VIS_01"
+        self.run_dir.mkdir(parents=True)
+        (self.run_dir / "publish").mkdir()
+        manifest = {"schema_version": "1.1", "run_id": "RUN_VIS_01", "status": "UPLOADED"}
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def _create_receipt(self, status="UPLOADED", video_id="test123"):
+        from rayvault.youtube_upload_receipt import sign_receipt
+        receipt = {
+            "version": "1.0", "run_id": "RUN_VIS_01", "status": status,
+            "uploader": "test", "uploaded_at_utc": "2026-01-01T00:00:00Z",
+            "inputs": {"video_sha256": "abc", "video_size_bytes": 1000},
+            "youtube": {"video_id": video_id, "channel_id": "UC000"},
+        }
+        receipt["integrity"] = {"method": "hmac_sha256", "hmac_sha256": sign_receipt(receipt)}
+        self._write_json(self.run_dir / "publish" / "upload_receipt.json", receipt)
+
+    def test_missing_receipt_fails(self):
+        from rayvault.verify_visibility import verify
+        r = verify(self.run_dir)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["reason"], "missing_receipt")
+
+    def test_manual_verify_succeeds(self):
+        from rayvault.verify_visibility import verify
+        self._create_receipt()
+        r = verify(self.run_dir, manual=True)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["status"], "VERIFIED")
+
+    def test_manual_verify_updates_receipt(self):
+        from rayvault.verify_visibility import verify
+        self._create_receipt()
+        verify(self.run_dir, manual=True)
+        receipt = json.loads((self.run_dir / "publish" / "upload_receipt.json").read_text())
+        self.assertEqual(receipt["status"], "VERIFIED")
+        self.assertIn("verified_at_utc", receipt)
+
+    def test_manual_verify_updates_manifest(self):
+        from rayvault.verify_visibility import verify
+        self._create_receipt()
+        verify(self.run_dir, manual=True)
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        self.assertEqual(m["status"], "VERIFIED")
+        self.assertTrue(m["publish"]["verified"])
+
+    def test_already_verified_returns_ok(self):
+        from rayvault.verify_visibility import verify
+        self._create_receipt(status="VERIFIED")
+        r = verify(self.run_dir)
+        self.assertTrue(r["ok"])
+        self.assertTrue(r.get("already"))
+
+    def test_no_verify_cmd_fails(self):
+        from rayvault.verify_visibility import verify
+        self._create_receipt()
+        with patch.dict(os.environ, {}, clear=True):
+            r = verify(self.run_dir, verify_cmd=None)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["reason"], "no_verify_cmd")
+
+    def test_wrong_receipt_status_fails(self):
+        from rayvault.verify_visibility import verify
+        receipt = {"version": "1.0", "run_id": "RUN_VIS_01", "status": "PROCESSING",
+                   "inputs": {}, "youtube": {"video_id": "x"}, "integrity": {}}
+        self._write_json(self.run_dir / "publish" / "upload_receipt.json", receipt)
+        r = verify(self.run_dir)
+        self.assertFalse(r["ok"])
+
+    def test_missing_video_id_fails(self):
+        from rayvault.verify_visibility import verify
+        receipt = {"version": "1.0", "run_id": "RUN_VIS_01", "status": "UPLOADED",
+                   "inputs": {}, "youtube": {}, "integrity": {}}
+        self._write_json(self.run_dir / "publish" / "upload_receipt.json", receipt)
+        r = verify(self.run_dir)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["reason"], "missing_video_id")
+
+
+# ── render config skipped_count telemetry tests ──────────────────────────────
+
+class TestRenderConfigTelemetry(unittest.TestCase):
+    """Tests for skipped_count in render_config_generate.py."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "run"
+        self.run_dir.mkdir()
+        (self.run_dir / "01_script.txt").write_text("Test " * 50)
+        manifest = {"run_id": "RUN_TEL", "status": "READY"}
+        with open(self.run_dir / "00_manifest.json", "w") as f:
+            json.dump(manifest, f)
+        # Create products
+        products_dir = self.run_dir / "products"
+        products_dir.mkdir()
+        items = [{"rank": i, "asin": f"B{i:03d}", "title": f"Product {i}"}
+                 for i in range(1, 6)]
+        with open(products_dir / "products.json", "w") as f:
+            json.dump({"items": items}, f)
+        # Only give 3 products images
+        for i in range(1, 4):
+            src = products_dir / f"p{i:02d}" / "source_images"
+            src.mkdir(parents=True)
+            (src / "01_main.jpg").write_bytes(b"\xff" * 3000)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_skipped_count_in_config(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        products = result["config"]["products"]
+        self.assertIn("skipped_count", products)
+        # 5 products, 3 have images -> 2 skipped
+        self.assertEqual(products["skipped_count"], 2)
+        self.assertEqual(products["truth_visuals_used"], 3)
+
+    def test_skipped_count_in_manifest(self):
+        from rayvault.render_config_generate import generate_render_config
+        generate_render_config(self.run_dir)
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        self.assertIn("render", m)
+        self.assertEqual(m["render"]["skipped_count"], 2)
+
+    def test_all_products_have_images_zero_skipped(self):
+        from rayvault.render_config_generate import generate_render_config
+        products_dir = self.run_dir / "products"
+        for i in range(4, 6):
+            src = products_dir / f"p{i:02d}" / "source_images"
+            src.mkdir(parents=True)
+            (src / "01_main.jpg").write_bytes(b"\xff" * 3000)
+        result = generate_render_config(self.run_dir)
+        self.assertEqual(result["config"]["products"]["skipped_count"], 0)
+        self.assertEqual(result["config"]["products"]["truth_visuals_used"], 5)
+
+
+# ── status enum tests ────────────────────────────────────────────────────────
+
+class TestStatusEnum(unittest.TestCase):
+    """Tests for VALID_STATUSES including new UPLOADED/VERIFIED."""
+
+    def test_valid_statuses_includes_uploaded(self):
+        from rayvault.handoff_run import VALID_STATUSES
+        self.assertIn("UPLOADED", VALID_STATUSES)
+
+    def test_valid_statuses_includes_verified(self):
+        from rayvault.handoff_run import VALID_STATUSES
+        self.assertIn("VERIFIED", VALID_STATUSES)
+
+    def test_valid_statuses_complete(self):
+        from rayvault.handoff_run import VALID_STATUSES
+        expected = {"INCOMPLETE", "WAITING_ASSETS", "READY_FOR_RENDER",
+                    "BLOCKED", "UPLOADED", "VERIFIED", "PUBLISHED"}
+        self.assertEqual(VALID_STATUSES, expected)
+
+
+# ── truth cache tests ─────────────────────────────────────────────────────────
+
+class TestTruthCache(unittest.TestCase):
+    """Tests for rayvault/truth_cache.py — ASIN-keyed product asset cache."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.lib_root = Path(self.td) / "library"
+        self.lib_root.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _make_cache(self, **kwargs):
+        from rayvault.truth_cache import TruthCache, CachePolicy
+        policy = CachePolicy(**kwargs) if kwargs else CachePolicy()
+        return TruthCache(self.lib_root, policy)
+
+    def test_empty_cache_returns_empty(self):
+        cache = self._make_cache()
+        self.assertEqual(cache.get_cached("B0MISSING"), {})
+
+    def test_put_metadata(self):
+        cache = self._make_cache()
+        meta = {"title": "Test Product", "asin": "B0TEST"}
+        result = cache.put_from_fetch("B0TEST", meta, [])
+        self.assertTrue(result["ok"])
+        cached = cache.get_cached("B0TEST")
+        self.assertEqual(cached["meta"]["title"], "Test Product")
+
+    def test_put_images(self):
+        cache = self._make_cache()
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff\xd8" * 2000)
+        result = cache.put_from_fetch("B0TEST", None, [img])
+        self.assertTrue(result["ok"])
+        self.assertIn("01_main.jpg", result["stored_images"])
+        self.assertTrue(cache.has_main_image("B0TEST"))
+
+    def test_materialize_copy(self):
+        cache = self._make_cache()
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff\xd8" * 2000)
+        cache.put_from_fetch("B0TEST", {"title": "X"}, [img])
+        run_pdir = Path(self.td) / "run" / "products" / "p01"
+        result = cache.materialize_to_run("B0TEST", run_pdir, mode="copy")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["code"], "MATERIALIZED")
+        self.assertTrue((run_pdir / "source_images" / "01_main.jpg").exists())
+        self.assertTrue((run_pdir / "product_metadata.json").exists())
+
+    def test_materialize_cache_miss(self):
+        cache = self._make_cache()
+        run_pdir = Path(self.td) / "run" / "p01"
+        result = cache.materialize_to_run("B0MISSING", run_pdir)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "CACHE_MISS")
+
+    def test_needs_refresh_fresh(self):
+        cache = self._make_cache(ttl_meta_sec=999999, ttl_images_sec=999999)
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff" * 100)
+        cache.put_from_fetch("B0TEST", {"title": "X"}, [img])
+        need = cache.needs_refresh("B0TEST")
+        self.assertTrue(need["has_meta"])
+        self.assertTrue(need["has_images"])
+        self.assertTrue(need["meta_fresh"])
+        self.assertTrue(need["images_fresh"])
+        self.assertFalse(need["refresh_meta"])
+        self.assertFalse(need["refresh_images"])
+
+    def test_needs_refresh_stale(self):
+        cache = self._make_cache(ttl_meta_sec=0, ttl_images_sec=0)
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff" * 100)
+        cache.put_from_fetch("B0TEST", {"title": "X"}, [img])
+        # With TTL=0, everything is stale immediately
+        need = cache.needs_refresh("B0TEST")
+        self.assertTrue(need["refresh_meta"])
+        self.assertTrue(need["refresh_images"])
+
+    def test_needs_refresh_no_cache(self):
+        cache = self._make_cache()
+        need = cache.needs_refresh("B0NONE")
+        self.assertFalse(need["has_meta"])
+        self.assertFalse(need["has_images"])
+
+    def test_hashes_written(self):
+        cache = self._make_cache()
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff\xd8" * 500)
+        cache.put_from_fetch("B0TEST", None, [img])
+        hashes = json.loads(cache.hashes_path("B0TEST").read_text())
+        self.assertIn("01_main.jpg", hashes["images"])
+        self.assertIn("sha1", hashes["images"]["01_main.jpg"])
+
+    def test_cache_info_provenance(self):
+        cache = self._make_cache()
+        cache.put_from_fetch("B0TEST", {"title": "X"}, [], http_status=200)
+        info = json.loads(cache.cache_info_path("B0TEST").read_text())
+        self.assertEqual(info["fetched_from"], "amazon")
+        self.assertEqual(info["http_status_last"], 200)
+
+    def test_stats_empty(self):
+        cache = self._make_cache()
+        s = cache.stats()
+        self.assertEqual(s["total_asins"], 0)
+
+    def test_stats_with_data(self):
+        cache = self._make_cache()
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff" * 100)
+        cache.put_from_fetch("B0A", {"title": "A"}, [img])
+        img2 = Path(self.td) / "01_main.jpg"
+        img2.write_bytes(b"\xff" * 200)
+        cache.put_from_fetch("B0B", {"title": "B"}, [img2])
+        s = cache.stats()
+        self.assertEqual(s["total_asins"], 2)
+        self.assertGreater(s["total_bytes"], 0)
+
+    def test_idempotent_put(self):
+        cache = self._make_cache()
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff" * 100)
+        cache.put_from_fetch("B0TEST", {"title": "X"}, [img])
+        # Put again (image already exists in cache, temp file consumed)
+        img2 = Path(self.td) / "01_main.jpg"
+        img2.write_bytes(b"\xff" * 100)
+        result = cache.put_from_fetch("B0TEST", {"title": "Y"}, [img2])
+        self.assertTrue(result["ok"])
+        # Metadata updated
+        cached = cache.get_cached("B0TEST")
+        self.assertEqual(cached["meta"]["title"], "Y")
+
+    def test_has_main_image_false(self):
+        cache = self._make_cache()
+        self.assertFalse(cache.has_main_image("B0NOPE"))
+
+    def test_materialize_skip_existing(self):
+        cache = self._make_cache()
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff" * 100)
+        cache.put_from_fetch("B0TEST", None, [img])
+        run_pdir = Path(self.td) / "run" / "p01"
+        cache.materialize_to_run("B0TEST", run_pdir)
+        # Materialize again — should skip
+        result = cache.materialize_to_run("B0TEST", run_pdir)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["images_copied"], 0)
+
+
+# ── cron verify visibility tests ─────────────────────────────────────────────
+
+class TestCronVerifyVisibility(unittest.TestCase):
+    """Tests for rayvault/cron_verify_visibility.py — batch verification."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.runs_root = Path(self.td) / "state" / "runs"
+        self.runs_root.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def _create_uploaded_run(self, run_id, video_id="test123"):
+        run_dir = self.runs_root / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "publish").mkdir()
+        self._write_json(run_dir / "00_manifest.json", {
+            "run_id": run_id, "status": "UPLOADED",
+        })
+        from rayvault.youtube_upload_receipt import sign_receipt
+        receipt = {
+            "version": "1.0", "run_id": run_id, "status": "UPLOADED",
+            "uploader": "test", "uploaded_at_utc": "2026-01-01T00:00:00Z",
+            "inputs": {"video_sha256": "abc", "video_size_bytes": 1000},
+            "youtube": {"video_id": video_id, "channel_id": "UC000"},
+        }
+        receipt["integrity"] = {"method": "hmac_sha256", "hmac_sha256": sign_receipt(receipt)}
+        self._write_json(run_dir / "publish" / "upload_receipt.json", receipt)
+        return run_dir
+
+    def test_scan_finds_uploaded(self):
+        from rayvault.cron_verify_visibility import scan_uploaded_runs
+        self._create_uploaded_run("RUN_A")
+        self._create_uploaded_run("RUN_B")
+        runs = scan_uploaded_runs(self.runs_root)
+        self.assertEqual(len(runs), 2)
+
+    def test_scan_skips_verified(self):
+        from rayvault.cron_verify_visibility import scan_uploaded_runs
+        self._create_uploaded_run("RUN_A")
+        # Make RUN_B already verified
+        run_b = self._create_uploaded_run("RUN_B")
+        receipt = json.loads((run_b / "publish" / "upload_receipt.json").read_text())
+        receipt["status"] = "VERIFIED"
+        self._write_json(run_b / "publish" / "upload_receipt.json", receipt)
+        runs = scan_uploaded_runs(self.runs_root)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].name, "RUN_A")
+
+    def test_scan_empty_dir(self):
+        from rayvault.cron_verify_visibility import scan_uploaded_runs
+        runs = scan_uploaded_runs(self.runs_root)
+        self.assertEqual(len(runs), 0)
+
+    def test_batch_manual_verify(self):
+        from rayvault.cron_verify_visibility import verify_batch
+        self._create_uploaded_run("RUN_X")
+        summary = verify_batch(self.runs_root, manual=True)
+        self.assertEqual(summary["checked"], 1)
+        self.assertEqual(summary["verified"], 1)
+        # Receipt should now be VERIFIED
+        receipt = json.loads(
+            (self.runs_root / "RUN_X" / "publish" / "upload_receipt.json").read_text()
+        )
+        self.assertEqual(receipt["status"], "VERIFIED")
+
+    def test_batch_multiple_runs(self):
+        from rayvault.cron_verify_visibility import verify_batch
+        self._create_uploaded_run("RUN_1")
+        self._create_uploaded_run("RUN_2")
+        self._create_uploaded_run("RUN_3")
+        summary = verify_batch(self.runs_root, manual=True)
+        self.assertEqual(summary["total_uploaded"], 3)
+        self.assertEqual(summary["verified"], 3)
+
+    def test_cli_no_verify_cmd(self):
+        from rayvault.cron_verify_visibility import main
+        with patch.dict(os.environ, {"RAY_YT_VERIFY_CMD": ""}, clear=False):
+            rc = main(["--runs-root", str(self.runs_root)])
+        self.assertEqual(rc, 2)
+
+    def test_cli_manual_mode(self):
+        from rayvault.cron_verify_visibility import main
+        self._create_uploaded_run("RUN_CLI")
+        rc = main(["--runs-root", str(self.runs_root), "--manual"])
+        self.assertEqual(rc, 0)
+
+    def test_max_runs_limit(self):
+        from rayvault.cron_verify_visibility import verify_batch
+        for i in range(5):
+            self._create_uploaded_run(f"RUN_{i}")
+        summary = verify_batch(self.runs_root, manual=True, max_runs=2)
+        self.assertEqual(summary["checked"], 2)
+        self.assertEqual(summary["total_uploaded"], 5)
 
 
 if __name__ == "__main__":

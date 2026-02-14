@@ -311,7 +311,10 @@ def generate_render_config(
             "visual": visual,
         })
 
-    # Fidelity score
+    # Product truth telemetry
+    skipped_count = sum(
+        1 for p in product_visuals if p["visual"]["mode"] == "SKIP"
+    )
     total = max(1, len(product_visuals))
     fidelity_score = int(truth_count / total * 100)
     needs_manual_review = truth_count < min_truth_products
@@ -333,6 +336,7 @@ def generate_render_config(
         "products": {
             "expected": len(items),
             "truth_visuals_used": truth_count,
+            "skipped_count": skipped_count,
             "fidelity_score": fidelity_score,
             "min_truth_required": min_truth_products,
         },
@@ -352,6 +356,7 @@ def generate_render_config(
         render["render_config_sha1"] = sha1_file(config_path)
         render["products_fidelity_score"] = fidelity_score
         render["truth_visuals_used"] = truth_count
+        render["skipped_count"] = skipped_count
         render["min_truth_required"] = min_truth_products
         render["needs_manual_review"] = needs_manual_review
         render["generated_at_utc"] = utc_now_iso()

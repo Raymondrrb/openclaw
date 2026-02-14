@@ -101,7 +101,7 @@
   "manifest": {
     "_doc": "Schema for 00_manifest.json in state/runs/{run_id}/.",
     "schema_version": "1.0",
-    "status_enum": ["INCOMPLETE", "WAITING_ASSETS", "READY_FOR_RENDER", "BLOCKED", "PUBLISHED"],
+    "status_enum": ["INCOMPLETE", "WAITING_ASSETS", "READY_FOR_RENDER", "BLOCKED", "UPLOADED", "VERIFIED", "PUBLISHED"],
     "canonical_assets": ["01_script.txt", "02_audio.wav", "03_frame.png"],
     "metadata_file": "04_metadata.json"
   },
@@ -114,13 +114,17 @@
       "WAITING_ASSETS": "warning",
       "BLOCKED": "alert",
       "INCOMPLETE": "warning",
+      "UPLOADED": "pass",
+      "VERIFIED": "pass",
       "PUBLISHED": "pass"
     },
     "next_action": {
       "READY_FOR_RENDER": "Trigger lip-sync render",
       "WAITING_ASSETS": "Investigate missing assets",
       "BLOCKED": "Check visual_qc or identity",
-      "INCOMPLETE": "Check missing required files"
+      "INCOMPLETE": "Check missing required files",
+      "UPLOADED": "Verify visibility on YouTube",
+      "VERIFIED": "Publish or cleanup"
     }
   },
 

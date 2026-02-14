@@ -64,6 +64,8 @@ VALID_STATUSES = {
     "WAITING_ASSETS",
     "READY_FOR_RENDER",
     "BLOCKED",
+    "UPLOADED",
+    "VERIFIED",
     "PUBLISHED",
 }
 

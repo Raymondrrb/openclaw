@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""RayVault Claims Guardrail — anti-lie firewall for script claims.
+
+Checks if the script contains commercial claims not supported by Amazon
+product text (title, bullets, description). Prevents brand-damaging
+fabrications from reaching published videos.
+
+Golden rule: if script says it, Amazon page must say it too.
+
+Usage:
+    python3 -m rayvault.claims_guardrail --run-dir state/runs/RUN_2026_02_14_A
+
+Output:
+    - claims_guardrail.json in run_dir
+    - Updates 00_manifest.json with claims_validation block
+
+Exit codes:
+    0: PASS (no unsubstantiated claims)
+    1: runtime error
+    2: REVIEW_REQUIRED (violations found) or missing inputs
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+# ---------------------------------------------------------------------------
+# Trigger patterns (high-risk commercial claims)
+# ---------------------------------------------------------------------------
+
+TRIGGER_PATTERNS = [
+    r"\bwaterproof\b",
+    r"\bwater[- ]?resistant\b",
+    r"\blifetime warranty\b",
+    r"\bgarantia vital[ií]cia\b",
+    r"\b\d+\s*h(ours?)?\b",
+    r"\bbatter(y|ia)\b",
+    r"\bmedical\b",
+    r"\bclinically\b",
+    r"\bcertified\b",
+    r"\bcertificado\b",
+    r"\b100%\b",
+    r"\brisk[- ]?free\b",
+    r"\bsem risco\b",
+    r"\bbest\b",
+    r"\bmelhor\b",
+    r"\bnumber one\b",
+    r"\bfda\b",
+    r"\bpatented\b",
+    r"\bpatenteado\b",
+]
+
+# Claim category -> required evidence keywords in Amazon text
+CLAIM_EVIDENCE_RULES: List[Tuple[str, List[str]]] = [
+    ("waterproof", ["waterproof", "ipx", "water-resistant", "water resistant"]),
+    ("battery_life", ["battery", "bateria", "hours", "horas", "mah"]),
+    ("warranty", ["warranty", "garantia"]),
+    ("certification", ["certified", "certificado", "fda", "ce", "ul"]),
+    ("medical", ["medical", "clinical", "clinically"]),
+    ("patented", ["patented", "patent", "patenteado"]),
+]
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+
+def read_json(path: Path) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def normalize_text(s: str) -> str:
+    return re.sub(r"\s+", " ", s.lower()).strip()
+
+
+# ---------------------------------------------------------------------------
+# Product text extraction
+# ---------------------------------------------------------------------------
+
+
+def load_products(products_json: Path) -> List[Dict[str, Any]]:
+    data = read_json(products_json)
+    items = data.get("items", [])
+    return sorted(items, key=lambda x: int(x.get("rank", 99)))
+
+
+def collect_allowed_text(product: Dict[str, Any]) -> str:
+    """Build corpus of allowed text from Amazon product data."""
+    parts = []
+    for key in ("title", "description"):
+        val = product.get(key)
+        if val:
+            parts.append(str(val))
+    bullets = product.get("bullets") or product.get("bullet_points") or []
+    parts.extend(str(b) for b in bullets if b)
+    # Include claims_allowed if present
+    allowed = product.get("claims_allowed") or []
+    parts.extend(str(c) for c in allowed if c)
+    return normalize_text(" ".join(parts))
+
+
+# ---------------------------------------------------------------------------
+# Claim detection
+# ---------------------------------------------------------------------------
+
+
+def find_trigger_sentences(script: str) -> List[str]:
+    """Split script into sentences and return those matching trigger patterns."""
+    raw = re.split(r"(?<=[\.\!\?])\s+", script.strip())
+    hits = []
+    for sent in raw:
+        s = sent.lower()
+        if any(re.search(pat, s, flags=re.IGNORECASE) for pat in TRIGGER_PATTERNS):
+            hits.append(sent.strip())
+    return hits
+
+
+def check_evidence(
+    sentence: str, allowed_text: str
+) -> Tuple[bool, List[str]]:
+    """Check if a trigger sentence has supporting evidence in allowed text.
+
+    Returns (ok, missing_claims).
+    """
+    s = normalize_text(sentence)
+    missing = []
+    matched_any_rule = False
+
+    for claim_name, evidence_keywords in CLAIM_EVIDENCE_RULES:
+        # Check if this claim category is relevant to the sentence
+        if not any(kw in s for kw in evidence_keywords):
+            continue
+        matched_any_rule = True
+        # Check if evidence exists in allowed text
+        if not any(kw in allowed_text for kw in evidence_keywords):
+            missing.append(claim_name)
+
+    # Fallback: if no specific rule matched, do generic token overlap check
+    if not matched_any_rule:
+        tokens = [t for t in re.findall(r"[a-zA-Z\u00C0-\u024F0-9]{4,}", s)][:12]
+        if tokens and not any(t in allowed_text for t in tokens):
+            missing.append("unsubstantiated_sentence")
+
+    return (len(missing) == 0), missing
+
+
+# ---------------------------------------------------------------------------
+# Core guardrail
+# ---------------------------------------------------------------------------
+
+
+def guardrail(run_dir: Path) -> Dict[str, Any]:
+    """Run claims guardrail on a run directory.
+
+    Returns result dict with status PASS or REVIEW_REQUIRED.
+    """
+    script_path = run_dir / "01_script.txt"
+    products_path = run_dir / "products" / "products.json"
+
+    if not script_path.exists():
+        return {
+            "status": "ERROR",
+            "code": "MISSING_SCRIPT",
+            "violations": [],
+            "trigger_sentences_count": 0,
+            "products_count": 0,
+        }
+
+    if not products_path.exists():
+        return {
+            "status": "ERROR",
+            "code": "MISSING_PRODUCTS_JSON",
+            "violations": [],
+            "trigger_sentences_count": 0,
+            "products_count": 0,
+        }
+
+    script = script_path.read_text(encoding="utf-8")
+    products = load_products(products_path)
+
+    # Build union of all allowed text across products
+    allowed_union = " ".join(
+        collect_allowed_text(p) for p in products
+    )
+
+    trigger_sents = find_trigger_sentences(script)
+    violations = []
+
+    for sent in trigger_sents:
+        ok, missing = check_evidence(sent, allowed_union)
+        if not ok:
+            violations.append({
+                "sentence": sent[:200],
+                "missing_evidence": missing,
+            })
+
+    status = "PASS" if not violations else "REVIEW_REQUIRED"
+
+    return {
+        "status": status,
+        "violations": violations,
+        "trigger_sentences_count": len(trigger_sents),
+        "products_count": len(products),
+        "checked_at_utc": utc_now_iso(),
+    }
+
+
+def update_manifest(run_dir: Path, result: Dict[str, Any]) -> None:
+    """Write claims_validation block to manifest."""
+    mpath = run_dir / "00_manifest.json"
+    if not mpath.exists():
+        return
+    m = read_json(mpath)
+    m["claims_validation"] = {
+        "status": result.get("status", "ERROR"),
+        "violations_count": len(result.get("violations", [])),
+        "violations": result.get("violations", []),
+        "at_utc": result.get("checked_at_utc", utc_now_iso()),
+    }
+    atomic_write_json(mpath, m)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def main(argv: Optional[list] = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="RayVault Claims Guardrail — anti-lie firewall",
+    )
+    ap.add_argument("--run-dir", required=True)
+    args = ap.parse_args(argv)
+
+    run_dir = Path(args.run_dir).expanduser().resolve()
+    if not run_dir.exists():
+        print(f"Run dir not found: {run_dir}", file=sys.stderr)
+        return 2
+
+    result = guardrail(run_dir)
+    # Write result file
+    atomic_write_json(run_dir / "claims_guardrail.json", result)
+    # Update manifest
+    update_manifest(run_dir, result)
+
+    status = result["status"]
+    n_violations = len(result.get("violations", []))
+    n_triggers = result.get("trigger_sentences_count", 0)
+    print(
+        f"claims_guardrail: {status} | triggers={n_triggers} "
+        f"| violations={n_violations}"
+    )
+    if n_violations > 0:
+        for v in result["violations"][:5]:
+            print(f"  - {v['sentence'][:80]}... [{', '.join(v['missing_evidence'])}]")
+
+    return 0 if status == "PASS" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

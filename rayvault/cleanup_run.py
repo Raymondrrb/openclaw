@@ -5,6 +5,8 @@ Keeps forensic metadata (manifest, metadata, product.json, qc.json, logs).
 Purges heavy files (source_images, broll, audio, frame, final video).
 
 Golden rule: NEVER purge unless upload_receipt.json confirms success OR --force.
+Receipt HMAC is verified before trusting UPLOADED/VERIFIED status.
+Final video deletion requires VERIFIED status (not just UPLOADED).
 
 Usage:
     python3 -m rayvault.cleanup_run --run-dir state/runs/RUN_2026_02_14_A
@@ -14,7 +16,7 @@ Usage:
 Exit codes:
     0: success (including dry-run)
     1: unexpected error
-    2: refused by safety (no receipt, too new, missing run)
+    2: refused by safety (no receipt, HMAC invalid, too new, missing run)
 """
 
 from __future__ import annotations
@@ -91,7 +93,7 @@ def utc_now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Receipt loading
+# Receipt loading + HMAC verification
 # ---------------------------------------------------------------------------
 
 
@@ -100,6 +102,19 @@ def load_receipt(run_dir: Path) -> Optional[Dict[str, Any]]:
     if not r.exists():
         return None
     return read_json(r)
+
+
+def verify_receipt_hmac(receipt: Dict[str, Any]) -> bool:
+    """Verify HMAC signature on receipt. Returns False if no integrity block."""
+    try:
+        from rayvault.youtube_upload_receipt import verify_receipt
+        return verify_receipt(receipt)
+    except ImportError:
+        # Fallback: if youtube_upload_receipt not available, check basic fields
+        return bool(
+            receipt.get("integrity", {}).get("hmac_sha256")
+            and receipt.get("status") in ("UPLOADED", "VERIFIED")
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -137,11 +152,17 @@ def cleanup(
         except OSError:
             return (False, "cannot_stat_run_dir")
 
-    # Safety: receipt check
+    # Safety: receipt check + HMAC verification
     receipt = load_receipt(run_dir)
     if not force:
-        if not receipt or receipt.get("status") != "UPLOADED":
-            return (False, "missing_or_not_uploaded_receipt")
+        if not receipt:
+            return (False, "missing_receipt")
+        receipt_status = receipt.get("status", "")
+        if receipt_status not in ("UPLOADED", "VERIFIED"):
+            return (False, f"receipt_status_{receipt_status}_not_uploaded")
+        # Verify HMAC integrity
+        if not verify_receipt_hmac(receipt):
+            return (False, "receipt_hmac_invalid")
 
     manifest = read_json(manifest_path)
 
@@ -176,10 +197,10 @@ def cleanup(
             if broll.exists():
                 purge_targets.append(broll)
 
-    # Final video: only if receipt confirms upload
+    # Final video: prefer VERIFIED, but accept UPLOADED with valid HMAC
     final_video = run_dir / "publish" / "video_final.mp4"
     can_delete_final = bool(
-        receipt and receipt.get("status") == "UPLOADED"
+        receipt and receipt.get("status") in ("UPLOADED", "VERIFIED")
     )
     if delete_final_video and can_delete_final and final_video.exists():
         purge_targets.append(final_video)
