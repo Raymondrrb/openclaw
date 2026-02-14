@@ -4,31 +4,39 @@ Validates LLM responses against a simple schema specification.
 When validation fails, generates a targeted repair prompt instead of
 regenerating from scratch (saving ~60-80% tokens on retries).
 
+Two-tier validation:
+  1. Schema validation — structural correctness (type, required, length)
+  2. Quality gates — semantic correctness (price > 0, confidence >= 0.4)
+
+Repair strategy:
+  - Schema errors → repair prompt (max 2 attempts)
+  - Quality gate failures → needs_human (no repair — avoids infinite loop)
+  - After MAX_REPAIR_ATTEMPTS → spool + llm_output_invalid event
+
 Stdlib only — no jsonschema dependency (simple field-level validation).
 
 Usage:
     from tools.lib.json_schema_guard import validate_output, build_repair_prompt
+    from tools.lib.json_schema_guard import validate_and_gate, LLMOutputResult
 
-    schema = {
-        "type": "object",
-        "required": ["hook", "cta", "facts"],
-        "properties": {
-            "hook": {"type": "string", "maxLength": 200},
-            "cta": {"type": "string"},
-            "facts": {"type": "array", "minItems": 3},
-        },
-    }
-
+    # Simple validation
     errors = validate_output(llm_result, schema)
     if errors:
         repair_prompt = build_repair_prompt(llm_result, schema, errors)
-        # Send repair_prompt to LLM (much cheaper than full regeneration)
+
+    # Full pipeline with quality gates
+    result = validate_and_gate(llm_result, schema, quality_gate_fn)
+    if result.needs_repair:
+        prompt = result.repair_prompt
+    elif result.needs_human:
+        spool_for_review(result)
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -269,3 +277,122 @@ def parse_llm_json(
         return obj, errors
 
     return obj, []
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+MAX_REPAIR_ATTEMPTS = 2
+
+
+# ---------------------------------------------------------------------------
+# Validation result (two-tier: schema + quality gate)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LLMOutputResult:
+    """Result of two-tier validation: schema check + quality gate.
+
+    Possible states:
+    - valid=True: passed both schema and quality gate
+    - needs_repair=True: schema failed, repair prompt ready (attempt < MAX)
+    - needs_human=True: quality gate failed OR repairs exhausted
+    """
+    valid: bool = False
+    parsed: Optional[Dict[str, Any]] = None
+    schema_errors: List[SchemaValidationError] = field(default_factory=list)
+    quality_issues: List[str] = field(default_factory=list)
+    needs_repair: bool = False
+    needs_human: bool = False
+    repair_prompt: str = ""
+    attempt: int = 0
+    reason: str = ""
+
+    @property
+    def spool_payload(self) -> Dict[str, Any]:
+        """Payload for spool/run_event when validation fails permanently."""
+        return {
+            "event_type": "llm_output_invalid",
+            "severity": "WARN",
+            "reason": self.reason,
+            "attempt": self.attempt,
+            "schema_errors": [str(e) for e in self.schema_errors],
+            "quality_issues": self.quality_issues,
+        }
+
+
+def validate_and_gate(
+    raw_output: str,
+    schema: Dict[str, Any],
+    quality_gate: Optional[Callable[[Dict[str, Any]], List[str]]] = None,
+    *,
+    attempt: int = 1,
+) -> LLMOutputResult:
+    """Two-tier validation: schema check → quality gate.
+
+    Strategy:
+    1. Parse JSON from LLM output (handles markdown, preamble).
+    2. Validate against schema.
+       - If schema fails AND attempt <= MAX_REPAIR_ATTEMPTS: generate repair prompt.
+       - If schema fails AND attempt > MAX_REPAIR_ATTEMPTS: needs_human + spool.
+    3. If schema passes, run quality gate (if provided).
+       - Quality gate failures → needs_human immediately (no repair — avoids loop).
+    4. If both pass → valid.
+
+    Args:
+        raw_output: Raw LLM response string.
+        schema: JSON schema to validate against.
+        quality_gate: Optional function(dict) -> list[str] for semantic checks.
+        attempt: Current attempt number (1-indexed).
+
+    Returns:
+        LLMOutputResult with state and repair prompt if applicable.
+    """
+    result = LLMOutputResult(attempt=attempt)
+
+    # Step 1: Parse
+    parsed, parse_errors = parse_llm_json(raw_output, schema=None)
+    if parsed is None:
+        if attempt <= MAX_REPAIR_ATTEMPTS:
+            result.needs_repair = True
+            result.schema_errors = parse_errors
+            result.repair_prompt = build_repair_prompt(
+                raw_output, schema, parse_errors,
+            )
+            result.reason = "json_parse_failed"
+        else:
+            result.needs_human = True
+            result.schema_errors = parse_errors
+            result.reason = f"json_parse_failed_after_{attempt}_attempts"
+        return result
+
+    result.parsed = parsed
+
+    # Step 2: Schema validation
+    schema_errors = validate_output(parsed, schema)
+    if schema_errors:
+        result.schema_errors = schema_errors
+        if attempt <= MAX_REPAIR_ATTEMPTS:
+            result.needs_repair = True
+            result.repair_prompt = build_repair_prompt(
+                parsed, schema, schema_errors,
+            )
+            result.reason = "schema_validation_failed"
+        else:
+            result.needs_human = True
+            result.reason = f"schema_failed_after_{attempt}_attempts"
+        return result
+
+    # Step 3: Quality gate (if provided)
+    if quality_gate:
+        quality_issues = quality_gate(parsed)
+        if quality_issues:
+            result.quality_issues = quality_issues
+            result.needs_human = True
+            result.reason = "quality_gate_failed"
+            return result
+
+    # Step 4: Both passed
+    result.valid = True
+    return result

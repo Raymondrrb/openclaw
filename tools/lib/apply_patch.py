@@ -4,19 +4,26 @@ Supports a subset of JSON Patch operations (replace, add, remove)
 for applying LLM-generated diffs to existing objects. This is far more
 robust than text-based "line X" diffing.
 
+Includes ScriptPatchPolicy for outline/script patching with:
+- Wildcard path matching ({i} placeholders for array indices)
+- Forbidden path protection (asin, slot, product_key, versions)
+- Post-patch constraint validation (hook chars, point words)
+- Patch audit event generation
+
 Stdlib only — no external deps.
 
 Usage:
     from tools.lib.apply_patch import apply_patch, PatchError
+    from tools.lib.apply_patch import apply_script_patch, ScriptPatchPolicy
 
-    base = {"script": {"hook": "old hook", "cta": "Buy now"}, "facts": {"price": 99}}
-    ops = [
-        {"op": "replace", "path": "/script/hook", "value": "This changed everything"},
-        {"op": "replace", "path": "/facts/price", "value": 199},
-    ]
+    # Basic patching
+    base = {"script": {"hook": "old hook"}, "facts": {"price": 99}}
+    ops = [{"op": "replace", "path": "/script/hook", "value": "new"}]
     result = apply_patch(base, ops)
-    # result["script"]["hook"] == "This changed everything"
-    # result["facts"]["price"] == 199
+
+    # Script-aware patching with guardrails
+    outline = {"outline": {"hook": "old", "products": [...], "cta": "Buy now"}}
+    result = apply_script_patch(outline, patch_ops)
 
 LLM integration:
     The LLM returns {"status":"ok","patch_ops":[...]} in patch mode.
@@ -27,7 +34,10 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import Any, Dict, List
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 
 class PatchError(ValueError):
@@ -267,6 +277,256 @@ def coerce_rating(text: str) -> float | None:
     if m:
         return float(m.group(0))
     return None
+
+
+# ---------------------------------------------------------------------------
+# Script Patch Policy — wildcard path matching + outline constraints
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ScriptPatchPolicy:
+    """Policy for patching script outlines with guardrails.
+
+    Uses wildcard path patterns ({i}, {j} for array indices) instead of
+    simple prefix matching, providing fine-grained control over what
+    the LLM is allowed to modify.
+    """
+    allowed_ops: tuple[str, ...] = ("replace",)
+    max_ops: int = 5
+
+    # Paths with {i}/{j} wildcards for array indices
+    allowed_paths: tuple[str, ...] = (
+        "/outline/hook",
+        "/outline/products/{i}/angle",
+        "/outline/products/{i}/points",
+        "/outline/products/{i}/points/{j}",
+        "/outline/products/{i}/verdict",
+        "/outline/cta",
+    )
+
+    # Paths that must NEVER be modified (even if allowed_paths has a bug)
+    forbidden_paths: tuple[str, ...] = (
+        "/outline/products/{i}/asin",
+        "/outline/products/{i}/slot",
+        "/outline/products/{i}/product_key",
+        "/contract_version",
+        "/outline_version",
+    )
+
+    # Post-patch size limits
+    max_hook_chars: int = 160
+    max_angle_chars: int = 80
+    max_point_words: int = 10
+    max_points_per_product: int = 5
+    max_verdict_chars: int = 60
+    max_cta_chars: int = 120
+
+
+def _wildcard_match(pattern: str, path: str) -> bool:
+    """Match a path against a pattern with {i}/{j} wildcards for numeric indices."""
+    p_parts = pattern.strip("/").split("/")
+    a_parts = path.strip("/").split("/")
+    if len(p_parts) != len(a_parts):
+        return False
+    for pp, ap in zip(p_parts, a_parts):
+        if pp in ("{i}", "{j}"):
+            if not ap.isdigit():
+                return False
+        elif pp != ap:
+            return False
+    return True
+
+
+def _is_script_path_allowed(path: str, policy: ScriptPatchPolicy) -> bool:
+    """Check if path is in the allowed list (with wildcard matching)."""
+    return any(_wildcard_match(pat, path) for pat in policy.allowed_paths)
+
+
+def _is_script_path_forbidden(path: str, policy: ScriptPatchPolicy) -> bool:
+    """Check if path is in the forbidden list (with wildcard matching)."""
+    return any(_wildcard_match(pat, path) for pat in policy.forbidden_paths)
+
+
+def validate_script_patch_ops(
+    ops: List[Dict[str, Any]],
+    policy: ScriptPatchPolicy,
+) -> None:
+    """Validate patch operations against ScriptPatchPolicy.
+
+    Raises PatchError if any op violates the policy.
+    Checks: allowed ops, max ops, forbidden paths, allowed paths.
+    """
+    if not isinstance(ops, list) or not ops:
+        raise PatchError("Patch must be a non-empty list of operations")
+
+    if len(ops) > policy.max_ops:
+        raise PatchError(f"Too many ops: {len(ops)} > {policy.max_ops}")
+
+    for i, op in enumerate(ops):
+        if not isinstance(op, dict):
+            raise PatchError(f"op[{i}]: must be an object")
+
+        operation = op.get("op", "")
+        if operation not in policy.allowed_ops:
+            raise PatchError(f"op[{i}]: operation '{operation}' not allowed")
+
+        path = op.get("path", "")
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise PatchError(f"op[{i}]: invalid path")
+
+        if _is_script_path_forbidden(path, policy):
+            raise PatchError(f"op[{i}]: forbidden path '{path}'")
+
+        if not _is_script_path_allowed(path, policy):
+            raise PatchError(f"op[{i}]: path '{path}' not in allowlist")
+
+        if operation == "replace" and "value" not in op:
+            raise PatchError(f"op[{i}]: 'replace' requires 'value'")
+
+
+def validate_outline_constraints(
+    doc: Dict[str, Any],
+    policy: ScriptPatchPolicy,
+) -> None:
+    """Validate outline field sizes after patch application.
+
+    Raises PatchError if any field exceeds size limits.
+    """
+    outline = doc.get("outline", {})
+    if not isinstance(outline, dict):
+        return
+
+    # Hook length
+    hook = outline.get("hook", "")
+    if isinstance(hook, str) and len(hook) > policy.max_hook_chars:
+        raise PatchError(
+            f"hook too long after patch: {len(hook)} chars "
+            f"(max {policy.max_hook_chars})"
+        )
+
+    # CTA length
+    cta = outline.get("cta", "")
+    if isinstance(cta, str) and len(cta) > policy.max_cta_chars:
+        raise PatchError(
+            f"cta too long after patch: {len(cta)} chars "
+            f"(max {policy.max_cta_chars})"
+        )
+
+    # Products
+    products = outline.get("products", [])
+    if not isinstance(products, list):
+        return
+
+    for i, p in enumerate(products):
+        if not isinstance(p, dict):
+            continue
+
+        # Angle length
+        angle = p.get("angle", "")
+        if isinstance(angle, str) and len(angle) > policy.max_angle_chars:
+            raise PatchError(
+                f"products[{i}].angle too long: {len(angle)} chars "
+                f"(max {policy.max_angle_chars})"
+            )
+
+        # Verdict length
+        verdict = p.get("verdict", "")
+        if isinstance(verdict, str) and len(verdict) > policy.max_verdict_chars:
+            raise PatchError(
+                f"products[{i}].verdict too long: {len(verdict)} chars "
+                f"(max {policy.max_verdict_chars})"
+            )
+
+        # Points
+        points = p.get("points", [])
+        if isinstance(points, list):
+            if len(points) > policy.max_points_per_product:
+                raise PatchError(
+                    f"products[{i}]: too many points "
+                    f"({len(points)} > {policy.max_points_per_product})"
+                )
+            for j, pt in enumerate(points):
+                if isinstance(pt, str):
+                    words = len(pt.split())
+                    if words > policy.max_point_words:
+                        raise PatchError(
+                            f"products[{i}].points[{j}]: "
+                            f"{words} words (max {policy.max_point_words})"
+                        )
+
+
+def apply_script_patch(
+    base_doc: Dict[str, Any],
+    patch_ops: List[Dict[str, Any]],
+    policy: Optional[ScriptPatchPolicy] = None,
+) -> Dict[str, Any]:
+    """Apply a validated script patch with pre- and post-validation.
+
+    1. Validate ops against policy (allowed ops, paths, forbidden paths)
+    2. Apply patch (deep copy, no mutation)
+    3. Validate outline constraints post-patch (field sizes)
+
+    Args:
+        base_doc: The current outline/script document.
+        patch_ops: List of JSON Patch operations from LLM.
+        policy: ScriptPatchPolicy (uses defaults if None).
+
+    Returns:
+        New document with patches applied.
+
+    Raises:
+        PatchError if validation fails at any step.
+    """
+    policy = policy or ScriptPatchPolicy()
+
+    # Pre-validation
+    validate_script_patch_ops(patch_ops, policy)
+
+    # Apply
+    result = copy.deepcopy(base_doc)
+    for op in patch_ops:
+        _apply_one(result, op)
+
+    # Post-validation
+    validate_outline_constraints(result, policy)
+
+    return result
+
+
+def make_patch_audit(
+    *,
+    run_id: str,
+    patch_ops: List[Dict[str, Any]],
+    scope: str,
+    reason: str,
+    contract_version: str,
+) -> Dict[str, Any]:
+    """Build a run_event payload for an applied script patch.
+
+    Args:
+        run_id: Current run UUID.
+        patch_ops: The operations that were applied.
+        scope: What was patched (e.g. "hook", "best_value_block").
+        reason: Why (e.g. "too generic", "more punchy").
+        contract_version: e.g. "script_writer/v0.1.0".
+
+    Returns:
+        Dict ready for insert_event / spool_event.
+    """
+    return {
+        "event_id": str(uuid.uuid4()),
+        "event_type": "script_patch_applied",
+        "severity": "INFO",
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "payload": {
+            "run_id": run_id,
+            "scope": scope,
+            "reason": reason,
+            "contract_version": contract_version,
+            "ops_count": len(patch_ops),
+            "patch_ops": patch_ops,
+        },
+    }
 
 
 def coerce_reviews(text: str) -> int | None:

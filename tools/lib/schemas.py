@@ -1,4 +1,4 @@
-"""Schema definitions for LLM contracts — Amazon extractor + Ranker.
+"""Schema definitions for LLM contracts — Amazon extractor + Ranker + Script Writer.
 
 Single source of truth for output schemas used by ContractSpec.
 Each schema is JSON Schema draft-07 compatible (simple subset).
@@ -7,6 +7,7 @@ Stdlib only — no external deps.
 
 Usage:
     from tools.lib.schemas import AMAZON_EXTRACT_SCHEMA, RANKER_SCHEMA
+    from tools.lib.schemas import SCRIPT_OUTLINE_SCHEMA, SCRIPT_OUTLINE_CONTRACT
     from tools.lib.schemas import AMAZON_EXTRACT_CONTRACT, RANKER_CONTRACT
 """
 
@@ -307,3 +308,266 @@ def prefilter_candidates(
     passed = passed[:max_candidates]
 
     return passed, rejected
+
+
+# ---------------------------------------------------------------------------
+# Script Writer — Outline schema (Layer 1)
+# ---------------------------------------------------------------------------
+
+SCRIPT_OUTLINE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "status", "contract_version", "outline_version", "outline",
+    ],
+    "properties": {
+        "status": {"type": "string", "enum": ["ok", "needs_human"]},
+        "contract_version": {"type": "string", "minLength": 1},
+        "outline_version": {"type": "integer"},
+
+        "outline": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["hook", "products", "cta"],
+            "properties": {
+                "hook": {"type": "string", "minLength": 10, "maxLength": 160},
+
+                "products": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "product_key", "asin", "slot",
+                            "angle", "points", "verdict",
+                        ],
+                        "properties": {
+                            "product_key": {
+                                "type": "string",
+                                "minLength": 10,
+                                "maxLength": 40,
+                            },
+                            "asin": {
+                                "type": "string",
+                                "minLength": 8,
+                                "maxLength": 16,
+                            },
+                            "slot": {
+                                "type": "string",
+                                "enum": [
+                                    "best_overall",
+                                    "best_value",
+                                    "best_premium",
+                                ],
+                            },
+                            "angle": {
+                                "type": "string",
+                                "minLength": 5,
+                                "maxLength": 80,
+                            },
+                            "points": {
+                                "type": "array",
+                                "minItems": 3,
+                                "maxItems": 5,
+                                "items": {
+                                    "type": "string",
+                                    "maxLength": 60,
+                                },
+                            },
+                            "verdict": {
+                                "type": "string",
+                                "minLength": 5,
+                                "maxLength": 60,
+                            },
+                        },
+                    },
+                },
+
+                "cta": {"type": "string", "minLength": 10, "maxLength": 120},
+            },
+        },
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Script Writer — Patch output schema (for mode="patch")
+# ---------------------------------------------------------------------------
+
+SCRIPT_PATCH_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["status", "patch_ops"],
+    "properties": {
+        "status": {"type": "string", "enum": ["ok", "needs_human"]},
+        "patch_ops": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "required": ["op", "path", "value"],
+                "properties": {
+                    "op": {"type": "string", "enum": ["replace"]},
+                    "path": {"type": "string", "minLength": 2},
+                    "value": {},
+                },
+            },
+        },
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Script Writer — ContractSpec
+# ---------------------------------------------------------------------------
+
+SCRIPT_OUTLINE_CONTRACT = ContractSpec(
+    name="script_writer",
+    version="v0.1.0",
+    cache_policy=CACHE_POLICIES["daily"],
+    schema=SCRIPT_OUTLINE_SCHEMA,
+    economy_rules=[
+        *DEFAULT_ECONOMY_RULES,
+        "Include contract_version and outline_version in output.",
+        "product_key = '{asin}:{slot}' — never invent, copy from input.",
+        "angle: max 80 chars. points: max 10 words each. verdict: max 60 chars.",
+        "Each slot has a persona: best_overall=authoritative, best_value=practical, best_premium=aspirational.",
+        "Never invent product facts not present in the input.",
+        "If mode=patch, return ONLY patch_ops (not a full outline).",
+    ],
+)
+
+SCRIPT_PATCH_CONTRACT = ContractSpec(
+    name="script_writer",
+    version="v0.1.0",
+    cache_policy=CACHE_POLICIES["none"],  # patches are cheap, no cache
+    schema=SCRIPT_PATCH_SCHEMA,
+    economy_rules=[
+        "Return ONLY valid JSON with patch_ops array.",
+        "Allowed op: replace only. Max 5 ops.",
+        "Allowed paths: /outline/hook, /outline/products/{i}/angle, "
+        "/outline/products/{i}/points, /outline/products/{i}/verdict, /outline/cta.",
+        "FORBIDDEN: /outline/products/{i}/asin, /outline/products/{i}/slot, "
+        "/outline/products/{i}/product_key, /contract_version, /outline_version.",
+    ],
+)
+
+
+# ---------------------------------------------------------------------------
+# Quality gates — post-schema semantic validation
+# ---------------------------------------------------------------------------
+
+def quality_gate_amazon(output: dict) -> list[str]:
+    """Quality gate for Amazon extractor output.
+
+    Runs AFTER schema validation passes. Checks semantic correctness
+    that schema alone can't enforce.
+
+    Returns list of issue strings (empty = passed).
+    If issues found: mark needs_human, do NOT attempt repair (avoids loop).
+    """
+    issues = []
+    facts = output.get("facts", {})
+
+    # Price must be positive
+    price = facts.get("price", {})
+    if isinstance(price, dict):
+        amount = price.get("amount", 0)
+        if isinstance(amount, (int, float)) and amount <= 0:
+            issues.append("facts.price.amount must be > 0")
+
+    # Title must not be empty/whitespace
+    title = facts.get("title", "")
+    if isinstance(title, str) and not title.strip():
+        issues.append("facts.title is empty")
+
+    # Rating in valid range
+    rating = facts.get("rating", 0)
+    if isinstance(rating, (int, float)) and (rating < 0 or rating > 5):
+        issues.append(f"facts.rating out of range: {rating}")
+
+    # Reviews must be non-negative
+    reviews = facts.get("reviews", 0)
+    if isinstance(reviews, int) and reviews < 0:
+        issues.append(f"facts.reviews negative: {reviews}")
+
+    # Confidence in valid range
+    signals = output.get("signals", {})
+    conf = signals.get("confidence", 0)
+    if isinstance(conf, (int, float)) and (conf < 0 or conf > 1):
+        issues.append(f"signals.confidence out of range: {conf}")
+    elif isinstance(conf, (int, float)) and conf < 0.4:
+        issues.append(f"signals.confidence too low: {conf}")
+
+    return issues
+
+
+def quality_gate_outline(output: dict) -> list[str]:
+    """Quality gate for script outline output.
+
+    Checks:
+    - product_key format matches {asin}:{slot}
+    - No duplicate product_keys
+    - No duplicate slots
+    - Points word count within limits
+    - Hook and CTA not generic placeholders
+    """
+    issues = []
+    outline = output.get("outline", {})
+
+    # Hook quality
+    hook = outline.get("hook", "")
+    if isinstance(hook, str):
+        generic_hooks = {"check out these products", "here are the top picks",
+                         "hello everyone", "welcome back"}
+        if hook.lower().strip().rstrip(".!") in generic_hooks:
+            issues.append("outline.hook is too generic")
+
+    products = outline.get("products", [])
+    if not isinstance(products, list):
+        return issues
+
+    seen_keys = set()
+    seen_slots = set()
+
+    for i, p in enumerate(products):
+        if not isinstance(p, dict):
+            continue
+
+        # product_key format
+        pk = p.get("product_key", "")
+        asin = p.get("asin", "")
+        slot = p.get("slot", "")
+        expected_key = f"{asin}:{slot}"
+        if pk and asin and slot and pk != expected_key:
+            issues.append(
+                f"products[{i}].product_key mismatch: "
+                f"got '{pk}', expected '{expected_key}'"
+            )
+
+        # Duplicate product_key
+        if pk in seen_keys:
+            issues.append(f"products[{i}].product_key duplicate: '{pk}'")
+        seen_keys.add(pk)
+
+        # Duplicate slot
+        if slot in seen_slots:
+            issues.append(f"products[{i}].slot duplicate: '{slot}'")
+        seen_slots.add(slot)
+
+        # Points word count
+        points = p.get("points", [])
+        if isinstance(points, list):
+            for j, pt in enumerate(points):
+                if isinstance(pt, str):
+                    word_count = len(pt.split())
+                    if word_count > 10:
+                        issues.append(
+                            f"products[{i}].points[{j}] too many words: "
+                            f"{word_count} (max 10)"
+                        )
+
+    return issues

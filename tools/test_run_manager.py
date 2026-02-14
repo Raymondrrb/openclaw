@@ -3659,5 +3659,502 @@ class TestExecuteStageWiring(unittest.TestCase):
         self.assertTrue(result)
 
 
+# ==========================================================================
+# Script Outline schema tests
+# ==========================================================================
+
+class TestScriptOutlineSchema(unittest.TestCase):
+    """Tests for SCRIPT_OUTLINE_SCHEMA validation."""
+
+    def _make_valid_outline(self):
+        return {
+            "status": "ok",
+            "contract_version": "script_writer/v0.1.0",
+            "outline_version": 1,
+            "outline": {
+                "hook": "Stop wasting money—these are the 3 picks that matter.",
+                "products": [
+                    {
+                        "product_key": "B0EXAMPLE1:best_overall",
+                        "asin": "B0EXAMPLE1",
+                        "slot": "best_overall",
+                        "angle": "The all-rounder that beats everything",
+                        "points": ["ANC quality", "Battery 30h", "USB-C fast charge"],
+                        "verdict": "The one to beat.",
+                    },
+                    {
+                        "product_key": "B0EXAMPLE2:best_value",
+                        "asin": "B0EXAMPLE2",
+                        "slot": "best_value",
+                        "angle": "80% of the best at half the price",
+                        "points": ["Great sound", "Comfortable fit", "IPX5 water"],
+                        "verdict": "Best bang for your buck.",
+                    },
+                    {
+                        "product_key": "B0EXAMPLE3:best_premium",
+                        "asin": "B0EXAMPLE3",
+                        "slot": "best_premium",
+                        "angle": "When only the best will do",
+                        "points": ["LDAC codec", "Premium build", "Spatial audio"],
+                        "verdict": "Pure audio bliss.",
+                    },
+                ],
+                "cta": "Links below—grab your pick before they sell out.",
+            },
+        }
+
+    def test_valid_outline_passes(self):
+        """Valid outline passes schema validation."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import SCRIPT_OUTLINE_SCHEMA
+        errors = validate_output(self._make_valid_outline(), SCRIPT_OUTLINE_SCHEMA)
+        self.assertEqual(errors, [])
+
+    def test_missing_contract_version(self):
+        """Missing contract_version detected."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import SCRIPT_OUTLINE_SCHEMA
+        doc = self._make_valid_outline()
+        del doc["contract_version"]
+        errors = validate_output(doc, SCRIPT_OUTLINE_SCHEMA)
+        self.assertTrue(any("contract_version" in str(e) for e in errors))
+
+    def test_hook_too_long(self):
+        """Hook exceeding 160 chars detected."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import SCRIPT_OUTLINE_SCHEMA
+        doc = self._make_valid_outline()
+        doc["outline"]["hook"] = "x" * 200
+        errors = validate_output(doc, SCRIPT_OUTLINE_SCHEMA)
+        self.assertTrue(any("too long" in e.message for e in errors))
+
+    def test_product_key_format_checked_by_quality_gate(self):
+        """product_key mismatch caught by quality gate."""
+        from lib.schemas import quality_gate_outline
+        doc = self._make_valid_outline()
+        doc["outline"]["products"][0]["product_key"] = "WRONG_KEY"
+        issues = quality_gate_outline(doc)
+        self.assertTrue(any("product_key mismatch" in i for i in issues))
+
+    def test_duplicate_slot_caught_by_quality_gate(self):
+        """Duplicate slot caught by quality gate."""
+        from lib.schemas import quality_gate_outline
+        doc = self._make_valid_outline()
+        doc["outline"]["products"][1]["slot"] = "best_overall"
+        doc["outline"]["products"][1]["product_key"] = "B0EXAMPLE2:best_overall"
+        issues = quality_gate_outline(doc)
+        self.assertTrue(any("duplicate" in i.lower() for i in issues))
+
+    def test_point_word_count_quality_gate(self):
+        """Points with too many words caught by quality gate."""
+        from lib.schemas import quality_gate_outline
+        doc = self._make_valid_outline()
+        doc["outline"]["products"][0]["points"][0] = (
+            "this is a point with way too many words in it exceeding the limit"
+        )
+        issues = quality_gate_outline(doc)
+        self.assertTrue(any("too many words" in i for i in issues))
+
+    def test_generic_hook_quality_gate(self):
+        """Generic placeholder hook caught by quality gate."""
+        from lib.schemas import quality_gate_outline
+        doc = self._make_valid_outline()
+        doc["outline"]["hook"] = "Check out these products"
+        issues = quality_gate_outline(doc)
+        self.assertTrue(any("generic" in i.lower() for i in issues))
+
+
+# ==========================================================================
+# Quality gate Amazon tests
+# ==========================================================================
+
+class TestQualityGateAmazon(unittest.TestCase):
+    """Tests for quality_gate_amazon — semantic validation."""
+
+    def test_valid_output_passes(self):
+        """Valid Amazon output passes quality gate."""
+        from lib.schemas import quality_gate_amazon
+        output = {
+            "facts": {
+                "title": "Test Product",
+                "price": {"amount": 49.99, "currency": "USD"},
+                "rating": 4.5,
+                "reviews": 1234,
+            },
+            "signals": {"confidence": 0.95},
+        }
+        self.assertEqual(quality_gate_amazon(output), [])
+
+    def test_zero_price_fails(self):
+        """Price amount of 0 fails quality gate."""
+        from lib.schemas import quality_gate_amazon
+        output = {
+            "facts": {"price": {"amount": 0, "currency": "USD"}, "title": "X", "rating": 4.0, "reviews": 100},
+            "signals": {"confidence": 0.9},
+        }
+        issues = quality_gate_amazon(output)
+        self.assertTrue(any("price" in i for i in issues))
+
+    def test_empty_title_fails(self):
+        """Empty title fails quality gate."""
+        from lib.schemas import quality_gate_amazon
+        output = {
+            "facts": {"title": "   ", "price": {"amount": 50}, "rating": 4.0, "reviews": 100},
+            "signals": {"confidence": 0.9},
+        }
+        issues = quality_gate_amazon(output)
+        self.assertTrue(any("title" in i for i in issues))
+
+    def test_rating_out_of_range_fails(self):
+        """Rating > 5 fails quality gate."""
+        from lib.schemas import quality_gate_amazon
+        output = {
+            "facts": {"title": "X", "price": {"amount": 50}, "rating": 7.0, "reviews": 100},
+            "signals": {"confidence": 0.9},
+        }
+        issues = quality_gate_amazon(output)
+        self.assertTrue(any("rating" in i for i in issues))
+
+    def test_low_confidence_flagged(self):
+        """Confidence < 0.4 flagged by quality gate."""
+        from lib.schemas import quality_gate_amazon
+        output = {
+            "facts": {"title": "X", "price": {"amount": 50}, "rating": 4.0, "reviews": 100},
+            "signals": {"confidence": 0.2},
+        }
+        issues = quality_gate_amazon(output)
+        self.assertTrue(any("confidence" in i for i in issues))
+
+
+# ==========================================================================
+# validate_and_gate orchestrator tests
+# ==========================================================================
+
+class TestValidateAndGate(unittest.TestCase):
+    """Tests for the two-tier validate_and_gate orchestrator."""
+
+    def test_valid_output_returns_valid(self):
+        """Valid output passes both tiers."""
+        from lib.json_schema_guard import validate_and_gate
+        schema = {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}
+        result = validate_and_gate('{"name": "test"}', schema)
+        self.assertTrue(result.valid)
+        self.assertFalse(result.needs_repair)
+        self.assertFalse(result.needs_human)
+
+    def test_schema_error_generates_repair(self):
+        """Schema error on attempt 1 generates repair prompt."""
+        from lib.json_schema_guard import validate_and_gate
+        schema = {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}
+        result = validate_and_gate('{"value": 42}', schema, attempt=1)
+        self.assertFalse(result.valid)
+        self.assertTrue(result.needs_repair)
+        self.assertIn("REPAIR REQUEST", result.repair_prompt)
+
+    def test_schema_error_after_max_becomes_needs_human(self):
+        """Schema error after MAX_REPAIR_ATTEMPTS → needs_human."""
+        from lib.json_schema_guard import validate_and_gate, MAX_REPAIR_ATTEMPTS
+        schema = {"type": "object", "required": ["name"]}
+        result = validate_and_gate('{"value": 42}', schema, attempt=MAX_REPAIR_ATTEMPTS + 1)
+        self.assertFalse(result.valid)
+        self.assertFalse(result.needs_repair)
+        self.assertTrue(result.needs_human)
+
+    def test_quality_gate_failure_is_needs_human(self):
+        """Quality gate failure → needs_human (no repair)."""
+        from lib.json_schema_guard import validate_and_gate
+        schema = {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}
+        def bad_gate(d):
+            return ["price is zero"]
+        result = validate_and_gate('{"name": "test"}', schema, quality_gate=bad_gate)
+        self.assertFalse(result.valid)
+        self.assertTrue(result.needs_human)
+        self.assertFalse(result.needs_repair)
+        self.assertEqual(result.quality_issues, ["price is zero"])
+
+    def test_quality_gate_pass(self):
+        """Quality gate that passes returns valid."""
+        from lib.json_schema_guard import validate_and_gate
+        schema = {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}
+        def ok_gate(d):
+            return []
+        result = validate_and_gate('{"name": "test"}', schema, quality_gate=ok_gate)
+        self.assertTrue(result.valid)
+
+    def test_parse_failure_generates_repair(self):
+        """Unparseable output generates repair prompt."""
+        from lib.json_schema_guard import validate_and_gate
+        schema = {"type": "object"}
+        result = validate_and_gate("this is not json", schema, attempt=1)
+        self.assertTrue(result.needs_repair)
+        self.assertIn("REPAIR", result.repair_prompt)
+
+    def test_spool_payload_structure(self):
+        """spool_payload has expected fields for run_event."""
+        from lib.json_schema_guard import validate_and_gate
+        schema = {"type": "object", "required": ["x"]}
+        result = validate_and_gate('{"y":1}', schema, attempt=3)
+        payload = result.spool_payload
+        self.assertEqual(payload["event_type"], "llm_output_invalid")
+        self.assertEqual(payload["severity"], "WARN")
+        self.assertIn("attempt", payload)
+
+
+# ==========================================================================
+# Script Patch Policy tests
+# ==========================================================================
+
+class TestScriptPatchPolicy(unittest.TestCase):
+    """Tests for ScriptPatchPolicy — wildcard path matching + constraints."""
+
+    def _make_outline_doc(self):
+        return {
+            "contract_version": "script_writer/v0.1.0",
+            "outline_version": 1,
+            "outline": {
+                "hook": "Old hook text that needs updating.",
+                "products": [
+                    {
+                        "product_key": "B0EXAMPLE1:best_overall",
+                        "asin": "B0EXAMPLE1",
+                        "slot": "best_overall",
+                        "angle": "The all-rounder",
+                        "points": ["ANC", "Battery", "USB-C"],
+                        "verdict": "The one to beat.",
+                    },
+                ],
+                "cta": "Links below—grab yours now.",
+            },
+        }
+
+    def test_replace_hook_allowed(self):
+        """Replacing hook is allowed by default policy."""
+        from lib.apply_patch import apply_script_patch
+        doc = self._make_outline_doc()
+        ops = [{"op": "replace", "path": "/outline/hook", "value": "New punchy hook here."}]
+        result = apply_script_patch(doc, ops)
+        self.assertEqual(result["outline"]["hook"], "New punchy hook here.")
+
+    def test_replace_angle_allowed(self):
+        """Replacing product angle is allowed."""
+        from lib.apply_patch import apply_script_patch
+        doc = self._make_outline_doc()
+        ops = [{"op": "replace", "path": "/outline/products/0/angle", "value": "Best noise cancellation"}]
+        result = apply_script_patch(doc, ops)
+        self.assertEqual(result["outline"]["products"][0]["angle"], "Best noise cancellation")
+
+    def test_replace_cta_allowed(self):
+        """Replacing CTA is allowed."""
+        from lib.apply_patch import apply_script_patch
+        doc = self._make_outline_doc()
+        ops = [{"op": "replace", "path": "/outline/cta", "value": "Check the links below."}]
+        result = apply_script_patch(doc, ops)
+        self.assertEqual(result["outline"]["cta"], "Check the links below.")
+
+    def test_replace_asin_forbidden(self):
+        """Replacing asin is forbidden."""
+        from lib.apply_patch import apply_script_patch, PatchError
+        doc = self._make_outline_doc()
+        ops = [{"op": "replace", "path": "/outline/products/0/asin", "value": "HACKED"}]
+        with self.assertRaises(PatchError) as ctx:
+            apply_script_patch(doc, ops)
+        self.assertIn("forbidden", str(ctx.exception).lower())
+
+    def test_replace_slot_forbidden(self):
+        """Replacing slot is forbidden."""
+        from lib.apply_patch import apply_script_patch, PatchError
+        doc = self._make_outline_doc()
+        ops = [{"op": "replace", "path": "/outline/products/0/slot", "value": "best_value"}]
+        with self.assertRaises(PatchError):
+            apply_script_patch(doc, ops)
+
+    def test_replace_product_key_forbidden(self):
+        """Replacing product_key is forbidden."""
+        from lib.apply_patch import apply_script_patch, PatchError
+        doc = self._make_outline_doc()
+        ops = [{"op": "replace", "path": "/outline/products/0/product_key", "value": "X"}]
+        with self.assertRaises(PatchError):
+            apply_script_patch(doc, ops)
+
+    def test_replace_contract_version_forbidden(self):
+        """Replacing contract_version is forbidden."""
+        from lib.apply_patch import apply_script_patch, PatchError
+        doc = self._make_outline_doc()
+        ops = [{"op": "replace", "path": "/contract_version", "value": "hacked"}]
+        with self.assertRaises(PatchError):
+            apply_script_patch(doc, ops)
+
+    def test_remove_op_blocked(self):
+        """Remove operations blocked by default policy."""
+        from lib.apply_patch import apply_script_patch, PatchError
+        doc = self._make_outline_doc()
+        ops = [{"op": "remove", "path": "/outline/hook"}]
+        with self.assertRaises(PatchError) as ctx:
+            apply_script_patch(doc, ops)
+        self.assertIn("not allowed", str(ctx.exception))
+
+    def test_max_ops_enforced(self):
+        """Too many ops rejected."""
+        from lib.apply_patch import apply_script_patch, PatchError
+        doc = self._make_outline_doc()
+        ops = [{"op": "replace", "path": "/outline/hook", "value": f"v{i}"} for i in range(10)]
+        with self.assertRaises(PatchError) as ctx:
+            apply_script_patch(doc, ops)
+        self.assertIn("Too many", str(ctx.exception))
+
+    def test_hook_too_long_post_patch(self):
+        """Hook exceeding max chars after patch is rejected."""
+        from lib.apply_patch import apply_script_patch, PatchError
+        doc = self._make_outline_doc()
+        ops = [{"op": "replace", "path": "/outline/hook", "value": "x" * 200}]
+        with self.assertRaises(PatchError) as ctx:
+            apply_script_patch(doc, ops)
+        self.assertIn("too long", str(ctx.exception))
+
+    def test_angle_too_long_post_patch(self):
+        """Angle exceeding max chars after patch is rejected."""
+        from lib.apply_patch import apply_script_patch, PatchError
+        doc = self._make_outline_doc()
+        ops = [{"op": "replace", "path": "/outline/products/0/angle", "value": "x" * 100}]
+        with self.assertRaises(PatchError) as ctx:
+            apply_script_patch(doc, ops)
+        self.assertIn("too long", str(ctx.exception))
+
+    def test_point_too_many_words_post_patch(self):
+        """Point with too many words after patch is rejected."""
+        from lib.apply_patch import apply_script_patch, PatchError
+        doc = self._make_outline_doc()
+        ops = [{"op": "replace", "path": "/outline/products/0/points/0",
+                "value": "this is a point with way too many words exceeding the limit"}]
+        with self.assertRaises(PatchError) as ctx:
+            apply_script_patch(doc, ops)
+        self.assertIn("words", str(ctx.exception))
+
+    def test_original_not_mutated(self):
+        """Original document not mutated by patch."""
+        from lib.apply_patch import apply_script_patch
+        doc = self._make_outline_doc()
+        original_hook = doc["outline"]["hook"]
+        ops = [{"op": "replace", "path": "/outline/hook", "value": "New hook."}]
+        result = apply_script_patch(doc, ops)
+        self.assertEqual(doc["outline"]["hook"], original_hook)
+        self.assertEqual(result["outline"]["hook"], "New hook.")
+
+    def test_path_not_in_allowlist(self):
+        """Path not in allowlist is rejected."""
+        from lib.apply_patch import apply_script_patch, PatchError
+        doc = self._make_outline_doc()
+        ops = [{"op": "replace", "path": "/outline/products/0/secret", "value": "x"}]
+        with self.assertRaises(PatchError) as ctx:
+            apply_script_patch(doc, ops)
+        self.assertIn("not in allowlist", str(ctx.exception))
+
+    def test_wildcard_matching(self):
+        """Wildcard {i} matches numeric indices."""
+        from lib.apply_patch import _wildcard_match
+        self.assertTrue(_wildcard_match("/outline/products/{i}/angle", "/outline/products/0/angle"))
+        self.assertTrue(_wildcard_match("/outline/products/{i}/angle", "/outline/products/2/angle"))
+        self.assertFalse(_wildcard_match("/outline/products/{i}/angle", "/outline/products/abc/angle"))
+        self.assertFalse(_wildcard_match("/outline/products/{i}/angle", "/outline/hook"))
+
+    def test_nested_wildcard(self):
+        """Nested wildcards {i}/{j} work for array-in-array paths."""
+        from lib.apply_patch import _wildcard_match
+        self.assertTrue(_wildcard_match(
+            "/outline/products/{i}/points/{j}",
+            "/outline/products/0/points/2",
+        ))
+        self.assertFalse(_wildcard_match(
+            "/outline/products/{i}/points/{j}",
+            "/outline/products/0/points/abc",
+        ))
+
+
+# ==========================================================================
+# Patch audit event tests
+# ==========================================================================
+
+class TestPatchAudit(unittest.TestCase):
+    """Tests for make_patch_audit event builder."""
+
+    def test_audit_event_structure(self):
+        """Patch audit event has correct structure."""
+        from lib.apply_patch import make_patch_audit
+        ops = [{"op": "replace", "path": "/outline/hook", "value": "new"}]
+        event = make_patch_audit(
+            run_id="test-123",
+            patch_ops=ops,
+            scope="hook",
+            reason="too generic",
+            contract_version="script_writer/v0.1.0",
+        )
+        self.assertEqual(event["event_type"], "script_patch_applied")
+        self.assertEqual(event["severity"], "INFO")
+        self.assertIn("event_id", event)
+        self.assertIn("occurred_at", event)
+        payload = event["payload"]
+        self.assertEqual(payload["run_id"], "test-123")
+        self.assertEqual(payload["scope"], "hook")
+        self.assertEqual(payload["reason"], "too generic")
+        self.assertEqual(payload["contract_version"], "script_writer/v0.1.0")
+        self.assertEqual(payload["ops_count"], 1)
+
+
+# ==========================================================================
+# Contract loader integration test
+# ==========================================================================
+
+class TestScriptWriterContract(unittest.TestCase):
+    """Tests for script_writer contract loading and prompt building."""
+
+    def test_contract_file_exists(self):
+        """Contract markdown file exists at expected path."""
+        contract_path = Path(__file__).resolve().parent.parent / "contracts" / "script_writer" / "v0.1.0.md"
+        self.assertTrue(contract_path.exists(), f"Missing: {contract_path}")
+
+    def test_contract_loader_reads(self):
+        """ContractLoader can read the script_writer contract."""
+        from lib.prompt_contract_loader import ContractLoader
+        contracts_dir = str(Path(__file__).resolve().parent.parent / "contracts")
+        loader = ContractLoader(contracts_dir)
+        text = loader.load("script_writer", "v0.1.0")
+        self.assertIn("Script Writer", text)
+        self.assertIn("PATCH MODE", text)
+        self.assertIn("PERSONA PER SLOT", text)
+
+    def test_outline_contract_spec_valid(self):
+        """SCRIPT_OUTLINE_CONTRACT has expected fields."""
+        from lib.schemas import SCRIPT_OUTLINE_CONTRACT
+        self.assertEqual(SCRIPT_OUTLINE_CONTRACT.name, "script_writer")
+        self.assertEqual(SCRIPT_OUTLINE_CONTRACT.version, "v0.1.0")
+        self.assertTrue(len(SCRIPT_OUTLINE_CONTRACT.economy_rules) >= 4)
+
+    def test_patch_contract_spec_no_cache(self):
+        """SCRIPT_PATCH_CONTRACT uses no-cache policy."""
+        from lib.schemas import SCRIPT_PATCH_CONTRACT
+        self.assertEqual(SCRIPT_PATCH_CONTRACT.cache_policy.name, "none")
+
+    def test_prompt_build_with_contract(self):
+        """Full prompt builds correctly with contract text."""
+        from lib.prompt_contract_loader import ContractEngine
+        from lib.schemas import SCRIPT_OUTLINE_CONTRACT
+        contracts_dir = str(Path(__file__).resolve().parent.parent / "contracts")
+        engine = ContractEngine(
+            contracts_dir=contracts_dir,
+            cache_dir=tempfile.mkdtemp(),
+        )
+        payload = {
+            "niche": "wireless earbuds",
+            "winners": [{"asin": "B0X", "slot": "best_overall", "score": 85, "why": ["good"]}],
+            "mode": "generate",
+        }
+        prompt, key = engine.build_prompt_and_cache_key(SCRIPT_OUTLINE_CONTRACT, payload)
+        self.assertIn("### CONTRACT", prompt)
+        self.assertIn("Script Writer", prompt)
+        self.assertIn("### payload", prompt)
+        self.assertIn("wireless earbuds", prompt)
+        self.assertTrue(len(key) == 64)  # SHA-256 hex
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
