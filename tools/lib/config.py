@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from enum import IntEnum
+from enum import IntEnum, Enum
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -54,6 +54,50 @@ def format_dual_time(dt: datetime) -> str:
     utc = dt.astimezone(TZ_UTC)
     brt = dt.astimezone(TZ_BRT)
     return f"{utc:%H:%M} UTC / {brt:%H:%M} BRT ({utc:%Y-%m-%d})"
+
+
+# ---------------------------------------------------------------------------
+# Pipeline stages (typed enum — single source of truth)
+# ---------------------------------------------------------------------------
+
+class Stage(str, Enum):
+    """Pipeline stages in execution order.
+
+    Using str+Enum (not StrEnum) for Python 3.10 compat.
+    Each stage has a defined contract:
+      - needs_browser: requires Playwright page
+      - is_expensive: subject to budget guard (Dzine credits, GPU, API cost)
+    """
+    INIT = "init"
+    FETCH_PRODUCTS = "fetch_products"
+    WRITE_SCRIPT = "write_script"
+    DZINE_GENERATE = "dzine_generate"
+    DAVINCI_EDIT = "davinci_edit"
+    RENDER = "render"
+    UPLOAD = "upload"
+    DONE = "done"
+
+
+# Stage metadata — which stages need browser, which are expensive
+BROWSER_STAGES: frozenset[Stage] = frozenset({
+    Stage.FETCH_PRODUCTS,
+    Stage.DZINE_GENERATE,
+})
+
+EXPENSIVE_STAGES: frozenset[Stage] = frozenset({
+    Stage.DZINE_GENERATE,
+    Stage.RENDER,
+})
+
+# Ordered execution list (excludes INIT and DONE — those are markers)
+STAGE_ORDER: tuple[Stage, ...] = (
+    Stage.FETCH_PRODUCTS,
+    Stage.WRITE_SCRIPT,
+    Stage.DZINE_GENERATE,
+    Stage.DAVINCI_EDIT,
+    Stage.RENDER,
+    Stage.UPLOAD,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +220,10 @@ class WorkerConfig:
     max_worker_error_len: int = 500
     telegram_max_len: int = 4000
 
+    # Budget guard (prevents burning Dzine credits without approval)
+    budget_daily_limit: int = 50          # max expensive stage executions per day
+    budget_require_approval_above: int = 0  # 0 = no extra gate; >0 = waiting_approval if exceeded
+
     # Health thresholds
     thresholds: HealthThresholds = field(default_factory=HealthThresholds)
 
@@ -275,6 +323,8 @@ def load_worker_config(
         claim_timeout_sec=_env_int("RAYVAULT_CLAIM_TIMEOUT_SEC", "CLAIM_TIMEOUT_SEC", "15"),
         max_worker_error_len=_env_int("RAYVAULT_MAX_WORKER_ERROR_LEN", "MAX_WORKER_ERROR_LEN", "500"),
         telegram_max_len=_env_int("RAYVAULT_TELEGRAM_MAX_LEN", "TELEGRAM_MAX_LEN", "4000"),
+        budget_daily_limit=_env_int("RAYVAULT_BUDGET_DAILY_LIMIT", "BUDGET_DAILY_LIMIT", "50"),
+        budget_require_approval_above=_env_int("RAYVAULT_BUDGET_REQUIRE_APPROVAL", "BUDGET_REQUIRE_APPROVAL", "0"),
     )
 
     # Populate worker_id from hostname if still empty

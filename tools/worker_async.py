@@ -49,7 +49,10 @@ try:
 except ImportError:
     psutil = None
 
-from tools.lib.config import WorkerConfig, SecretsConfig, load_worker_config, ExitCode
+from tools.lib.config import (
+    WorkerConfig, SecretsConfig, load_worker_config, ExitCode,
+    Stage, STAGE_ORDER, BROWSER_STAGES, EXPENSIVE_STAGES,
+)
 from tools.lib.panic import PanicManager
 
 
@@ -156,29 +159,63 @@ def _checkpoint_path(cfg: WorkerConfig, run_id: str) -> Path:
 
 
 def load_checkpoint(cfg: WorkerConfig, run_id: str) -> Dict[str, Any]:
+    """Load checkpoint with enhanced schema.
+
+    Schema:
+      run_id, stage, attempt, completed_steps[], artifacts{}, data{},
+      flags{}, lock_token, last_update
+    """
     p = _checkpoint_path(cfg, run_id)
     data = _read_json(p)
     if data:
+        data.setdefault("run_id", run_id)
         data.setdefault("stage", "init")
+        data.setdefault("attempt", 1)
         data.setdefault("completed_steps", [])
+        data.setdefault("artifacts", {})
         data.setdefault("data", {})
+        data.setdefault("flags", {})
         return data
-    return {"stage": "init", "completed_steps": [], "data": {}}
+    return {
+        "run_id": run_id,
+        "stage": "init",
+        "attempt": 1,
+        "completed_steps": [],
+        "artifacts": {},
+        "data": {},
+        "flags": {},
+    }
 
 
 def save_checkpoint(cfg: WorkerConfig, run_id: str, stage: str, *,
                     data: Dict[str, Any] | None = None,
-                    lock_token: str = "") -> None:
+                    artifacts: Dict[str, str] | None = None,
+                    lock_token: str = "",
+                    increment_attempt: bool = False) -> None:
+    """Save checkpoint atomically.
+
+    Args:
+        stage: Current stage name (Stage.value or string).
+        data: Merge into data{} dict (elapsed_s, error, etc.).
+        artifacts: Merge into artifacts{} dict (paths to outputs).
+        lock_token: Update lock_token if provided.
+        increment_attempt: Bump attempt counter (on retry after failure).
+    """
     p = _checkpoint_path(cfg, run_id)
     existing = load_checkpoint(cfg, run_id)
-    existing["stage"] = stage
+    existing["stage"] = stage if isinstance(stage, str) else stage.value
     existing["last_update"] = _iso(_utcnow())
     if lock_token:
         existing["lock_token"] = lock_token
-    if stage not in existing["completed_steps"]:
-        existing["completed_steps"].append(stage)
+    stage_str = stage if isinstance(stage, str) else stage.value
+    if stage_str not in existing["completed_steps"]:
+        existing["completed_steps"].append(stage_str)
+    if increment_attempt:
+        existing["attempt"] = existing.get("attempt", 1) + 1
     if data:
         existing.setdefault("data", {}).update(data)
+    if artifacts:
+        existing.setdefault("artifacts", {}).update(artifacts)
     _atomic_write_json(p, existing)
 
 
@@ -355,11 +392,15 @@ async def heartbeat_loop(
 async def claim_next(
     cfg: WorkerConfig,
     rpc: SupabaseRPC,
-) -> Optional[str]:
-    """Call rpc_claim_next_run. Returns run_id or None.
+) -> tuple[str | None, bool]:
+    """Call rpc_claim_next_run. Returns (run_id, is_recovery) or (None, False).
 
     Recovery-first is automatic: the RPC checks for worker's own active
     run before picking a new one (Phase 1 vs Phase 2 in the SQL).
+
+    RPC returns TABLE(run_id uuid, is_recovery boolean).
+    PostgREST wraps this as [{run_id: ..., is_recovery: ...}] or [].
+    Falls back to legacy uuid return format for backward compatibility.
     """
     lock_token = str(uuid.uuid4())
     data, status = await rpc.rpc("rpc_claim_next_run", {
@@ -371,14 +412,25 @@ async def claim_next(
 
     if status >= 300:
         print(f"[worker] claim_next HTTP {status}: {data}", file=sys.stderr)
-        return None
+        return None, False
 
-    # PostgREST returns the uuid directly (RETURNS uuid)
+    # New format: TABLE return → PostgREST returns [{"run_id": ..., "is_recovery": ...}]
+    if isinstance(data, list):
+        if not data:
+            return None, False
+        row = data[0]
+        run_id = row.get("run_id")
+        is_recovery = bool(row.get("is_recovery", False))
+        if run_id and str(run_id) != "null":
+            return str(run_id), is_recovery
+        return None, False
+
+    # Legacy format: RETURNS uuid → PostgREST returns the uuid directly
     if data and data != "null" and str(data).strip('"') != "null":
         run_id = str(data).strip('"')
-        return run_id
+        return run_id, False  # can't know is_recovery from old RPC
 
-    return None
+    return None, False
 
 
 async def release_run(
@@ -431,34 +483,21 @@ async def log_event(
 # Each stage follows:
 #   1. stop_signal check (before expensive work)
 #   2. precondition check (idempotency — "already have output?")
-#   3. execute (the actual work — placeholder until Dzine/OpenClaw integration)
-#   4. checkpoint (atomic write after success)
-#   5. stage event (observability — DB knows what happened)
+#   3. budget guard (expensive stages only — Dzine, Render)
+#   4. execute (the actual work — placeholder until Dzine/OpenClaw integration)
+#   5. checkpoint (atomic write after success)
+#   6. stage event (observability — DB knows what happened)
 #
-# When adding real stages, implement StageRunner subclasses or replace
-# the execute_stage() function. The contract (checks 1-5) stays the same.
-
-STAGES = (
-    "research",
-    "script_brief",
-    "script_generate",
-    "script_review",
-    "assets",
-    "tts",
-    "manifest",
-)
-
-# Stages that require a browser page (Playwright).
-# Non-browser stages run without page (API calls, file ops, etc.)
-BROWSER_STAGES = {"research", "assets"}
+# Stage enum, browser set, and expensive set are in config.py (single source).
 
 
-def _artifact_path(cfg: WorkerConfig, run_id: str, stage: str) -> Path:
+def _artifact_path(cfg: WorkerConfig, run_id: str, stage: Stage | str) -> Path:
     """Convention: state/artifacts/{run_id}/{stage}.json"""
-    return Path(cfg.state_dir) / "artifacts" / run_id / f"{stage}.json"
+    s = stage.value if isinstance(stage, Stage) else stage
+    return Path(cfg.state_dir) / "artifacts" / run_id / f"{s}.json"
 
 
-def _stage_has_artifact(cfg: WorkerConfig, run_id: str, stage: str) -> bool:
+def _stage_has_artifact(cfg: WorkerConfig, run_id: str, stage: Stage | str) -> bool:
     """Precondition: does the output artifact already exist?
 
     Prevents re-running expensive stages (Dzine GPU, TTS generation)
@@ -467,8 +506,56 @@ def _stage_has_artifact(cfg: WorkerConfig, run_id: str, stage: str) -> bool:
     return _artifact_path(cfg, run_id, stage).exists()
 
 
+# ---------------------------------------------------------------------------
+# Budget guard — prevents burning credits without gate
+# ---------------------------------------------------------------------------
+
+_BUDGET_COUNT_FILE = "budget_today.json"
+
+
+def _budget_path(cfg: WorkerConfig) -> Path:
+    return Path(cfg.state_dir) / _BUDGET_COUNT_FILE
+
+
+def _load_budget(cfg: WorkerConfig) -> Dict[str, Any]:
+    """Load today's budget counter. Resets on day change."""
+    p = _budget_path(cfg)
+    data = _read_json(p)
+    today = _utcnow().strftime("%Y-%m-%d")
+    if data and data.get("date") == today:
+        return data
+    return {"date": today, "count": 0}
+
+
+def _increment_budget(cfg: WorkerConfig) -> int:
+    """Increment and persist today's expensive stage count. Returns new count."""
+    data = _load_budget(cfg)
+    data["count"] += 1
+    _atomic_write_json(_budget_path(cfg), data)
+    return data["count"]
+
+
+def check_budget(cfg: WorkerConfig, stage: Stage) -> tuple[bool, int]:
+    """Check if budget allows running an expensive stage.
+
+    Returns (allowed, current_count).
+    If budget_daily_limit <= 0, budget is unlimited.
+    """
+    if stage not in EXPENSIVE_STAGES:
+        return True, 0
+    if cfg.budget_daily_limit <= 0:
+        return True, 0
+
+    data = _load_budget(cfg)
+    return data["count"] < cfg.budget_daily_limit, data["count"]
+
+
+# ---------------------------------------------------------------------------
+# Stage executor (placeholder — plug real runners here)
+# ---------------------------------------------------------------------------
+
 async def execute_stage(
-    stage: str,
+    stage: Stage,
     run_id: str,
     video_id: str,
     *,
@@ -482,7 +569,7 @@ async def execute_stage(
     for non-browser stages.
 
     Args:
-        stage: Stage name from STAGES tuple.
+        stage: Stage enum value.
         run_id: Current run UUID.
         video_id: Target video/product ID.
         page: Playwright page (only for BROWSER_STAGES, None otherwise).
@@ -491,15 +578,15 @@ async def execute_stage(
     # Placeholder: import real stage runners when available
     # Example structure for real implementation:
     #
-    # if stage == "research":
-    #     return await stage_research(page, video_id, cfg)
-    # elif stage == "assets":
-    #     return await stage_assets(page, video_id, cfg)
-    # elif stage == "script_generate":
-    #     return await stage_script_generate(video_id, cfg)  # no browser
+    # if stage == Stage.FETCH_PRODUCTS:
+    #     return await stage_fetch_products(page, video_id, cfg)
+    # elif stage == Stage.DZINE_GENERATE:
+    #     return await stage_dzine_generate(page, video_id, cfg)
+    # elif stage == Stage.WRITE_SCRIPT:
+    #     return await stage_write_script(video_id, cfg)  # no browser
     # ...
     #
-    print(f"[worker]   [{stage}] running... (video={video_id})")
+    print(f"[worker]   [{stage.value}] running... (video={video_id})")
     await asyncio.sleep(0.1)  # placeholder
     return True
 
@@ -525,44 +612,66 @@ async def process_run(
       1. stop_signal.is_set() → return immediately (interrupção)
       2. checkpoint skip → already completed stages are free (idempotência)
       3. artifact precondition → skip expensive re-work (idempotência+)
-      4. execute → the actual stage work
-      5. checkpoint write → atomic, survives crash (durabilidade)
-      6. stage events → DB knows start/complete/fail (observabilidade)
-      7. post-stage stop check → catch mid-stage panics (disciplina)
+      4. budget guard → expensive stages check daily limit (segurança financeira)
+      5. execute → the actual stage work
+      6. checkpoint write → atomic, survives crash (durabilidade)
+      7. stage events → DB knows start/complete/fail (observabilidade)
+      8. post-stage stop check → catch mid-stage panics (disciplina)
 
-    Returns: "done" | "failed" | "interrupted" | "waiting_approval"
+    Returns: "done" | "failed" | "interrupted" | "budget_exceeded"
     """
     ckpt = load_checkpoint(cfg, run_id)
 
     print(f"[worker] Processing run=...{run_id[-8:]} video={video_id}")
     if ckpt["completed_steps"]:
         print(f"[worker]   Resuming: completed={ckpt['completed_steps']}")
+        print(f"[worker]   Attempt: {ckpt.get('attempt', 1)}")
 
-    for stage in STAGES:
+    for stage in STAGE_ORDER:
+        stage_name = stage.value
+
         # ----- 1. Pre-stage stop check (contrato de interrupção) -----
         if stop_signal.is_set():
-            save_checkpoint(cfg, run_id, stage, lock_token=lock_token)
+            save_checkpoint(cfg, run_id, stage_name, lock_token=lock_token)
             return "interrupted"
 
         # ----- 2. Checkpoint skip (idempotência) -----
-        if stage in ckpt["completed_steps"]:
-            print(f"[worker]   [{stage}] skipped (checkpoint)")
+        if stage_name in ckpt["completed_steps"]:
+            print(f"[worker]   [{stage_name}] skipped (checkpoint)")
             continue
 
         # ----- 3. Artifact precondition (idempotência+) -----
         if _stage_has_artifact(cfg, run_id, stage):
-            print(f"[worker]   [{stage}] skipped (artifact exists)")
-            save_checkpoint(cfg, run_id, stage, lock_token=lock_token)
+            print(f"[worker]   [{stage_name}] skipped (artifact exists)")
+            save_checkpoint(cfg, run_id, stage_name, lock_token=lock_token)
             continue
 
-        # ----- 4. Stage started event (observabilidade) -----
+        # ----- 4. Budget guard (segurança financeira) -----
+        if stage in EXPENSIVE_STAGES:
+            allowed, count = check_budget(cfg, stage)
+            if not allowed:
+                print(
+                    f"[worker]   [{stage_name}] BUDGET EXCEEDED "
+                    f"({count}/{cfg.budget_daily_limit})",
+                    file=sys.stderr,
+                )
+                await log_event(rpc_client, run_id, "budget_exceeded", {
+                    "stage": stage_name,
+                    "count": count,
+                    "limit": cfg.budget_daily_limit,
+                }, severity="WARN", reason_key="budget_exceeded")
+                return "budget_exceeded"
+
+        # ----- 5. Stage started event (observabilidade) -----
         await log_event(rpc_client, run_id, "stage_started", {
-            "stage": stage,
+            "stage": stage_name,
             "video_id": video_id,
             "needs_browser": stage in BROWSER_STAGES,
+            "is_expensive": stage in EXPENSIVE_STAGES,
+            "attempt": ckpt.get("attempt", 1),
         })
 
-        # ----- 5. Execute (the actual work) -----
+        # ----- 6. Execute (the actual work) -----
         t0 = time.monotonic()
         stage_page = page if stage in BROWSER_STAGES else None
 
@@ -575,16 +684,16 @@ async def process_run(
             # Stage crashed — log event, save checkpoint, report
             elapsed = time.monotonic() - t0
             err_msg = f"{type(exc).__name__}: {exc}"[:cfg.max_worker_error_len]
-            print(f"[worker]   [{stage}] EXCEPTION: {err_msg}", file=sys.stderr)
+            print(f"[worker]   [{stage_name}] EXCEPTION: {err_msg}", file=sys.stderr)
 
             await log_event(rpc_client, run_id, "stage_failed", {
-                "stage": stage,
+                "stage": stage_name,
                 "video_id": video_id,
                 "error": err_msg,
                 "elapsed_s": round(elapsed, 1),
-            }, severity="ERROR", reason_key=f"stage_failed_{stage}")
+            }, severity="ERROR", reason_key=f"stage_failed_{stage_name}")
 
-            save_checkpoint(cfg, run_id, stage, lock_token=lock_token,
+            save_checkpoint(cfg, run_id, stage_name, lock_token=lock_token,
                             data={"error": err_msg, "failed_at": _iso(_utcnow())})
             return "failed"
 
@@ -592,28 +701,33 @@ async def process_run(
 
         if not ok:
             # Stage returned False — controlled failure
-            print(f"[worker]   [{stage}] FAILED ({elapsed:.1f}s)", file=sys.stderr)
+            print(f"[worker]   [{stage_name}] FAILED ({elapsed:.1f}s)", file=sys.stderr)
             await log_event(rpc_client, run_id, "stage_failed", {
-                "stage": stage,
+                "stage": stage_name,
                 "video_id": video_id,
                 "elapsed_s": round(elapsed, 1),
-            }, severity="WARN", reason_key=f"stage_failed_{stage}")
+            }, severity="WARN", reason_key=f"stage_failed_{stage_name}")
             return "failed"
 
-        # ----- 6. Success: checkpoint + event -----
-        print(f"[worker]   [{stage}] done ({elapsed:.1f}s)")
+        # ----- 7. Success: checkpoint + event + budget increment -----
+        print(f"[worker]   [{stage_name}] done ({elapsed:.1f}s)")
         save_checkpoint(
-            cfg, run_id, stage,
+            cfg, run_id, stage_name,
             lock_token=lock_token,
             data={"elapsed_s": round(elapsed, 1)},
         )
         await log_event(rpc_client, run_id, "stage_complete", {
-            "stage": stage,
+            "stage": stage_name,
             "video_id": video_id,
             "elapsed_s": round(elapsed, 1),
         })
 
-        # ----- 7. Post-stage stop check (catch mid-stage panics) -----
+        # Track budget for expensive stages
+        if stage in EXPENSIVE_STAGES:
+            new_count = _increment_budget(cfg)
+            print(f"[worker]   [{stage_name}] budget: {new_count}/{cfg.budget_daily_limit}")
+
+        # ----- 8. Post-stage stop check (catch mid-stage panics) -----
         if stop_signal.is_set():
             return "interrupted"
 
@@ -666,6 +780,20 @@ async def worker_main(
               file=sys.stderr)
         bcm = None
 
+    # Boot ritual: replay pending spool events before first claim
+    try:
+        from tools.lib.doctor import replay_spool
+        synced, failed, remaining = replay_spool(
+            cfg.spool_dir,
+            secrets.supabase_url,
+            secrets.supabase_service_key,
+            timeout=cfg.rpc_timeout_sec,
+        )
+        if synced or failed:
+            print(f"[worker] Spool replay: synced={synced} failed={failed} remaining={remaining}")
+    except Exception as e:
+        print(f"[worker] Spool replay skipped: {e}", file=sys.stderr)
+
     try:
         return await _worker_loop(cfg, rpc_client, panic_mgr, bcm, once=once)
     finally:
@@ -689,7 +817,7 @@ async def _worker_loop(
     """Inner loop — separated for clean browser lifecycle in worker_main."""
     while True:
         # 1. Claim next run (recovery-first is automatic in RPC)
-        run_id = await claim_next(cfg, rpc_client)
+        run_id, is_recovery_rpc = await claim_next(cfg, rpc_client)
         if not run_id:
             if once:
                 print("[worker] No runs available (--once mode)")
@@ -722,9 +850,9 @@ async def _worker_loop(
                 return ExitCode.ERROR
             continue
 
-        # 2b. Detect recovery (checkpoint exists = previously owned this run)
+        # 2b. Detect recovery (RPC native boolean OR checkpoint heuristic)
         ckpt = load_checkpoint(cfg, run_id)
-        is_recovery = bool(ckpt["completed_steps"])
+        is_recovery = is_recovery_rpc or bool(ckpt["completed_steps"])
         if is_recovery:
             print(
                 f"[worker] RECOVERY: run=...{run_id[-8:]} "
@@ -783,6 +911,13 @@ async def _worker_loop(
 
             elif result == "interrupted":
                 print(f"[worker] Run ...{run_id[-8:]} interrupted — checkpoint saved")
+
+            elif result == "budget_exceeded":
+                await rpc_client.patch_run(run_id, {
+                    "worker_state": "waiting",
+                    "worker_last_error": "budget_exceeded: daily limit reached",
+                })
+                print(f"[worker] Run ...{run_id[-8:]} paused — budget exceeded")
 
         except LostLock:
             print(f"[worker] PANIC: lost lock on ...{run_id[-8:]}", file=sys.stderr)

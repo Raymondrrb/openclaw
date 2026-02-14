@@ -491,14 +491,16 @@ $$;
 --   Phase 1 (recovery): reclaim own active run with valid lease
 --   Phase 2 (fresh claim): next free/expired run via FOR UPDATE SKIP LOCKED
 --
--- Returns: uuid (run_id) or NULL. NOT SETOF — scalar return.
+-- Returns: TABLE(run_id uuid, is_recovery boolean).
+--   PostgREST returns [{"run_id":"...", "is_recovery": true/false}] or [].
+--   is_recovery=true means Phase 1 matched (worker reclaiming own run).
 -- Token + locked_at stability: only rotated on ownership change.
 CREATE OR REPLACE FUNCTION public.rpc_claim_next_run(
     p_worker_id      text,
     p_lock_token     text,
     p_lease_minutes  int DEFAULT 10,
     p_task_type      text DEFAULT NULL
-) RETURNS uuid
+) RETURNS TABLE (run_id uuid, is_recovery boolean)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
 AS $$
 DECLARE
@@ -528,7 +530,10 @@ BEGIN
                                      THEN 'waiting' ELSE 'active' END,
             worker_last_error = ''
         WHERE id = v_run_id;
-        RETURN v_run_id;
+        run_id := v_run_id;
+        is_recovery := true;
+        RETURN NEXT;
+        RETURN;
     END IF;
 
     -- Phase 2: Fresh claim — next eligible run
@@ -545,7 +550,7 @@ BEGIN
     FOR UPDATE OF r SKIP LOCKED;
 
     IF v_run_id IS NULL THEN
-        RETURN NULL;
+        RETURN;  -- empty result set
     END IF;
 
     UPDATE public.pipeline_runs
@@ -558,7 +563,9 @@ BEGIN
         worker_last_error = ''
     WHERE id = v_run_id;
 
-    RETURN v_run_id;
+    run_id := v_run_id;
+    is_recovery := false;
+    RETURN NEXT;
 END;
 $$;
 
@@ -731,7 +738,7 @@ $$;
 -- 7) ACCESS CONTROL — RPCs only via service_role
 -- ==========================================================================
 
-REVOKE EXECUTE ON FUNCTION public.rpc_claim_next_run(text, text, int, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.rpc_claim_next_run(text, text, int, text) FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public.rpc_force_unlock_run(uuid, text, text, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.cas_heartbeat_run(uuid, text, text, int, int) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.rpc_release_run(uuid, text, text) FROM PUBLIC;

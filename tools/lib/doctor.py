@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -162,10 +163,14 @@ def replay_spool(
             # Increment retry count
             retries = record.get("_replay_retries", 0) + 1
             if retries >= max_retries:
-                # Quarantine — too many failures
+                # Quarantine — too many failures, with reason in filename
                 quarantine_dir.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+                reason = record.get("reason_key", record.get("event_type", "unknown"))
+                safe_reason = re.sub(r"[^a-zA-Z0-9_-]", "-", reason)[:48]
+                q_name = f"{stamp}_{safe_reason}_{f.name}"
                 try:
-                    f.rename(quarantine_dir / f.name)
+                    f.rename(quarantine_dir / q_name)
                 except OSError:
                     pass
             else:

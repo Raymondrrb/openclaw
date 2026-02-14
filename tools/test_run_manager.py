@@ -2042,18 +2042,24 @@ class TestDoctor(unittest.TestCase):
         self.assertEqual(data["_replay_retries"], 1)
 
     def test_replay_spool_quarantine_after_max_retries(self):
-        """After max_retries failures, file moves to quarantine/."""
+        """After max_retries failures, file moves to quarantine/ with reason in name."""
         from lib.doctor import replay_spool
         self._write_spool("event.json", {
             "run_id": "r1", "event_id": "e1",
+            "reason_key": "panic_lost_lock",
             "_replay_retries": 2,  # already failed twice
         })
         with patch("lib.doctor._http_post", return_value=(500, "error")):
             s, f, r = replay_spool(self.tmpdir, "http://fake", "key", max_retries=3)
         self.assertEqual(f, 1)
-        self.assertTrue(
-            (Path(self.tmpdir) / "quarantine" / "event.json").exists()
-        )
+        # File is renamed with timestamp_reason_original pattern
+        q_dir = Path(self.tmpdir) / "quarantine"
+        self.assertTrue(q_dir.exists())
+        q_files = list(q_dir.iterdir())
+        self.assertEqual(len(q_files), 1)
+        q_name = q_files[0].name
+        self.assertIn("panic_lost_lock", q_name)
+        self.assertIn("event.json", q_name)
 
     def test_health_check_stale_worker(self):
         """health_check detects stale workers."""
@@ -2518,46 +2524,53 @@ class TestAsyncWorkerHelpers(unittest.TestCase):
 class TestDisciplineContract(unittest.TestCase):
     """Tests for the pipeline discipline contract scaffold."""
 
-    def test_stages_tuple_defined(self):
-        """STAGES is a non-empty tuple of strings."""
-        from worker_async import STAGES
-        self.assertIsInstance(STAGES, tuple)
-        self.assertGreater(len(STAGES), 0)
-        for s in STAGES:
-            self.assertIsInstance(s, str)
+    def test_stage_enum_defined(self):
+        """Stage enum has expected members."""
+        from lib.config import Stage, STAGE_ORDER
+        self.assertIn(Stage.FETCH_PRODUCTS, Stage)
+        self.assertIn(Stage.DZINE_GENERATE, Stage)
+        self.assertIn(Stage.DONE, Stage)
+        self.assertIsInstance(STAGE_ORDER, tuple)
+        self.assertGreater(len(STAGE_ORDER), 0)
 
-    def test_browser_stages_subset_of_stages(self):
-        """BROWSER_STAGES is a subset of STAGES."""
-        from worker_async import STAGES, BROWSER_STAGES
+    def test_browser_stages_subset_of_stage_order(self):
+        """BROWSER_STAGES is a subset of STAGE_ORDER."""
+        from lib.config import STAGE_ORDER, BROWSER_STAGES
         for s in BROWSER_STAGES:
-            self.assertIn(s, STAGES)
+            self.assertIn(s, STAGE_ORDER)
+
+    def test_expensive_stages_subset_of_stage_order(self):
+        """EXPENSIVE_STAGES is a subset of STAGE_ORDER."""
+        from lib.config import STAGE_ORDER, EXPENSIVE_STAGES
+        for s in EXPENSIVE_STAGES:
+            self.assertIn(s, STAGE_ORDER)
 
     def test_artifact_path_convention(self):
         """_artifact_path returns state/artifacts/{run_id}/{stage}.json."""
         from worker_async import _artifact_path
-        from lib.config import WorkerConfig
+        from lib.config import WorkerConfig, Stage
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = WorkerConfig(worker_id="test", state_dir=tmpdir)
-            p = _artifact_path(cfg, "run-abc", "research")
-            self.assertTrue(str(p).endswith("artifacts/run-abc/research.json"))
+            p = _artifact_path(cfg, "run-abc", Stage.FETCH_PRODUCTS)
+            self.assertTrue(str(p).endswith("artifacts/run-abc/fetch_products.json"))
 
     def test_stage_has_artifact_false_when_missing(self):
         """_stage_has_artifact returns False when no artifact file."""
         from worker_async import _stage_has_artifact
-        from lib.config import WorkerConfig
+        from lib.config import WorkerConfig, Stage
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = WorkerConfig(worker_id="test", state_dir=tmpdir)
-            self.assertFalse(_stage_has_artifact(cfg, "run-abc", "research"))
+            self.assertFalse(_stage_has_artifact(cfg, "run-abc", Stage.FETCH_PRODUCTS))
 
     def test_stage_has_artifact_true_when_exists(self):
         """_stage_has_artifact returns True when artifact file exists."""
         from worker_async import _stage_has_artifact, _artifact_path, _atomic_write_json
-        from lib.config import WorkerConfig
+        from lib.config import WorkerConfig, Stage
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = WorkerConfig(worker_id="test", state_dir=tmpdir)
-            p = _artifact_path(cfg, "run-abc", "research")
+            p = _artifact_path(cfg, "run-abc", Stage.FETCH_PRODUCTS)
             _atomic_write_json(p, {"result": "test"})
-            self.assertTrue(_stage_has_artifact(cfg, "run-abc", "research"))
+            self.assertTrue(_stage_has_artifact(cfg, "run-abc", Stage.FETCH_PRODUCTS))
 
     def test_process_run_stop_signal_immediate(self):
         """process_run returns 'interrupted' immediately if stop_signal is set."""
@@ -2571,7 +2584,6 @@ class TestDisciplineContract(unittest.TestCase):
                 checkpoint_dir=tmpdir,
                 state_dir=tmpdir,
             )
-            # Mock RPC and panic
             rpc = MagicMock()
             rpc.insert_event = MagicMock(return_value=asyncio.coroutine(lambda *a, **k: 200)())
             panic = MagicMock()
@@ -2588,8 +2600,8 @@ class TestDisciplineContract(unittest.TestCase):
     def test_process_run_skips_completed_stages(self):
         """process_run skips stages already in checkpoint."""
         import asyncio
-        from worker_async import process_run, save_checkpoint, STAGES
-        from lib.config import WorkerConfig
+        from worker_async import process_run, save_checkpoint
+        from lib.config import WorkerConfig, STAGE_ORDER
 
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = WorkerConfig(
@@ -2598,8 +2610,8 @@ class TestDisciplineContract(unittest.TestCase):
                 state_dir=tmpdir,
             )
             # Pre-fill checkpoint with all stages completed
-            for stage in STAGES:
-                save_checkpoint(cfg, "run-skip", stage)
+            for stage in STAGE_ORDER:
+                save_checkpoint(cfg, "run-skip", stage.value)
 
             rpc = MagicMock()
             rpc.insert_event = MagicMock(return_value=asyncio.coroutine(lambda *a, **k: 200)())
@@ -2616,11 +2628,134 @@ class TestDisciplineContract(unittest.TestCase):
         """Placeholder execute_stage returns True (success)."""
         import asyncio
         from worker_async import execute_stage
+        from lib.config import Stage
 
         result = asyncio.get_event_loop().run_until_complete(
-            execute_stage("research", "run-1", "vid-1")
+            execute_stage(Stage.FETCH_PRODUCTS, "run-1", "vid-1")
         )
         self.assertTrue(result)
+
+    def test_budget_guard_allows_when_under_limit(self):
+        """check_budget returns True when under daily limit."""
+        from worker_async import check_budget
+        from lib.config import WorkerConfig, Stage
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = WorkerConfig(
+                worker_id="test", state_dir=tmpdir,
+                budget_daily_limit=10,
+            )
+            allowed, count = check_budget(cfg, Stage.DZINE_GENERATE)
+            self.assertTrue(allowed)
+            self.assertEqual(count, 0)
+
+    def test_budget_guard_blocks_when_over_limit(self):
+        """check_budget returns False when at daily limit."""
+        from worker_async import check_budget, _increment_budget
+        from lib.config import WorkerConfig, Stage
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = WorkerConfig(
+                worker_id="test", state_dir=tmpdir,
+                budget_daily_limit=2,
+            )
+            _increment_budget(cfg)
+            _increment_budget(cfg)
+            allowed, count = check_budget(cfg, Stage.DZINE_GENERATE)
+            self.assertFalse(allowed)
+            self.assertEqual(count, 2)
+
+    def test_budget_guard_skips_non_expensive(self):
+        """check_budget always allows non-expensive stages."""
+        from worker_async import check_budget
+        from lib.config import WorkerConfig, Stage
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = WorkerConfig(
+                worker_id="test", state_dir=tmpdir,
+                budget_daily_limit=0,  # 0 = unlimited
+            )
+            allowed, count = check_budget(cfg, Stage.WRITE_SCRIPT)
+            self.assertTrue(allowed)
+
+    def test_checkpoint_enhanced_schema(self):
+        """Enhanced checkpoint includes attempt, artifacts, flags."""
+        from worker_async import save_checkpoint, load_checkpoint
+        from lib.config import WorkerConfig
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = WorkerConfig(worker_id="test", checkpoint_dir=tmpdir)
+            save_checkpoint(cfg, "run-enh", "fetch_products",
+                            artifacts={"image_path": "/tmp/img.png"},
+                            data={"elapsed_s": 2.5})
+            ckpt = load_checkpoint(cfg, "run-enh")
+            self.assertEqual(ckpt["run_id"], "run-enh")
+            self.assertIn("fetch_products", ckpt["completed_steps"])
+            self.assertEqual(ckpt["artifacts"]["image_path"], "/tmp/img.png")
+            self.assertEqual(ckpt["attempt"], 1)
+            self.assertIsInstance(ckpt["flags"], dict)
+
+    def test_checkpoint_increment_attempt(self):
+        """increment_attempt bumps attempt counter."""
+        from worker_async import save_checkpoint, load_checkpoint
+        from lib.config import WorkerConfig
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = WorkerConfig(worker_id="test", checkpoint_dir=tmpdir)
+            save_checkpoint(cfg, "run-retry", "fetch_products")
+            save_checkpoint(cfg, "run-retry", "fetch_products", increment_attempt=True)
+            ckpt = load_checkpoint(cfg, "run-retry")
+            self.assertEqual(ckpt["attempt"], 2)
+
+
+# ==========================================================================
+# Stage enum tests
+# ==========================================================================
+
+class TestStageEnum(unittest.TestCase):
+    """Tests for Stage enum and metadata."""
+
+    def test_stage_values_are_strings(self):
+        """Stage enum values are strings."""
+        from lib.config import Stage
+        for s in Stage:
+            self.assertIsInstance(s.value, str)
+
+    def test_stage_order_no_init_or_done(self):
+        """STAGE_ORDER excludes INIT and DONE markers."""
+        from lib.config import Stage, STAGE_ORDER
+        self.assertNotIn(Stage.INIT, STAGE_ORDER)
+        self.assertNotIn(Stage.DONE, STAGE_ORDER)
+
+    def test_stage_string_comparison(self):
+        """Stage enum works in string comparisons."""
+        from lib.config import Stage
+        self.assertEqual(Stage.FETCH_PRODUCTS, "fetch_products")
+        self.assertEqual(Stage.DZINE_GENERATE.value, "dzine_generate")
+
+    def test_expensive_stages_frozenset(self):
+        """EXPENSIVE_STAGES is immutable frozenset."""
+        from lib.config import EXPENSIVE_STAGES
+        self.assertIsInstance(EXPENSIVE_STAGES, frozenset)
+
+
+# ==========================================================================
+# Quarantine with reason filename tests
+# ==========================================================================
+
+class TestQuarantineReason(unittest.TestCase):
+    """Tests for quarantine file naming with reason."""
+
+    def test_quarantine_includes_reason_in_name(self):
+        """Quarantine files include sanitized reason_key."""
+        import re
+        reason = "panic_lost_lock"
+        safe_reason = re.sub(r"[^a-zA-Z0-9_-]", "-", reason)[:48]
+        self.assertEqual(safe_reason, "panic_lost_lock")
+
+    def test_quarantine_sanitizes_special_chars(self):
+        """Special characters in reason are replaced with hyphens."""
+        import re
+        reason = "some/weird:reason key!"
+        safe_reason = re.sub(r"[^a-zA-Z0-9_-]", "-", reason)[:48]
+        self.assertNotIn("/", safe_reason)
+        self.assertNotIn(":", safe_reason)
+        self.assertNotIn("!", safe_reason)
 
 
 # ==========================================================================
