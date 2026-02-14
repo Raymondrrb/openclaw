@@ -66,21 +66,27 @@ begin
 
     -- Phase 1: Recovery — reclaim our own active run (if any).
     -- Worker restarted without checkpoint → get your last run back.
+    -- FOR UPDATE OF r (no SKIP LOCKED): it's our own run, we want it.
     select r.id into v_run_id
     from public.pipeline_runs r
     where r.worker_id = p_worker_id
       and r.lock_expires_at >= v_now
       and r.status in ('running', 'in_progress', 'approved', 'waiting_approval')
-    order by r.locked_at desc
+    order by r.locked_at desc nulls last
     limit 1
     for update of r;
 
     if v_run_id is not null then
-        -- Reclaim: extend lease, keep token + locked_at (stable)
+        -- Reclaim: extend lease, keep token + locked_at (stable).
+        -- worker_id set explicitly for consistency (idempotent here).
         update public.pipeline_runs
-        set lock_expires_at      = v_now + make_interval(mins => v_lease),
+        set worker_id            = p_worker_id,
+            lock_expires_at      = v_now + make_interval(mins => v_lease),
             last_heartbeat_at    = v_now,
-            worker_state         = 'active',
+            worker_state         = case
+                when status = 'waiting_approval' then 'waiting'
+                else 'active'
+            end,
             worker_last_error    = ''
         where id = v_run_id;
         return v_run_id;
