@@ -309,6 +309,31 @@ def main(argv: Optional[List[str]] = None) -> int:
         dry_run=args.dry_run,
     )
 
+    # Persist cleanup_history in index meta_info
+    if not args.dry_run and (result["moved"] > 0 or result["deleted"] > 0):
+        try:
+            idx = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
+            meta = idx.setdefault("meta_info", {})
+            history = meta.get("cleanup_history", [])
+            history.append({
+                "at": _utcnow().isoformat(),
+                "orphans_found": len(orphans),
+                "moved": result["moved"],
+                "deleted": result["deleted"],
+                "failed": result["failed"],
+                "dangling": len(dangling),
+            })
+            meta["cleanup_history"] = history[-10:]
+            # Atomic write
+            tmp = index_path.with_suffix(".json.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(idx, f, ensure_ascii=False, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, index_path)
+        except Exception:
+            pass  # telemetry is best-effort, never fail the cleanup
+
     if args.quarantine:
         print(
             f"\nQUARANTINE: moved={result['moved']} "

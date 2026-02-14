@@ -9022,5 +9022,74 @@ class TestRefreshBannerCounters(unittest.TestCase):
             self.assertIn("Doctor Report", content)
 
 
+class TestStateRootSeal(unittest.TestCase):
+    """Test that state_root is sealed on first empty run."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_state_root_persisted_on_empty_run(self):
+        """Even with no mp4 files, state_root should be written on first run."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            # Force run on empty dir to seal state_root
+            refresh_index(final_dir=final, index_path=idx_path, force=True)
+            idx = _load_index(idx_path)
+            meta = idx.get("meta_info", {})
+            self.assertIn("state_root", meta)
+            self.assertEqual(meta["state_root"], str(Path(td).resolve()))
+
+
+class TestCleanupHistory(unittest.TestCase):
+    """Test that doctor_cleanup persists cleanup_history in index."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_cleanup_history_written_after_quarantine(self):
+        self._add_scripts_path()
+        from doctor_cleanup import main as cleanup_main
+        import time as _time
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "video" / "final"
+            final.mkdir(parents=True)
+            quarantine = Path(td) / "video" / "quarantine"
+            idx_path = Path(td) / "video" / "index.json"
+            # Create index with no items
+            idx_path.write_text(json.dumps({"items": {}, "meta_info": {}}))
+            # Create an orphan file (not in index, large enough)
+            orphan = final / "V_R1_s1_aabbccdd.mp4"
+            orphan.write_bytes(b"x" * 600_000)
+            # Set mtime to 10 hours ago
+            old_ts = _time.time() - 36_000
+            os.utime(orphan, (old_ts, old_ts))
+            rc = cleanup_main([
+                "--index", str(idx_path),
+                "--final-dir", str(final),
+                "--quarantine-dir", str(quarantine),
+                "--quarantine",
+                "--older-than-hours", "6",
+                "--min-size-kb", "500",
+                "--keep-last-n", "0",
+            ])
+            self.assertEqual(rc, 0)
+            # Check cleanup_history was written
+            idx = json.loads(idx_path.read_text())
+            history = idx.get("meta_info", {}).get("cleanup_history", [])
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["moved"], 1)
+            self.assertIn("dangling", history[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

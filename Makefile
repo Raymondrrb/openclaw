@@ -156,17 +156,15 @@ notify:
 status-notify:
 	@python3 scripts/doctor_report.py --state-dir state --preflight --qc --no-bitrate-gate --no-color --out state/status_summary.txt; \
 	code=$$?; \
+	./scripts/telegram_send.sh state/status_summary.txt; \
 	if [ $$code -eq 2 ]; then \
-		./scripts/telegram_send.sh "CRITICAL: status check failed (see summary)"; \
+		./scripts/telegram_send.sh "CRITICAL: credits needed exceed threshold"; \
 	elif [ $$code -eq 3 ]; then \
 		./scripts/telegram_send.sh "WARNING: low bitrate videos detected"; \
-	else \
-		./scripts/telegram_send.sh "OK: status check passed"; \
 	fi
 
 notify-summary:
-	@MSG="$$(cat state/status_summary.txt 2>/dev/null || echo 'No summary available')"; \
-	./scripts/telegram_send.sh "$$MSG"
+	@./scripts/telegram_send.sh state/status_summary.txt
 
 # --- Maintenance (safe + apply) ---
 # SAFE MODE: refresh + dry-run reports. Does not remove or modify anything.

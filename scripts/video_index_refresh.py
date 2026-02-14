@@ -296,11 +296,13 @@ def refresh_index(
 
         # Persist state_root in meta_info (layout-agnostic on future reads)
         meta_info = idx.setdefault("meta_info", {})
+        root_was_set = False
         declared_root = meta_info.get("state_root")
         if declared_root:
             state_root = Path(declared_root).resolve()
         else:
             meta_info["state_root"] = str(state_root)
+            root_was_set = True
 
         mp4_files = sorted(final_dir.glob("*.mp4"))
         stats.scanned = len(mp4_files)
@@ -317,7 +319,7 @@ def refresh_index(
                 stats.item_error += 1
 
         # Persist when any work was done (not just enriched > 0).
-        did_work = stats.probed > 0 or stats.enriched > 0 or force
+        did_work = stats.probed > 0 or stats.enriched > 0 or force or root_was_set
         did_change = stats.enriched > 0
 
         if not dry_run and did_work:
