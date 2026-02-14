@@ -10,6 +10,7 @@ Validates that a run directory is safe to publish:
   6. Visual QC is PASS
   7. Final video file exists in publish/
   8. Stability score above critical threshold
+  9. DaVinci required: engine_used must be 'davinci' (blocks shadow renders)
 
 Golden rule: NEVER upload unless every gate passes.
 
@@ -306,6 +307,39 @@ def gate_audio_proof(manifest: Dict[str, Any]) -> GateResult:
     return GateResult("audio_proof", True, detail)
 
 
+def gate_davinci_required(manifest: Dict[str, Any]) -> GateResult:
+    """Gate: if davinci_required policy is set, engine_used must be 'davinci'.
+
+    Checks render.engine_used in manifest. If the policy field
+    render.davinci_required is True (or absent — default policy),
+    the render must have been produced by DaVinci, not the shadow FFmpeg.
+    """
+    render = manifest.get("render", {})
+    policy = render.get("davinci_required", True)  # default: required
+
+    if not policy:
+        return GateResult(
+            "davinci_required", True, "davinci_required=false (policy disabled)"
+        )
+
+    engine = render.get("engine_used", "")
+    if engine == "davinci":
+        return GateResult(
+            "davinci_required", True, f"engine_used={engine}"
+        )
+
+    if not engine:
+        return GateResult(
+            "davinci_required", False,
+            "no engine_used in manifest (render not executed?)"
+        )
+
+    return GateResult(
+        "davinci_required", False,
+        f"engine_used={engine} (policy requires davinci)"
+    )
+
+
 def gate_claims_validation(manifest: Dict[str, Any]) -> GateResult:
     claims = manifest.get("claims_validation", {})
     status = claims.get("status", "")
@@ -383,6 +417,10 @@ def validate_run(
 
     # Gate 11: stability score
     gates.append(gate_stability_score(manifest, stability_threshold))
+
+    # Gate 12: DaVinci required (blocks shadow-only renders from upload)
+    if require_video:
+        gates.append(gate_davinci_required(manifest))
 
     verdict = _build_verdict(run_id, gates)
 

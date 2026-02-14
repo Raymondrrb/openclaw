@@ -12061,6 +12061,7 @@ class TestFinalValidator(unittest.TestCase):
                 "identity": {"confidence": "HIGH", "reason": "test"},
                 "visual_qc_result": "PASS",
             },
+            "render": {"engine_used": "davinci", "davinci_required": True},
         }
         self._write_json(self.run_dir / "00_manifest.json", manifest)
         # Core assets
@@ -15096,6 +15097,431 @@ class TestFFmpegRenderDryRun(unittest.TestCase):
         r1 = render(self.run_dir, apply=False)
         r2 = render(self.run_dir, apply=False)
         self.assertEqual(r1.inputs_hash, r2.inputs_hash)
+
+
+# ============================================================================
+# Resolve Bridge tests
+# ============================================================================
+
+
+class TestResolveBridgeKenBurns(unittest.TestCase):
+    """Ken Burns pattern determinism + selection from resolve_bridge."""
+
+    def test_pattern_deterministic(self):
+        from rayvault.resolve_bridge import kenburns_pattern_for_segment
+        p1 = kenburns_pattern_for_segment("RUN_A", "B00TEST", 1)
+        p2 = kenburns_pattern_for_segment("RUN_A", "B00TEST", 1)
+        self.assertEqual(p1["name"], p2["name"])
+
+    def test_different_inputs_may_differ(self):
+        from rayvault.resolve_bridge import kenburns_pattern_for_segment
+        p1 = kenburns_pattern_for_segment("RUN_A", "ASIN_1", 1)
+        p2 = kenburns_pattern_for_segment("RUN_A", "ASIN_2", 2)
+        # Not guaranteed to differ, but both must be valid patterns
+        from rayvault.resolve_bridge import KENBURNS_PATTERNS
+        valid_names = {p["name"] for p in KENBURNS_PATTERNS}
+        self.assertIn(p1["name"], valid_names)
+        self.assertIn(p2["name"], valid_names)
+
+    def test_all_patterns_have_required_keys(self):
+        from rayvault.resolve_bridge import KENBURNS_PATTERNS
+        for pat in KENBURNS_PATTERNS:
+            self.assertIn("name", pat)
+            self.assertIn("zoom", pat)
+            self.assertIn("pan_x", pat)
+            self.assertIn("pan_y", pat)
+            self.assertEqual(len(pat["zoom"]), 2)
+
+    def test_six_patterns_available(self):
+        from rayvault.resolve_bridge import KENBURNS_PATTERNS
+        self.assertEqual(len(KENBURNS_PATTERNS), 6)
+
+
+class TestResolveCapabilities(unittest.TestCase):
+    """ResolveCapabilities dataclass."""
+
+    def test_defaults_all_false(self):
+        from rayvault.resolve_bridge import ResolveCapabilities
+        caps = ResolveCapabilities()
+        self.assertFalse(caps.scripting_available)
+        self.assertFalse(caps.resolve_connected)
+        self.assertFalse(caps.can_create_project)
+
+    def test_to_dict(self):
+        from rayvault.resolve_bridge import ResolveCapabilities
+        caps = ResolveCapabilities(scripting_available=True,
+                                   resolve_connected=True,
+                                   resolve_version="19.1")
+        d = caps.to_dict()
+        self.assertTrue(d["scripting_available"])
+        self.assertTrue(d["resolve_connected"])
+        self.assertEqual(d["resolve_version"], "19.1")
+        self.assertFalse(d["can_create_project"])
+
+    def test_to_dict_has_all_fields(self):
+        from rayvault.resolve_bridge import ResolveCapabilities
+        caps = ResolveCapabilities()
+        d = caps.to_dict()
+        expected_keys = {
+            "scripting_available", "resolve_connected",
+            "can_create_project", "can_create_timeline",
+            "can_import_media", "can_set_project_settings",
+            "can_set_render_settings", "can_start_render",
+            "can_get_render_status", "can_add_track",
+            "resolve_version", "resolve_name",
+        }
+        self.assertEqual(set(d.keys()), expected_keys)
+
+
+class TestResolveBridgeDisconnected(unittest.TestCase):
+    """Test bridge methods when Resolve is NOT connected."""
+
+    def test_bridge_not_connected_by_default(self):
+        from rayvault.resolve_bridge import ResolveBridge
+        bridge = ResolveBridge()
+        self.assertFalse(bridge.connected)
+        self.assertIsNone(bridge.project)
+        self.assertIsNone(bridge.media_pool)
+        self.assertIsNone(bridge.timeline)
+
+    def test_create_bins_returns_empty(self):
+        from rayvault.resolve_bridge import ResolveBridge
+        bridge = ResolveBridge()
+        bins = bridge.create_bins()
+        self.assertEqual(bins, {})
+
+    def test_import_media_returns_empty(self):
+        from rayvault.resolve_bridge import ResolveBridge
+        bridge = ResolveBridge()
+        items = bridge.import_media(["/fake/path.mp4"])
+        self.assertEqual(items, [])
+
+    def test_create_timeline_returns_false(self):
+        from rayvault.resolve_bridge import ResolveBridge
+        bridge = ResolveBridge()
+        self.assertFalse(bridge.create_timeline("test"))
+
+    def test_disconnect_clears_state(self):
+        from rayvault.resolve_bridge import ResolveBridge
+        bridge = ResolveBridge()
+        bridge.disconnect()
+        self.assertFalse(bridge.connected)
+
+
+# ============================================================================
+# DaVinci Assembler tests
+# ============================================================================
+
+
+class TestDaVinciAssemblerGates(unittest.TestCase):
+    """Test DaVinci assembler gates without requiring Resolve."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.run_dir = Path(self.tmp) / "runs" / "TEST_RUN"
+        self.run_dir.mkdir(parents=True)
+        (self.run_dir / "publish" / "overlays").mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def _create_wav(self, path, duration_sec=5.0, rate=48000):
+        import struct
+        n_frames = int(duration_sec * rate)
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(struct.pack(f"<{n_frames}h", *([0] * n_frames)))
+
+    def test_gate_essential_files_missing(self):
+        from rayvault.davinci_assembler import gate_essential_files
+        result = gate_essential_files(self.run_dir)
+        self.assertFalse(result.ok)
+        self.assertTrue(len(result.errors) >= 3)
+
+    def test_gate_essential_files_ok(self):
+        from rayvault.davinci_assembler import gate_essential_files
+        self._write_json(self.run_dir / "00_manifest.json", {"run_id": "TEST"})
+        self._write_json(self.run_dir / "05_render_config.json", {"segments": []})
+        self._create_wav(self.run_dir / "02_audio.wav", 5.0)
+        self._write_json(
+            self.run_dir / "publish" / "overlays" / "overlays_index.json",
+            {"items": []},
+        )
+        result = gate_essential_files(self.run_dir)
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.errors), 0)
+
+    def test_gate_essential_partial_missing(self):
+        from rayvault.davinci_assembler import gate_essential_files
+        self._write_json(self.run_dir / "00_manifest.json", {"run_id": "TEST"})
+        # Missing: render_config, audio, overlays_index
+        result = gate_essential_files(self.run_dir)
+        self.assertFalse(result.ok)
+        self.assertTrue(len(result.errors) >= 2)
+
+
+class TestDaVinciAssemblerHash(unittest.TestCase):
+    """Test compute_inputs_hash determinism."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.run_dir = Path(self.tmp) / "runs" / "TEST_RUN"
+        self.run_dir.mkdir(parents=True)
+        (self.run_dir / "publish" / "overlays").mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def _create_wav(self, path, duration_sec=5.0, rate=48000):
+        import struct
+        n_frames = int(duration_sec * rate)
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(struct.pack(f"<{n_frames}h", *([0] * n_frames)))
+
+    def test_hash_deterministic(self):
+        from rayvault.davinci_assembler import compute_inputs_hash
+        self._write_json(self.run_dir / "05_render_config.json", {"v": "1.3"})
+        self._write_json(
+            self.run_dir / "publish" / "overlays" / "overlays_index.json",
+            {"items": []},
+        )
+        self._create_wav(self.run_dir / "02_audio.wav", 3.0)
+
+        h1 = compute_inputs_hash(self.run_dir)
+        h2 = compute_inputs_hash(self.run_dir)
+        self.assertEqual(h1, h2)
+        self.assertEqual(len(h1), 40)  # SHA1 hex
+
+    def test_hash_changes_with_config(self):
+        from rayvault.davinci_assembler import compute_inputs_hash
+        self._write_json(self.run_dir / "05_render_config.json", {"v": "1.3"})
+        self._write_json(
+            self.run_dir / "publish" / "overlays" / "overlays_index.json",
+            {"items": []},
+        )
+        self._create_wav(self.run_dir / "02_audio.wav", 3.0)
+        h1 = compute_inputs_hash(self.run_dir)
+
+        # Change config
+        self._write_json(self.run_dir / "05_render_config.json", {"v": "1.4"})
+        h2 = compute_inputs_hash(self.run_dir)
+        self.assertNotEqual(h1, h2)
+
+    def test_hash_includes_engine_tag(self):
+        from rayvault.davinci_assembler import compute_inputs_hash
+        self._write_json(self.run_dir / "05_render_config.json", {"v": "1.3"})
+        h = compute_inputs_hash(self.run_dir)
+        # Hash includes "engine:davinci" so it differs from ffmpeg hash
+        self.assertTrue(len(h) > 0)
+
+
+class TestDaVinciAssemblerDryRun(unittest.TestCase):
+    """Test DaVinci assembler dry-run (no Resolve connection needed)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.run_dir = Path(self.tmp) / "runs" / "TEST_RUN"
+        self.run_dir.mkdir(parents=True)
+        (self.run_dir / "publish" / "overlays").mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def _create_wav(self, path, duration_sec=5.0, rate=48000):
+        import struct
+        n_frames = int(duration_sec * rate)
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(struct.pack(f"<{n_frames}h", *([0] * n_frames)))
+
+    def test_dry_run_ok(self):
+        from rayvault.davinci_assembler import assemble
+        self._write_json(self.run_dir / "00_manifest.json", {"run_id": "TEST"})
+        self._write_json(self.run_dir / "05_render_config.json", {
+            "version": "1.3",
+            "output": {"w": 1920, "h": 1080, "fps": 30},
+            "ray": {"frame_path": "03_frame.png"},
+            "segments": [
+                {"id": "seg_000", "type": "intro", "t0": 0.0, "t1": 2.0, "frames": 60},
+                {"id": "seg_001", "type": "outro", "t0": 2.0, "t1": 3.5, "frames": 45},
+            ],
+        })
+        self._write_json(
+            self.run_dir / "publish" / "overlays" / "overlays_index.json",
+            {"episode_truth_tier": "GREEN", "items": []},
+        )
+        self._create_wav(self.run_dir / "02_audio.wav", 3.5)
+
+        result = assemble(self.run_dir, apply=False)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "DRY_RUN")
+        self.assertEqual(result.engine_used, "davinci")
+        self.assertTrue(len(result.inputs_hash) > 0)
+
+    def test_dry_run_blocked_without_manifest(self):
+        from rayvault.davinci_assembler import assemble
+        result = assemble(self.run_dir, apply=False)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "BLOCKED")
+
+    def test_dry_run_blocked_without_audio(self):
+        from rayvault.davinci_assembler import assemble
+        self._write_json(self.run_dir / "00_manifest.json", {"run_id": "TEST"})
+        self._write_json(self.run_dir / "05_render_config.json", {"segments": []})
+        self._write_json(
+            self.run_dir / "publish" / "overlays" / "overlays_index.json",
+            {"items": []},
+        )
+        result = assemble(self.run_dir, apply=False)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "BLOCKED")
+
+
+class TestDaVinciVerifyResult(unittest.TestCase):
+    """Test VerifyResult and verify_output logic."""
+
+    def test_verify_missing_file(self):
+        from rayvault.davinci_assembler import verify_output
+        result = verify_output(Path("/nonexistent/video.mp4"), 10.0)
+        self.assertFalse(result.ok)
+        self.assertIn("OUTPUT_MISSING", result.errors)
+
+    def test_verify_result_defaults(self):
+        from rayvault.davinci_assembler import VerifyResult
+        r = VerifyResult(ok=True)
+        self.assertTrue(r.ok)
+        self.assertEqual(r.duration_sec, 0.0)
+        self.assertEqual(r.errors, [])
+        self.assertEqual(r.warnings, [])
+
+    def test_assemble_result_defaults(self):
+        from rayvault.davinci_assembler import AssembleResult
+        r = AssembleResult(ok=False, status="BLOCKED")
+        self.assertFalse(r.ok)
+        self.assertEqual(r.engine_used, "")
+        self.assertIsNone(r.output_path)
+
+
+# ============================================================================
+# Final Validator — davinci_required gate tests
+# ============================================================================
+
+
+class TestGateDaVinciRequired(unittest.TestCase):
+    """Test the davinci_required gate in final_validator."""
+
+    def test_pass_when_engine_davinci(self):
+        from rayvault.final_validator import gate_davinci_required
+        manifest = {"render": {"engine_used": "davinci", "davinci_required": True}}
+        g = gate_davinci_required(manifest)
+        self.assertTrue(g.passed)
+        self.assertEqual(g.name, "davinci_required")
+
+    def test_fail_when_engine_shadow(self):
+        from rayvault.final_validator import gate_davinci_required
+        manifest = {"render": {"engine_used": "shadow_ffmpeg"}}
+        g = gate_davinci_required(manifest)
+        self.assertFalse(g.passed)
+        self.assertIn("shadow_ffmpeg", g.detail)
+
+    def test_fail_when_no_engine(self):
+        from rayvault.final_validator import gate_davinci_required
+        manifest = {"render": {}}
+        g = gate_davinci_required(manifest)
+        self.assertFalse(g.passed)
+        self.assertIn("no engine_used", g.detail)
+
+    def test_pass_when_policy_disabled(self):
+        from rayvault.final_validator import gate_davinci_required
+        manifest = {"render": {"engine_used": "shadow_ffmpeg", "davinci_required": False}}
+        g = gate_davinci_required(manifest)
+        self.assertTrue(g.passed)
+        self.assertIn("policy disabled", g.detail)
+
+    def test_default_policy_is_required(self):
+        from rayvault.final_validator import gate_davinci_required
+        # No davinci_required field — defaults to True
+        manifest = {"render": {"engine_used": "ffmpeg"}}
+        g = gate_davinci_required(manifest)
+        self.assertFalse(g.passed)
+
+    def test_pass_no_render_section_and_policy_disabled(self):
+        from rayvault.final_validator import gate_davinci_required
+        manifest = {}
+        g = gate_davinci_required(manifest)
+        # No render section means engine_used is empty, policy defaults to True → fail
+        self.assertFalse(g.passed)
+
+    def test_gate_in_validate_run(self):
+        """The davinci_required gate should appear in full validation output."""
+        from rayvault.final_validator import validate_run
+        tmp = tempfile.mkdtemp()
+        run_dir = Path(tmp) / "TEST"
+        run_dir.mkdir(parents=True)
+        (run_dir / "publish").mkdir()
+        # Minimal manifest
+        manifest = {
+            "run_id": "TEST",
+            "status": "READY_FOR_RENDER",
+            "metadata": {"identity": {"confidence": "HIGH"}, "visual_qc_result": "PASS"},
+            "stability": {"stability_score": 90},
+            "render": {"engine_used": "davinci", "davinci_required": True},
+        }
+        with open(run_dir / "00_manifest.json", "w") as f:
+            json.dump(manifest, f)
+        with open(run_dir / "01_script.txt", "w") as f:
+            f.write("Test script")
+        with open(run_dir / "03_frame.png", "wb") as f:
+            f.write(b"PNG_STUB")
+
+        import struct
+        rate = 48000
+        n_frames = int(5.0 * rate)
+        with wave.open(str(run_dir / "02_audio.wav"), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(struct.pack(f"<{n_frames}h", *([0] * n_frames)))
+
+        with open(run_dir / "05_render_config.json", "w") as f:
+            json.dump({"segments": [{"id": "s0", "type": "intro"}]}, f)
+
+        video = run_dir / "publish" / "video_final.mp4"
+        video.write_bytes(b"X" * 2048)
+
+        verdict = validate_run(run_dir, require_video=True)
+        gate_names = [g.name for g in verdict.gates]
+        self.assertIn("davinci_required", gate_names)
+        dg = next(g for g in verdict.gates if g.name == "davinci_required")
+        self.assertTrue(dg.passed)
+
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
