@@ -498,6 +498,147 @@ class RunManager:
     def lock_token(self) -> str:
         return self._state.lock_token
 
+    # --- Claim-next: atomic "give me the next run" ---
+
+    @classmethod
+    def claim_next(
+        cls,
+        *,
+        worker_id: str,
+        lease_minutes: int = DEFAULT_LEASE_MINUTES,
+        task_type: str | None = None,
+        use_supabase: bool = True,
+        policy_version: str = "v1.0",
+    ) -> "RunManager | None":
+        """Atomically claim the next eligible run. Returns RunManager or None.
+
+        Uses rpc_claim_next_run (FOR UPDATE SKIP LOCKED) so two workers
+        calling simultaneously each get a different run.
+
+        Priority: approved > running/in_progress, then oldest first.
+
+        Args:
+            worker_id: Identifier for this worker (min 3 chars).
+            lease_minutes: Lease duration (clamped 1-30).
+            task_type: Optional filter by pipeline task type.
+            use_supabase: Whether to use Supabase RPCs.
+            policy_version: Policy version for the RunManager.
+
+        Returns:
+            RunManager instance if a run was claimed, None if no eligible runs.
+        """
+        if len(worker_id.strip()) < MIN_WORKER_ID_LEN:
+            print(
+                f"[run_manager] Cannot claim_next: worker_id too short "
+                f"(min {MIN_WORKER_ID_LEN} chars)",
+                file=sys.stderr,
+            )
+            return None
+
+        lease_minutes = max(MIN_LEASE_MINUTES, min(lease_minutes, MAX_LEASE_MINUTES))
+        token = str(uuid.uuid4())
+
+        if use_supabase:
+            run_id = cls._supabase_claim_next(worker_id, token, lease_minutes, task_type)
+            if not run_id:
+                return None
+        else:
+            # Local mode: no real queue, return None
+            return None
+
+        rm = cls(
+            run_id,
+            worker_id=worker_id,
+            use_supabase=use_supabase,
+            policy_version=policy_version,
+        )
+        rm._state.lock_token = token
+        rm._state.lock_expires_at = _future_iso(lease_minutes)
+        rm._state.status = "in_progress"  # already claimed = active
+
+        rm._log_event("worker_claim_next", {
+            "worker_id": worker_id,
+            "lock_token": token,
+            "lease_minutes": lease_minutes,
+            "task_type": task_type,
+        })
+
+        return rm
+
+    @staticmethod
+    def _supabase_claim_next(
+        worker_id: str, token: str, lease_minutes: int, task_type: str | None,
+    ) -> str | None:
+        """Call rpc_claim_next_run. Returns run_id or None."""
+        try:
+            from tools.lib.supabase_client import rpc
+            params: dict[str, Any] = {
+                "p_worker_id": worker_id,
+                "p_lock_token": token,
+                "p_lease_minutes": lease_minutes,
+            }
+            if task_type:
+                params["p_task_type"] = task_type
+            result = rpc("rpc_claim_next_run", params)
+            if result:
+                return str(result)
+            return None
+        except Exception as exc:
+            print(f"[run_manager] claim_next RPC failed: {exc}", file=sys.stderr)
+            return None
+
+    # --- Force unlock: operator emergency release ---
+
+    @staticmethod
+    def force_unlock(
+        run_id: str,
+        *,
+        operator_id: str,
+        reason: str = "manual unlock",
+        force: bool = False,
+        use_supabase: bool = True,
+    ) -> bool:
+        """Force-unlock a run. Only clears lock fields, does NOT change status.
+
+        By default only works if lease is already expired.
+        With force=True, unlocks regardless (emergency use).
+        Always writes a forensic run_event.
+
+        Args:
+            run_id: The run to unlock.
+            operator_id: Who is unlocking (min 3 chars).
+            reason: Why this unlock is happening.
+            force: If True, unlock even if lease hasn't expired.
+            use_supabase: Whether to use Supabase RPCs.
+
+        Returns True if the run was unlocked.
+        """
+        if len(operator_id.strip()) < MIN_WORKER_ID_LEN:
+            print(
+                f"[run_manager] Cannot unlock: operator_id too short "
+                f"(min {MIN_WORKER_ID_LEN} chars)",
+                file=sys.stderr,
+            )
+            return False
+
+        if use_supabase:
+            try:
+                from tools.lib.supabase_client import rpc
+                result = rpc("rpc_force_unlock_run", {
+                    "p_run_id": run_id,
+                    "p_operator_id": operator_id,
+                    "p_reason": reason,
+                    "p_force": force,
+                })
+                return bool(result)
+            except Exception as exc:
+                print(f"[run_manager] force_unlock RPC failed: {exc}", file=sys.stderr)
+                return False
+        else:
+            # Local mode: nothing to unlock
+            print("[run_manager] force_unlock requires Supabase", file=sys.stderr)
+            return False
+
     # --- Supabase lease helpers ---
 
     def _supabase_claim(self, token: str, lease_minutes: int) -> bool:

@@ -40,7 +40,10 @@ Evidence Collection
 | `tools/lib/telegram_gate.py` | Atomic, idempotent Telegram button handler |
 | `tools/lib/context_builder.py` | Filesystem-first context pack selection |
 | `supabase/sql/007_run_manager_schema.sql` | DB schema (runs, run_events, evidence_items, fingerprints) |
-| `tools/test_run_manager.py` | 65 unit tests covering all modules |
+| `supabase/sql/009_worker_lease_lock.sql` | Worker lease columns + CAS claim/heartbeat/release RPCs |
+| `supabase/sql/010_claim_next_and_unlock.sql` | Queue-style claim_next + force_unlock RPCs |
+| `tools/rayvault_unlock.py` | CLI for force-unlocking stuck runs |
+| `tools/test_run_manager.py` | 96 unit tests covering all modules |
 
 ## Quick Start
 
@@ -341,10 +344,61 @@ rm.complete()  # lock released automatically
 5. **Heartbeat during gate** — worker keeps heartbeating during `waiting_approval` to retain ownership
 6. **Lock lost panic** — on `heartbeat() → False`, worker stops immediately and logs `lock_lost` event
 
+## Claim Next Run (010)
+
+After running `009_worker_lease_lock.sql`, apply `010_claim_next_and_unlock.sql` for queue-style worker operations.
+
+### Worker Queue Protocol
+
+```python
+from tools.lib.run_manager import RunManager
+
+# Atomic: selects + claims the next eligible run in one transaction
+rm = RunManager.claim_next(worker_id="RayMac-01")
+if rm is None:
+    print("No eligible runs")
+    return
+
+# rm is ready to use — already claimed with active lease
+print(f"Claimed run {rm.run_id}")
+rm.heartbeat()  # renew every 2-3 min
+# ... do work ...
+rm.complete()
+```
+
+### Force Unlock (CLI)
+
+```bash
+# Default: only unlocks if lease expired
+python3 tools/rayvault_unlock.py --run <UUID> --operator Ray --reason "worker died"
+
+# Force: unlock even if lease is active (emergency)
+python3 tools/rayvault_unlock.py --run <UUID> --operator Ray --force
+
+# JSON output
+python3 tools/rayvault_unlock.py --run <UUID> --operator Ray --json
+```
+
+### RPC Functions (010)
+
+| Function | Purpose |
+|----------|---------|
+| `rpc_claim_next_run(worker_id, lock_token, lease_minutes, task_type?)` | Atomic claim next eligible run (FOR UPDATE SKIP LOCKED) |
+| `rpc_force_unlock_run(run_id, operator_id, reason, force?)` | Operator unlock with forensic `manual_unlock` event |
+
+### Safety Rules
+
+1. **FOR UPDATE SKIP LOCKED** — two workers calling simultaneously get different runs
+2. **Priority ordering** — `approved` first (human already unblocked), then oldest
+3. **Lock zombie guard** — handles `lock_expires_at IS NULL` edge case
+4. **Unlock doesn't change status** — only clears lock fields, run keeps its state
+5. **Force requires explicit flag** — default only works on expired leases
+6. **Forensic trail** — every unlock writes `manual_unlock` event with operator, reason, previous lock info
+
 ## Testing
 
 ```bash
-# Run all 91 tests
+# Run all 96 tests
 python3 tools/test_run_manager.py
 
 # Tests cover:
@@ -360,6 +414,7 @@ python3 tools/test_run_manager.py
 # - CB integration (3 tests)
 # - Snapshot integrity (2 tests)
 # - Worker lease + SRE guardrails (17 tests)
+# - Claim next + force unlock (5 tests)
 # - Telegram callback parsing (5 tests)
 # - Telegram gate handler (5 tests)
 # - Context builder (8 tests)

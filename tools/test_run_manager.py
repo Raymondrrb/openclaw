@@ -840,6 +840,53 @@ class TestWorkerLeaseClaim(unittest.TestCase):
         self.assertLessEqual(delta, 31)
 
 
+class TestClaimNextAndForceUnlock(unittest.TestCase):
+    """Tests for claim_next (local returns None) and force_unlock."""
+
+    def test_claim_next_local_returns_none(self):
+        """claim_next in local mode returns None (no queue)."""
+        result = RunManager.claim_next(
+            worker_id="RayMac-01",
+            use_supabase=False,
+        )
+        self.assertIsNone(result)
+
+    def test_claim_next_short_worker_id_returns_none(self):
+        """claim_next with short worker_id returns None."""
+        result = RunManager.claim_next(
+            worker_id="AB",
+            use_supabase=False,
+        )
+        self.assertIsNone(result)
+
+    def test_force_unlock_local_returns_false(self):
+        """force_unlock in local mode returns False."""
+        result = RunManager.force_unlock(
+            "some-run-id",
+            operator_id="Ray",
+            reason="test",
+            use_supabase=False,
+        )
+        self.assertFalse(result)
+
+    def test_force_unlock_short_operator_returns_false(self):
+        """force_unlock with short operator_id returns False."""
+        result = RunManager.force_unlock(
+            "some-run-id",
+            operator_id="AB",
+            reason="test",
+            use_supabase=False,
+        )
+        self.assertFalse(result)
+
+    def test_clamp_lease_static(self):
+        """_clamp_lease works correctly."""
+        self.assertEqual(RunManager._clamp_lease(0), MIN_LEASE_MINUTES)
+        self.assertEqual(RunManager._clamp_lease(-5), MIN_LEASE_MINUTES)
+        self.assertEqual(RunManager._clamp_lease(10), 10)
+        self.assertEqual(RunManager._clamp_lease(999), MAX_LEASE_MINUTES)
+
+
 # =========================================================================
 # Telegram Gate Tests
 # =========================================================================
