@@ -15793,5 +15793,305 @@ class TestGatePacing(unittest.TestCase):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ============================================================================
+# Policies tests
+# ============================================================================
+
+
+class TestPolicies(unittest.TestCase):
+    """Test rayvault/policies.py constants and functions."""
+
+    def test_constants_exist(self):
+        from rayvault.policies import (
+            TARGET_MIN_SEC, TARGET_MAX_SEC, MAX_STATIC_SECONDS,
+            LUFS_TARGET, STALL_TIMEOUT_SEC, MIN_CACHE_FREE_GB,
+        )
+        self.assertEqual(TARGET_MIN_SEC, 480)
+        self.assertEqual(TARGET_MAX_SEC, 720)
+        self.assertEqual(MAX_STATIC_SECONDS, 18)
+        self.assertEqual(LUFS_TARGET, -14.0)
+
+    def test_motion_group_for_preset(self):
+        from rayvault.policies import motion_group_for_preset
+        self.assertEqual(motion_group_for_preset("zoom_in_center"), "zoom_in")
+        self.assertEqual(motion_group_for_preset("pan_left_to_right"), "pan_lr")
+        self.assertEqual(motion_group_for_preset("diagonal_drift"), "diagonal")
+        self.assertEqual(motion_group_for_preset("unknown_preset"), "other")
+
+    def test_motion_groups_complete(self):
+        from rayvault.policies import MOTION_GROUPS
+        all_presets = set()
+        for presets in MOTION_GROUPS.values():
+            all_presets.update(presets)
+        self.assertIn("zoom_in_center", all_presets)
+        self.assertIn("zoom_out_center", all_presets)
+        self.assertIn("pan_left_to_right", all_presets)
+
+
+# ============================================================================
+# Segment ID tests
+# ============================================================================
+
+
+class TestSegmentId(unittest.TestCase):
+    """Test rayvault/segment_id.py — canonical segment identifiers."""
+
+    def test_deterministic(self):
+        from rayvault.segment_id import compute_segment_id
+        seg = {"type": "product", "rank": 1, "asin": "B00TEST",
+               "visual": {"mode": "KEN_BURNS", "source": "img.png"}}
+        id1 = compute_segment_id(seg)
+        id2 = compute_segment_id(seg)
+        self.assertEqual(id1, id2)
+        self.assertEqual(len(id1), 16)
+
+    def test_time_independent(self):
+        from rayvault.segment_id import compute_segment_id
+        seg1 = {"type": "product", "rank": 1, "asin": "B00TEST",
+                "t0": 5.0, "t1": 10.0,
+                "visual": {"mode": "KEN_BURNS"}}
+        seg2 = {"type": "product", "rank": 1, "asin": "B00TEST",
+                "t0": 20.0, "t1": 25.0,
+                "visual": {"mode": "KEN_BURNS"}}
+        self.assertEqual(compute_segment_id(seg1), compute_segment_id(seg2))
+
+    def test_content_dependent(self):
+        from rayvault.segment_id import compute_segment_id
+        seg1 = {"type": "product", "rank": 1, "asin": "B00TEST",
+                "visual": {"mode": "KEN_BURNS"}}
+        seg2 = {"type": "product", "rank": 2, "asin": "B00OTHER",
+                "visual": {"mode": "BROLL_VIDEO"}}
+        self.assertNotEqual(compute_segment_id(seg1), compute_segment_id(seg2))
+
+    def test_validate_consistent_ids(self):
+        from rayvault.segment_id import compute_segment_id, validate_segment_ids
+        seg = {"type": "product", "rank": 1, "visual": {"mode": "KEN_BURNS"}}
+        seg["segment_id"] = compute_segment_id(seg)
+        errors = validate_segment_ids([seg])
+        self.assertEqual(errors, [])
+
+    def test_validate_inconsistent_id(self):
+        from rayvault.segment_id import validate_segment_ids
+        seg = {"type": "product", "rank": 1, "visual": {"mode": "KEN_BURNS"},
+               "segment_id": "wrong_id_here!!!"}
+        errors = validate_segment_ids([seg])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("SEGMENT_ID_MISMATCH", errors[0])
+
+    def test_ensure_segment_ids(self):
+        from rayvault.segment_id import ensure_segment_ids
+        segs = [
+            {"type": "intro"},
+            {"type": "product", "rank": 1, "visual": {"mode": "KEN_BURNS"}},
+        ]
+        result = ensure_segment_ids(segs)
+        for seg in result:
+            self.assertIn("segment_id", seg)
+            self.assertEqual(len(seg["segment_id"]), 16)
+
+    def test_canonical_dict_excludes_timing(self):
+        from rayvault.segment_id import canonical_segment_dict
+        seg = {"type": "product", "rank": 1, "t0": 5, "t1": 10,
+               "id": "seg_001", "frames": 150,
+               "visual": {"mode": "KEN_BURNS"}}
+        canon = canonical_segment_dict(seg)
+        self.assertNotIn("t0", canon)
+        self.assertNotIn("t1", canon)
+        self.assertNotIn("id", canon)
+        self.assertNotIn("frames", canon)
+        self.assertIn("type", canon)
+        self.assertIn("rank", canon)
+
+
+# ============================================================================
+# Pacing Validator module tests
+# ============================================================================
+
+
+class TestPacingValidatorModule(unittest.TestCase):
+    """Test rayvault/pacing_validator.py — full editorial invariants."""
+
+    def test_valid_timeline(self):
+        from rayvault.pacing_validator import validate_pacing
+        config = {
+            "segments": [
+                {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+                {"id": "s1", "type": "product", "t0": 2, "t1": 8,
+                 "visual": {"mode": "KEN_BURNS"}},
+                {"id": "s2", "type": "product", "t0": 8, "t1": 14,
+                 "visual": {"mode": "BROLL_VIDEO"}},
+                {"id": "s3", "type": "outro", "t0": 14, "t1": 16},
+            ],
+        }
+        result = validate_pacing(config)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["summary"]["segment_count"], 4)
+
+    def test_long_static_fails(self):
+        from rayvault.pacing_validator import validate_pacing
+        config = {
+            "segments": [
+                {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+                {"id": "s1", "type": "product", "t0": 2, "t1": 25,
+                 "visual": {"mode": "STILL_ONLY"}},
+                {"id": "s2", "type": "outro", "t0": 25, "t1": 27},
+            ],
+        }
+        result = validate_pacing(config)
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("LONG_STATIC" in e for e in result["errors"]))
+
+    def test_gap_detected(self):
+        from rayvault.pacing_validator import validate_pacing
+        config = {
+            "segments": [
+                {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+                {"id": "s1", "type": "product", "t0": 5, "t1": 10,
+                 "visual": {"mode": "KEN_BURNS"}},
+            ],
+        }
+        result = validate_pacing(config)
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("TIMELINE_GAP" in e for e in result["errors"]))
+
+    def test_strict_duration_fail(self):
+        from rayvault.pacing_validator import validate_pacing
+        config = {
+            "segments": [
+                {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+                {"id": "s1", "type": "outro", "t0": 2, "t1": 4},
+            ],
+        }
+        result = validate_pacing(config, strict_duration=True)
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("DURATION_SHORT" in e for e in result["errors"]))
+
+    def test_duration_as_warning_by_default(self):
+        from rayvault.pacing_validator import validate_pacing
+        config = {
+            "segments": [
+                {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+                {"id": "s1", "type": "outro", "t0": 2, "t1": 4},
+            ],
+        }
+        result = validate_pacing(config, strict_duration=False)
+        self.assertTrue(result["ok"])
+        self.assertTrue(any("DURATION_SHORT" in w for w in result["warnings"]))
+
+    def test_motion_hygiene_warning(self):
+        from rayvault.pacing_validator import validate_pacing
+        config = {
+            "segments": [
+                {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+                {"id": "s1", "type": "product", "t0": 2, "t1": 6,
+                 "visual": {"mode": "KEN_BURNS"},
+                 "motion": {"preset": "zoom_in_center"}},
+                {"id": "s2", "type": "product", "t0": 6, "t1": 10,
+                 "visual": {"mode": "KEN_BURNS"},
+                 "motion": {"preset": "slow_push_in"}},
+                {"id": "s3", "type": "product", "t0": 10, "t1": 14,
+                 "visual": {"mode": "KEN_BURNS"},
+                 "motion": {"preset": "push_in"}},
+                {"id": "s4", "type": "outro", "t0": 14, "t1": 16},
+            ],
+        }
+        result = validate_pacing(config)
+        self.assertTrue(any("MOTION_REPETITION" in w for w in result["warnings"]))
+
+    def test_type_variety_warning(self):
+        from rayvault.pacing_validator import validate_pacing
+        config = {
+            "segments": [
+                {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+                {"id": "s1", "type": "product", "t0": 2, "t1": 6,
+                 "visual": {"mode": "KEN_BURNS"}},
+                {"id": "s2", "type": "product", "t0": 6, "t1": 10,
+                 "visual": {"mode": "KEN_BURNS"}},
+                {"id": "s3", "type": "product", "t0": 10, "t1": 14,
+                 "visual": {"mode": "KEN_BURNS"}},
+                {"id": "s4", "type": "outro", "t0": 14, "t1": 16},
+            ],
+        }
+        result = validate_pacing(config)
+        self.assertTrue(
+            any("LOW_VARIETY" in w or "TYPE_DOMINANCE" in w for w in result["warnings"])
+        )
+
+    def test_visual_change_detection(self):
+        from rayvault.pacing_validator import segment_has_visual_change
+        self.assertTrue(segment_has_visual_change(
+            {"visual": {"mode": "BROLL_VIDEO"}}
+        ))
+        self.assertTrue(segment_has_visual_change(
+            {"visual": {"mode": "KEN_BURNS"}}
+        ))
+        self.assertFalse(segment_has_visual_change(
+            {"visual": {"mode": "STILL_ONLY"}}
+        ))
+        self.assertTrue(segment_has_visual_change(
+            {"visual": {"mode": "STILL_ONLY"},
+             "motion": {"start_scale": 1.0, "end_scale": 1.1}}
+        ))
+        self.assertTrue(segment_has_visual_change(
+            {"visual": {"mode": "STILL_ONLY"},
+             "overlay_refs": [{"kind": "lt", "overlay_id": "x", "event": "enter"}]}
+        ))
+
+    def test_summary_stats(self):
+        from rayvault.pacing_validator import validate_pacing
+        config = {
+            "segments": [
+                {"id": "s0", "type": "intro", "t0": 0, "t1": 15},
+                {"id": "s1", "type": "product", "t0": 15, "t1": 25,
+                 "visual": {"mode": "KEN_BURNS"}},
+                {"id": "s2", "type": "product", "t0": 25, "t1": 35,
+                 "visual": {"mode": "BROLL_VIDEO"}},
+                {"id": "s3", "type": "outro", "t0": 35, "t1": 50},
+            ],
+        }
+        result = validate_pacing(config)
+        self.assertEqual(result["summary"]["duration_sec"], 50.0)
+        self.assertEqual(result["summary"]["segment_count"], 4)
+        self.assertIn("intro", result["summary"]["type_distribution"])
+
+    def test_cli_exit_0_on_pass(self):
+        from rayvault.pacing_validator import main
+        tmp = tempfile.mkdtemp()
+        config_path = Path(tmp) / "config.json"
+        config = {
+            "segments": [
+                {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+                {"id": "s1", "type": "product", "t0": 2, "t1": 8,
+                 "visual": {"mode": "KEN_BURNS"}},
+                {"id": "s2", "type": "outro", "t0": 8, "t1": 10},
+            ],
+        }
+        with open(config_path, "w") as f:
+            json.dump(config, f)
+        rc = main(["--config", str(config_path)])
+        self.assertEqual(rc, 0)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_cli_exit_2_on_fail(self):
+        from rayvault.pacing_validator import main
+        tmp = tempfile.mkdtemp()
+        config_path = Path(tmp) / "config.json"
+        config = {
+            "segments": [
+                {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+                {"id": "s1", "type": "product", "t0": 2, "t1": 25,
+                 "visual": {"mode": "STILL_ONLY"}},
+                {"id": "s2", "type": "outro", "t0": 25, "t1": 27},
+            ],
+        }
+        with open(config_path, "w") as f:
+            json.dump(config, f)
+        rc = main(["--config", str(config_path)])
+        self.assertEqual(rc, 2)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

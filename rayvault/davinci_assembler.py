@@ -50,24 +50,12 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # Constants
 # ---------------------------------------------------------------------------
 
-STALL_TIMEOUT_SEC = 120  # No output growth for this long = stall
-RENDER_POLL_SEC = 10  # Poll render status every N seconds
-RENDER_TIMEOUT_SEC = 3600  # Max 1 hour render
-MAX_RETRY = 1  # Max 1 retry after stall (no infinite loops)
-DURATION_TOLERANCE_SEC = 0.2
-LUFS_TARGET = -14.0
-LUFS_TOLERANCE = 1.5
-TRUE_PEAK_MAX = -0.5
-
-# Disk thresholds
-MIN_CACHE_FREE_GB = 80
-MIN_EXPORT_HEADROOM_MULTIPLIER = 2
-MIN_EXPORT_HEADROOM_BASE_GB = 20
-
-# Black frame detection
-BLACK_LUMA_THRESHOLD = 16  # pixel value 0-255; below = black
-BLACK_FRAME_MIN_RATIO = 0.95  # 95%+ dark pixels = black frame
-RED_CHANNEL_DOMINANCE = 0.6  # R / (R+G+B) > 60% = "offline" red
+from rayvault.policies import (
+    STALL_TIMEOUT_SEC, RENDER_POLL_SEC, RENDER_TIMEOUT_SEC, MAX_RETRY,
+    DURATION_TOLERANCE_SEC, LUFS_TARGET, LUFS_TOLERANCE, TRUE_PEAK_MAX,
+    MIN_CACHE_FREE_GB, MIN_EXPORT_HEADROOM_MULTIPLIER, MIN_EXPORT_HEADROOM_BASE_GB,
+    BLACK_LUMA_THRESHOLD, BLACK_FRAME_MIN_RATIO, RED_CHANNEL_DOMINANCE,
+)
 
 # Render states (for manifest tracking)
 RS_STARTED = "RENDER_STARTED"

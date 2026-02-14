@@ -277,8 +277,7 @@ def generate_timeline(
 # Pacing validation (editorial quality gate)
 # ---------------------------------------------------------------------------
 
-MAX_STATIC_SECONDS = 18.0  # No segment may exceed this without visual change
-MIN_SEGMENT_TYPE_VARIETY = 2  # At least N distinct visual modes across segments
+from rayvault.policies import MAX_STATIC_SECONDS, MIN_SEGMENT_TYPE_VARIETY
 
 
 def validate_pacing(
