@@ -2514,6 +2514,115 @@ class TestAsyncWorkerHelpers(unittest.TestCase):
             self.assertEqual(ckpt["completed_steps"].count("research"), 1)
 
 
+@unittest.skipUnless(_HAS_HTTPX, "httpx not installed")
+class TestDisciplineContract(unittest.TestCase):
+    """Tests for the pipeline discipline contract scaffold."""
+
+    def test_stages_tuple_defined(self):
+        """STAGES is a non-empty tuple of strings."""
+        from worker_async import STAGES
+        self.assertIsInstance(STAGES, tuple)
+        self.assertGreater(len(STAGES), 0)
+        for s in STAGES:
+            self.assertIsInstance(s, str)
+
+    def test_browser_stages_subset_of_stages(self):
+        """BROWSER_STAGES is a subset of STAGES."""
+        from worker_async import STAGES, BROWSER_STAGES
+        for s in BROWSER_STAGES:
+            self.assertIn(s, STAGES)
+
+    def test_artifact_path_convention(self):
+        """_artifact_path returns state/artifacts/{run_id}/{stage}.json."""
+        from worker_async import _artifact_path
+        from lib.config import WorkerConfig
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = WorkerConfig(worker_id="test", state_dir=tmpdir)
+            p = _artifact_path(cfg, "run-abc", "research")
+            self.assertTrue(str(p).endswith("artifacts/run-abc/research.json"))
+
+    def test_stage_has_artifact_false_when_missing(self):
+        """_stage_has_artifact returns False when no artifact file."""
+        from worker_async import _stage_has_artifact
+        from lib.config import WorkerConfig
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = WorkerConfig(worker_id="test", state_dir=tmpdir)
+            self.assertFalse(_stage_has_artifact(cfg, "run-abc", "research"))
+
+    def test_stage_has_artifact_true_when_exists(self):
+        """_stage_has_artifact returns True when artifact file exists."""
+        from worker_async import _stage_has_artifact, _artifact_path, _atomic_write_json
+        from lib.config import WorkerConfig
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = WorkerConfig(worker_id="test", state_dir=tmpdir)
+            p = _artifact_path(cfg, "run-abc", "research")
+            _atomic_write_json(p, {"result": "test"})
+            self.assertTrue(_stage_has_artifact(cfg, "run-abc", "research"))
+
+    def test_process_run_stop_signal_immediate(self):
+        """process_run returns 'interrupted' immediately if stop_signal is set."""
+        import asyncio
+        from worker_async import process_run
+        from lib.config import WorkerConfig
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = WorkerConfig(
+                worker_id="test",
+                checkpoint_dir=tmpdir,
+                state_dir=tmpdir,
+            )
+            # Mock RPC and panic
+            rpc = MagicMock()
+            rpc.insert_event = MagicMock(return_value=asyncio.coroutine(lambda *a, **k: 200)())
+            panic = MagicMock()
+
+            stop = asyncio.Event()
+            stop.set()  # Already stopped
+
+            result = asyncio.get_event_loop().run_until_complete(
+                process_run(cfg, rpc, panic, "run-123", "tok", "vid",
+                            stop, page=None)
+            )
+            self.assertEqual(result, "interrupted")
+
+    def test_process_run_skips_completed_stages(self):
+        """process_run skips stages already in checkpoint."""
+        import asyncio
+        from worker_async import process_run, save_checkpoint, STAGES
+        from lib.config import WorkerConfig
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = WorkerConfig(
+                worker_id="test",
+                checkpoint_dir=tmpdir,
+                state_dir=tmpdir,
+            )
+            # Pre-fill checkpoint with all stages completed
+            for stage in STAGES:
+                save_checkpoint(cfg, "run-skip", stage)
+
+            rpc = MagicMock()
+            rpc.insert_event = MagicMock(return_value=asyncio.coroutine(lambda *a, **k: 200)())
+            panic = MagicMock()
+            stop = asyncio.Event()
+
+            result = asyncio.get_event_loop().run_until_complete(
+                process_run(cfg, rpc, panic, "run-skip", "tok", "vid",
+                            stop, page=None)
+            )
+            self.assertEqual(result, "done")
+
+    def test_execute_stage_placeholder_returns_true(self):
+        """Placeholder execute_stage returns True (success)."""
+        import asyncio
+        from worker_async import execute_stage
+
+        result = asyncio.get_event_loop().run_until_complete(
+            execute_stage("research", "run-1", "vid-1")
+        )
+        self.assertTrue(result)
+
+
 # ==========================================================================
 # Config env prefix tests
 # ==========================================================================
