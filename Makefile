@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism prompts prompts-verify
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism prompts prompts-verify run-handoff run-status products-fetch products-fetch-dry
 
 # --- Morning routine ---
 doctor:
@@ -204,6 +204,47 @@ keyframe-summary:
 
 keyframe-baptism:
 	python3 scripts/keyframe_score.py --state-dir state --baptism
+
+# --- Run handoff ---
+RUN_ID ?= RUN_$(shell date +%Y_%m_%d)_A
+SCRIPT ?=
+AUDIO ?=
+FRAME ?=
+PROMPT_ID ?= OFFICE_V1
+SEED ?= 101
+FALLBACK ?= 0
+ATTEMPTS ?= 1
+ID_CONF ?= HIGH
+ID_REASON ?= verified_visual_identity
+VQC ?= UNKNOWN
+
+run-handoff:
+	python3 -m rayvault.handoff_run \
+		--run-id $(RUN_ID) \
+		--script $(SCRIPT) \
+		$(if $(AUDIO),--audio $(AUDIO)) \
+		$(if $(FRAME),--frame $(FRAME)) \
+		--prompt-id $(PROMPT_ID) \
+		--seed $(SEED) \
+		--fallback-level $(FALLBACK) \
+		--attempts $(ATTEMPTS) \
+		--identity-confidence $(ID_CONF) \
+		--identity-reason $(ID_REASON) \
+		--visual-qc $(VQC)
+
+run-status:
+	@if [ -f state/runs/$(RUN_ID)/00_manifest.json ]; then \
+		python3 -c "import json; m=json.load(open('state/runs/$(RUN_ID)/00_manifest.json')); print(f\"RUN: {m['run_id']} | STATUS: {m['status']} | SCORE: {m['stability']['stability_score']}/100\")"; \
+	else \
+		echo "No manifest found for $(RUN_ID)"; \
+	fi
+
+# --- Product asset fetch ---
+products-fetch:
+	python3 -m rayvault.product_asset_fetch --run-dir state/runs/$(RUN_ID)
+
+products-fetch-dry:
+	python3 -m rayvault.product_asset_fetch --run-dir state/runs/$(RUN_ID) --dry-run
 
 # --- Maintenance (safe + apply) ---
 # SAFE MODE: refresh + dry-run reports. Does not remove or modify anything.

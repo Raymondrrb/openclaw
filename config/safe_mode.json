@@ -1,18 +1,30 @@
 {
   "_doc": "Consolidated operational config — single source of truth for daily automation. Combines prompts, seeds, thresholds, QC, voice, and fallback into one file.",
-  "version": "1.0",
+  "version": "1.1",
 
   "identity": {
     "character_id": "RAY_DZINE_LOCKED",
     "reference_strength": 0.85,
-    "require_sha8_in_filename": true
+    "require_sha8_in_filename": true,
+    "identity_proof_required": ["confidence", "reason", "method", "anchors_verified"]
   },
 
   "prompts": {
     "_doc": "Canonical prompt IDs. Full text in prompts/*.txt files. Hash via prompt_registry.py.",
-    "safe": "SAFE_STUDIO_V1",
-    "office": "OFFICE_V1",
-    "darkdesk": "DARKDESK_V1"
+    "SAFE_STUDIO_V1": {"file": "prompts/SAFE_STUDIO_V1.txt", "env": "C_studio"},
+    "OFFICE_V1": {"file": "prompts/OFFICE_V1.txt", "env": "A_office_a"},
+    "DARKDESK_V1": {"file": "prompts/DARKDESK_V1.txt", "env": "D_darkdesk"}
+  },
+
+  "prompt_rotation": {
+    "_doc": "Default prompt_id per day of week. Override with --prompt-id CLI flag.",
+    "monday": "OFFICE_V1",
+    "tuesday": "DARKDESK_V1",
+    "wednesday": "OFFICE_V1",
+    "thursday": "DARKDESK_V1",
+    "friday": "OFFICE_V1",
+    "saturday": "SAFE_STUDIO_V1",
+    "sunday": "SAFE_STUDIO_V1"
   },
 
   "seed_ladder": {
@@ -27,6 +39,17 @@
     "level_2": {"prompt_id": "SAFE_STUDIO_V1", "seeds": "tier_2[0..2]"},
     "level_3": {"action": "library", "seeds": "none"},
     "level_4": {"action": "manual", "seeds": "none"}
+  },
+
+  "thresholds": {
+    "_doc": "Operational thresholds for alerts and automation decisions.",
+    "stability_warn": 70,
+    "stability_critical": 40,
+    "max_generation_time_sec": 300,
+    "max_consecutive_failures": 3,
+    "probe_retry_limit": 3,
+    "visual_qc_pass_score": 7,
+    "visual_qc_library_score": 8
   },
 
   "stability_score": {
@@ -75,10 +98,36 @@
     "word_count_shorts": {"min": 60, "max": 90}
   },
 
+  "manifest": {
+    "_doc": "Schema for 00_manifest.json in state/runs/{run_id}/.",
+    "schema_version": "1.0",
+    "status_enum": ["INCOMPLETE", "WAITING_ASSETS", "READY_FOR_RENDER", "BLOCKED", "PUBLISHED"],
+    "canonical_assets": ["01_script.txt", "02_audio.wav", "03_frame.png"],
+    "metadata_file": "04_metadata.json"
+  },
+
+  "telegram": {
+    "_doc": "Manifest-driven Telegram notification rules. Reads 00_manifest.json only.",
+    "headline_format": "RAYVAULT RUN: {run_id} | {status} | SCORE: {stability_score}/100 | {prompt_id} | ID: {identity_confidence}",
+    "status_emoji": {
+      "READY_FOR_RENDER": "pass",
+      "WAITING_ASSETS": "warning",
+      "BLOCKED": "alert",
+      "INCOMPLETE": "warning",
+      "PUBLISHED": "pass"
+    },
+    "next_action": {
+      "READY_FOR_RENDER": "Trigger lip-sync render",
+      "WAITING_ASSETS": "Investigate missing assets",
+      "BLOCKED": "Check visual_qc or identity",
+      "INCOMPLETE": "Check missing required files"
+    }
+  },
+
   "reporting": {
     "headline_fields": [
       "run_id", "status", "prompt_id", "seed",
-      "fallback_level", "identity_confidence", "patient_zero"
+      "fallback_level", "identity_confidence", "stability_score"
     ],
     "store_hashes": true,
     "hash_fields": ["prompt_hash", "script_hash"]

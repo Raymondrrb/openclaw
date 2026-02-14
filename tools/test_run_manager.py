@@ -10457,5 +10457,838 @@ class TestPromptRegistry(unittest.TestCase):
         self.assertEqual(rc, 0)
 
 
+# ── handoff_run tests ────────────────────────────────────────────────────────
+
+class TestHandoffRun(unittest.TestCase):
+    """Tests for rayvault.handoff_run — run folder + manifest creation."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.state_dir = Path(self.td) / "state"
+        self.state_dir.mkdir()
+        # Create prompts dir with a test prompt
+        self.prompts_dir = Path(self.td) / "prompts"
+        self.prompts_dir.mkdir()
+        (self.prompts_dir / "OFFICE_V1.txt").write_text("Test prompt for Office V1")
+        (self.prompts_dir / "SAFE_STUDIO_V1.txt").write_text("Test prompt for Safe Studio V1")
+        # Create a test script file
+        self.script = Path(self.td) / "script.txt"
+        self.script.write_text("Hello, this is a test script for RayVault.")
+        # Create test audio/frame
+        self.audio = Path(self.td) / "audio.wav"
+        self.audio.write_bytes(b"RIFF" + b"\x00" * 100)
+        self.frame = Path(self.td) / "frame.png"
+        self.frame.write_bytes(b"\x89PNG" + b"\x00" * 100)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _handoff(self, **kwargs):
+        from rayvault.handoff_run import handoff
+        defaults = dict(
+            run_id="RUN_TEST_001",
+            script_path=self.script,
+            audio_path=self.audio,
+            frame_path=self.frame,
+            prompt_id="OFFICE_V1",
+            seed=101,
+            fallback_level=0,
+            attempts=1,
+            identity_confidence="HIGH",
+            identity_reason="verified_visual_identity",
+            visual_qc="PASS",
+            state_dir=self.state_dir,
+            prompts_dir=self.prompts_dir,
+        )
+        defaults.update(kwargs)
+        return handoff(**defaults)
+
+    # --- Status decision tests ---
+
+    def test_ready_for_render(self):
+        """All assets present + PASS QC → READY_FOR_RENDER."""
+        m = self._handoff(visual_qc="PASS", identity_confidence="HIGH")
+        self.assertEqual(m["status"], "READY_FOR_RENDER")
+
+    def test_waiting_assets_no_audio(self):
+        """Missing audio → WAITING_ASSETS."""
+        m = self._handoff(audio_path=None)
+        self.assertEqual(m["status"], "WAITING_ASSETS")
+
+    def test_waiting_assets_no_frame(self):
+        """Missing frame → WAITING_ASSETS."""
+        m = self._handoff(frame_path=None)
+        self.assertEqual(m["status"], "WAITING_ASSETS")
+
+    def test_blocked_qc_fail(self):
+        """visual_qc=FAIL → BLOCKED."""
+        m = self._handoff(visual_qc="FAIL")
+        self.assertEqual(m["status"], "BLOCKED")
+
+    def test_blocked_identity_none(self):
+        """identity_confidence=NONE → BLOCKED."""
+        m = self._handoff(identity_confidence="NONE")
+        self.assertEqual(m["status"], "BLOCKED")
+
+    def test_incomplete_no_audio_no_frame_unknown_qc(self):
+        """No audio, no frame, UNKNOWN QC → WAITING_ASSETS."""
+        m = self._handoff(audio_path=None, frame_path=None, visual_qc="UNKNOWN")
+        self.assertEqual(m["status"], "WAITING_ASSETS")
+
+    # --- Manifest structure tests ---
+
+    def test_manifest_schema_version(self):
+        m = self._handoff()
+        self.assertEqual(m["schema_version"], "1.1")
+
+    def test_manifest_has_all_keys(self):
+        m = self._handoff()
+        for key in ("schema_version", "run_id", "created_at_utc", "status",
+                     "stability", "assets", "metadata", "paths"):
+            self.assertIn(key, m, f"Missing key: {key}")
+
+    def test_manifest_stability(self):
+        m = self._handoff(fallback_level=1, attempts=3)
+        s = m["stability"]
+        self.assertEqual(s["fallback_level"], 1)
+        self.assertEqual(s["attempts"], 3)
+        # 100 - 25 - 16 = 59
+        self.assertEqual(s["stability_score"], 59)
+
+    def test_manifest_assets_sha1(self):
+        m = self._handoff()
+        self.assertIsNotNone(m["assets"]["script"]["sha1"])
+        self.assertIsNotNone(m["assets"]["audio"]["sha1"])
+        self.assertIsNotNone(m["assets"]["frame"]["sha1"])
+        self.assertEqual(len(m["assets"]["script"]["sha1"]), 40)
+
+    def test_manifest_assets_null_sha1_when_missing(self):
+        m = self._handoff(audio_path=None, frame_path=None)
+        self.assertIsNone(m["assets"]["audio"]["sha1"])
+        self.assertIsNone(m["assets"]["frame"]["sha1"])
+
+    def test_manifest_identity_metadata(self):
+        m = self._handoff()
+        ident = m["metadata"]["identity"]
+        self.assertEqual(ident["confidence"], "HIGH")
+        self.assertEqual(ident["reason"], "verified_visual_identity")
+        self.assertEqual(ident["method"], "human_overlay_3_anchor")
+        self.assertEqual(ident["anchors_verified"], ["hairline", "nose_bridge", "jawline"])
+        self.assertEqual(ident["reference_strength"], 0.85)
+
+    def test_manifest_prompt_hash(self):
+        m = self._handoff(prompt_id="OFFICE_V1")
+        self.assertIsNotNone(m["metadata"]["prompt_hash"])
+        self.assertEqual(len(m["metadata"]["prompt_hash"]), 12)
+
+    def test_manifest_prompt_hash_none_for_unknown(self):
+        m = self._handoff(prompt_id="NONEXISTENT_PROMPT")
+        self.assertIsNone(m["metadata"]["prompt_hash"])
+
+    # --- File system tests ---
+
+    def test_run_dir_created(self):
+        self._handoff(run_id="RUN_FS_TEST")
+        run_dir = self.state_dir / "runs" / "RUN_FS_TEST"
+        self.assertTrue(run_dir.exists())
+
+    def test_manifest_file_written(self):
+        self._handoff(run_id="RUN_FS_MANIFEST")
+        manifest_path = self.state_dir / "runs" / "RUN_FS_MANIFEST" / "00_manifest.json"
+        self.assertTrue(manifest_path.exists())
+        data = json.loads(manifest_path.read_text())
+        self.assertEqual(data["run_id"], "RUN_FS_MANIFEST")
+
+    def test_metadata_file_written(self):
+        self._handoff(run_id="RUN_FS_META")
+        meta_path = self.state_dir / "runs" / "RUN_FS_META" / "04_metadata.json"
+        self.assertTrue(meta_path.exists())
+        data = json.loads(meta_path.read_text())
+        self.assertEqual(data["run_id"], "RUN_FS_META")
+
+    def test_script_copied(self):
+        self._handoff(run_id="RUN_FS_COPY")
+        dst = self.state_dir / "runs" / "RUN_FS_COPY" / "01_script.txt"
+        self.assertTrue(dst.exists())
+        self.assertEqual(dst.read_text(), self.script.read_text())
+
+    def test_audio_copied(self):
+        self._handoff(run_id="RUN_FS_AUDIO")
+        dst = self.state_dir / "runs" / "RUN_FS_AUDIO" / "02_audio.wav"
+        self.assertTrue(dst.exists())
+
+    def test_frame_copied(self):
+        self._handoff(run_id="RUN_FS_FRAME")
+        dst = self.state_dir / "runs" / "RUN_FS_FRAME" / "03_frame.png"
+        self.assertTrue(dst.exists())
+
+    def test_publish_dir_created(self):
+        self._handoff(run_id="RUN_FS_PUB")
+        pub = self.state_dir / "runs" / "RUN_FS_PUB" / "publish"
+        self.assertTrue(pub.is_dir())
+
+    # --- Stability score tests ---
+
+    def test_stability_score_perfect(self):
+        from rayvault.handoff_run import compute_stability_score
+        self.assertEqual(compute_stability_score(0, 1), 100)
+
+    def test_stability_score_one_retry(self):
+        from rayvault.handoff_run import compute_stability_score
+        # 100 - 0 - 8 = 92
+        self.assertEqual(compute_stability_score(0, 2), 92)
+
+    def test_stability_score_level_2(self):
+        from rayvault.handoff_run import compute_stability_score
+        # 100 - 50 - 16 = 34
+        self.assertEqual(compute_stability_score(2, 3), 34)
+
+    def test_stability_score_library_zero(self):
+        from rayvault.handoff_run import compute_stability_score
+        self.assertEqual(compute_stability_score(3, 1), 0)
+        self.assertEqual(compute_stability_score(4, 1), 0)
+
+    def test_stability_score_floor_zero(self):
+        from rayvault.handoff_run import compute_stability_score
+        # 100 - 50 - 40 = 10 (still positive)
+        self.assertEqual(compute_stability_score(2, 6), 10)
+
+    # --- Validation tests ---
+
+    def test_invalid_run_id_rejected(self):
+        with self.assertRaises(ValueError):
+            self._handoff(run_id="bad run id with spaces!")
+
+    def test_invalid_confidence_rejected(self):
+        with self.assertRaises(ValueError):
+            self._handoff(identity_confidence="INVALID")
+
+    def test_existing_dir_rejected_without_force(self):
+        self._handoff(run_id="RUN_DUP")
+        with self.assertRaises(FileExistsError):
+            self._handoff(run_id="RUN_DUP")
+
+    def test_existing_dir_allowed_with_force(self):
+        self._handoff(run_id="RUN_FORCE")
+        m = self._handoff(run_id="RUN_FORCE", force=True)
+        self.assertEqual(m["run_id"], "RUN_FORCE")
+
+    def test_missing_script_rejected(self):
+        bad_script = Path(self.td) / "no_such_file.txt"
+        with self.assertRaises(FileNotFoundError):
+            self._handoff(script_path=bad_script)
+
+    # --- CLI tests ---
+
+    def test_cli_success(self):
+        from rayvault.handoff_run import main as hoff_main
+        rc = hoff_main([
+            "--run-id", "RUN_CLI_OK",
+            "--script", str(self.script),
+            "--audio", str(self.audio),
+            "--frame", str(self.frame),
+            "--prompt-id", "OFFICE_V1",
+            "--seed", "101",
+            "--fallback-level", "0",
+            "--identity-confidence", "HIGH",
+            "--identity-reason", "verified_visual_identity",
+            "--visual-qc", "PASS",
+            "--state-dir", str(self.state_dir),
+            "--prompts-dir", str(self.prompts_dir),
+        ])
+        self.assertEqual(rc, 0)
+
+    def test_cli_bad_run_id(self):
+        from rayvault.handoff_run import main as hoff_main
+        rc = hoff_main([
+            "--run-id", "BAD RUN ID",
+            "--script", str(self.script),
+            "--prompt-id", "OFFICE_V1",
+            "--fallback-level", "0",
+            "--identity-confidence", "HIGH",
+            "--identity-reason", "test",
+            "--state-dir", str(self.state_dir),
+            "--prompts-dir", str(self.prompts_dir),
+        ])
+        self.assertEqual(rc, 2)
+
+    def test_cli_missing_script(self):
+        from rayvault.handoff_run import main as hoff_main
+        rc = hoff_main([
+            "--run-id", "RUN_CLI_MISS",
+            "--script", "/nonexistent/script.txt",
+            "--prompt-id", "OFFICE_V1",
+            "--fallback-level", "0",
+            "--identity-confidence", "HIGH",
+            "--identity-reason", "test",
+            "--state-dir", str(self.state_dir),
+            "--prompts-dir", str(self.prompts_dir),
+        ])
+        self.assertEqual(rc, 2)
+
+
+class TestHandoffDecideStatus(unittest.TestCase):
+    """Unit tests for decide_status() logic in isolation."""
+
+    def _decide(self, **kw):
+        from rayvault.handoff_run import decide_status
+        defaults = dict(
+            visual_qc="PASS",
+            identity_confidence="HIGH",
+            has_script=True,
+            has_audio=True,
+            has_frame=True,
+        )
+        defaults.update(kw)
+        return decide_status(**defaults)
+
+    def test_all_good(self):
+        self.assertEqual(self._decide(), "READY_FOR_RENDER")
+
+    def test_no_script(self):
+        self.assertEqual(self._decide(has_script=False), "INCOMPLETE")
+
+    def test_no_audio(self):
+        self.assertEqual(self._decide(has_audio=False), "WAITING_ASSETS")
+
+    def test_no_frame(self):
+        self.assertEqual(self._decide(has_frame=False), "WAITING_ASSETS")
+
+    def test_qc_fail(self):
+        self.assertEqual(self._decide(visual_qc="FAIL"), "BLOCKED")
+
+    def test_identity_none(self):
+        self.assertEqual(self._decide(identity_confidence="NONE"), "BLOCKED")
+
+    def test_identity_none_beats_missing_audio(self):
+        """BLOCKED takes priority over WAITING_ASSETS."""
+        self.assertEqual(
+            self._decide(identity_confidence="NONE", has_audio=False),
+            "BLOCKED",
+        )
+
+    def test_qc_fail_beats_waiting(self):
+        """BLOCKED takes priority over WAITING_ASSETS."""
+        self.assertEqual(
+            self._decide(visual_qc="FAIL", has_frame=False),
+            "BLOCKED",
+        )
+
+    def test_unknown_qc_all_assets(self):
+        """UNKNOWN QC with all assets → INCOMPLETE (not PASS)."""
+        self.assertEqual(self._decide(visual_qc="UNKNOWN"), "INCOMPLETE")
+
+    def test_low_confidence_still_ok(self):
+        """LOW confidence is not NONE → allows READY_FOR_RENDER."""
+        self.assertEqual(self._decide(identity_confidence="LOW"), "READY_FOR_RENDER")
+
+
+class TestSafeModeConfigV11(unittest.TestCase):
+    """Tests for safe_mode.json v1.1 additions."""
+
+    def test_thresholds_present(self):
+        cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "safe_mode.json").read_text())
+        self.assertIn("thresholds", cfg)
+        t = cfg["thresholds"]
+        self.assertIn("stability_warn", t)
+        self.assertIn("stability_critical", t)
+        self.assertIn("max_generation_time_sec", t)
+        self.assertIn("max_consecutive_failures", t)
+
+    def test_prompt_rotation_present(self):
+        cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "safe_mode.json").read_text())
+        self.assertIn("prompt_rotation", cfg)
+        rot = cfg["prompt_rotation"]
+        for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"):
+            self.assertIn(day, rot)
+
+    def test_prompt_rotation_weekdays_office_or_darkdesk(self):
+        cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "safe_mode.json").read_text())
+        rot = cfg["prompt_rotation"]
+        for day in ("monday", "wednesday", "friday"):
+            self.assertEqual(rot[day], "OFFICE_V1")
+        for day in ("tuesday", "thursday"):
+            self.assertEqual(rot[day], "DARKDESK_V1")
+
+    def test_prompt_rotation_weekend_safe(self):
+        cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "safe_mode.json").read_text())
+        rot = cfg["prompt_rotation"]
+        self.assertEqual(rot["saturday"], "SAFE_STUDIO_V1")
+        self.assertEqual(rot["sunday"], "SAFE_STUDIO_V1")
+
+    def test_manifest_schema_in_config(self):
+        cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "safe_mode.json").read_text())
+        self.assertIn("manifest", cfg)
+        self.assertEqual(cfg["manifest"]["schema_version"], "1.0")
+        self.assertIn("READY_FOR_RENDER", cfg["manifest"]["status_enum"])
+
+    def test_telegram_rules_in_config(self):
+        cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "safe_mode.json").read_text())
+        self.assertIn("telegram", cfg)
+        tg = cfg["telegram"]
+        self.assertIn("headline_format", tg)
+        self.assertIn("status_emoji", tg)
+        self.assertIn("next_action", tg)
+
+    def test_prompts_have_file_refs(self):
+        cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "safe_mode.json").read_text())
+        prompts = cfg["prompts"]
+        for pid in ("SAFE_STUDIO_V1", "OFFICE_V1", "DARKDESK_V1"):
+            self.assertIn(pid, prompts)
+            self.assertIn("file", prompts[pid])
+
+    def test_identity_proof_required_fields(self):
+        cfg = json.loads((Path(__file__).resolve().parent.parent / "config" / "safe_mode.json").read_text())
+        required = cfg["identity"]["identity_proof_required"]
+        self.assertIn("confidence", required)
+        self.assertIn("method", required)
+        self.assertIn("anchors_verified", required)
+
+
+# ── handoff products + render_config tests ──────────────────────────────────
+
+class TestHandoffProducts(unittest.TestCase):
+    """Tests for handoff_run product pipeline integration."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.state_dir = Path(self.td) / "state"
+        self.state_dir.mkdir()
+        self.prompts_dir = Path(self.td) / "prompts"
+        self.prompts_dir.mkdir()
+        (self.prompts_dir / "OFFICE_V1.txt").write_text("Test prompt")
+        self.script = Path(self.td) / "script.txt"
+        self.script.write_text("Test script")
+        self.audio = Path(self.td) / "audio.wav"
+        self.audio.write_bytes(b"RIFF" + b"\x00" * 50)
+        self.frame = Path(self.td) / "frame.png"
+        self.frame.write_bytes(b"\x89PNG" + b"\x00" * 50)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _make_products_json(self, items=None):
+        if items is None:
+            items = [
+                {"rank": 1, "asin": "B0TEST1", "title": "Product 1"},
+                {"rank": 2, "asin": "B0TEST2", "title": "Product 2"},
+            ]
+        pj = Path(self.td) / "products.json"
+        pj.write_text(json.dumps({"items": items}))
+        return pj
+
+    def _make_render_config(self):
+        rc = Path(self.td) / "render_config.json"
+        rc.write_text(json.dumps({"version": "1.0", "video": {"fps": 30}}))
+        return rc
+
+    def _handoff(self, **kwargs):
+        from rayvault.handoff_run import handoff
+        defaults = dict(
+            run_id="RUN_PROD_001",
+            script_path=self.script,
+            audio_path=self.audio,
+            frame_path=self.frame,
+            prompt_id="OFFICE_V1",
+            seed=101,
+            fallback_level=0,
+            attempts=1,
+            identity_confidence="HIGH",
+            identity_reason="verified_visual_identity",
+            visual_qc="PASS",
+            state_dir=self.state_dir,
+            prompts_dir=self.prompts_dir,
+        )
+        defaults.update(kwargs)
+        return handoff(**defaults)
+
+    def test_manifest_without_products(self):
+        m = self._handoff()
+        self.assertNotIn("products", m)
+
+    def test_manifest_with_products_json(self):
+        pj = self._make_products_json()
+        m = self._handoff(run_id="RUN_P1", products_json_path=pj)
+        self.assertIn("products", m)
+        self.assertEqual(m["products"]["count"], 2)
+
+    def test_products_copied_to_run_dir(self):
+        pj = self._make_products_json()
+        self._handoff(run_id="RUN_P2", products_json_path=pj)
+        copied = self.state_dir / "runs" / "RUN_P2" / "products" / "products.json"
+        self.assertTrue(copied.exists())
+
+    def test_products_fidelity_pending_no_qc(self):
+        """Products without qc.json → fidelity PENDING."""
+        pj = self._make_products_json()
+        m = self._handoff(run_id="RUN_P3", products_json_path=pj)
+        self.assertEqual(m["products"]["fidelity"]["result"], "PENDING")
+
+    def test_products_fidelity_pass_with_qc(self):
+        """Products with all PASS qc.json → fidelity PASS."""
+        pj = self._make_products_json()
+        m = self._handoff(run_id="RUN_P4", products_json_path=pj)
+        # Create qc.json files for each product
+        products_dir = self.state_dir / "runs" / "RUN_P4" / "products"
+        for rank in (1, 2):
+            pdir = products_dir / f"p{rank:02d}"
+            pdir.mkdir(parents=True, exist_ok=True)
+            (pdir / "source_images").mkdir()
+            (pdir / "source_images" / "01_main.jpg").write_bytes(b"jpg")
+            qc = {"product_fidelity_result": "PASS", "broll_method": "DZINE_I2V"}
+            (pdir / "qc.json").write_text(json.dumps(qc))
+        # Re-evaluate
+        from rayvault.handoff_run import evaluate_products
+        result = evaluate_products(products_dir)
+        self.assertEqual(result["fidelity"]["result"], "PASS")
+        self.assertFalse(result["fidelity"]["fallback_used"])
+
+    def test_products_fidelity_fallback_used(self):
+        """FALLBACK_IMAGES products → fidelity PASS but fallback_used=True."""
+        pj = self._make_products_json([
+            {"rank": 1, "asin": "B0A", "title": "Prod A"},
+        ])
+        m = self._handoff(run_id="RUN_P5", products_json_path=pj)
+        products_dir = self.state_dir / "runs" / "RUN_P5" / "products"
+        pdir = products_dir / "p01"
+        pdir.mkdir(parents=True, exist_ok=True)
+        qc = {"product_fidelity_result": "FALLBACK_IMAGES", "broll_method": "KEN_BURNS"}
+        (pdir / "qc.json").write_text(json.dumps(qc))
+        from rayvault.handoff_run import evaluate_products
+        result = evaluate_products(products_dir)
+        self.assertEqual(result["fidelity"]["result"], "PASS")
+        self.assertTrue(result["fidelity"]["fallback_used"])
+
+    def test_products_fidelity_blocked_on_fail(self):
+        """Product with FAIL qc → fidelity BLOCKED."""
+        pj = self._make_products_json([
+            {"rank": 1, "asin": "B0BAD", "title": "Bad Prod"},
+        ])
+        m = self._handoff(run_id="RUN_P6", products_json_path=pj)
+        products_dir = self.state_dir / "runs" / "RUN_P6" / "products"
+        pdir = products_dir / "p01"
+        pdir.mkdir(parents=True, exist_ok=True)
+        qc = {"product_fidelity_result": "FAIL", "broll_method": "NONE"}
+        (pdir / "qc.json").write_text(json.dumps(qc))
+        from rayvault.handoff_run import evaluate_products
+        result = evaluate_products(products_dir)
+        self.assertEqual(result["fidelity"]["result"], "BLOCKED")
+
+    def test_products_summary_includes_ranks(self):
+        pj = self._make_products_json()
+        m = self._handoff(run_id="RUN_P7", products_json_path=pj)
+        summary = m["products"]["summary"]
+        self.assertEqual(len(summary), 2)
+        self.assertEqual(summary[0]["rank"], 1)
+        self.assertEqual(summary[1]["rank"], 2)
+
+    def test_decide_status_blocked_by_products(self):
+        from rayvault.handoff_run import decide_status
+        status = decide_status(
+            visual_qc="PASS",
+            identity_confidence="HIGH",
+            has_script=True,
+            has_audio=True,
+            has_frame=True,
+            products_fidelity="BLOCKED",
+        )
+        self.assertEqual(status, "BLOCKED")
+
+
+class TestHandoffRenderConfig(unittest.TestCase):
+    """Tests for render_config handling in handoff_run."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.state_dir = Path(self.td) / "state"
+        self.state_dir.mkdir()
+        self.prompts_dir = Path(self.td) / "prompts"
+        self.prompts_dir.mkdir()
+        (self.prompts_dir / "OFFICE_V1.txt").write_text("Test prompt")
+        self.script = Path(self.td) / "script.txt"
+        self.script.write_text("Test script")
+        self.audio = Path(self.td) / "audio.wav"
+        self.audio.write_bytes(b"RIFF" + b"\x00" * 50)
+        self.frame = Path(self.td) / "frame.png"
+        self.frame.write_bytes(b"\x89PNG" + b"\x00" * 50)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _make_render_config(self):
+        rc = Path(self.td) / "render_config.json"
+        rc.write_text(json.dumps({"version": "1.0", "video": {"fps": 30}}))
+        return rc
+
+    def _handoff(self, **kwargs):
+        from rayvault.handoff_run import handoff
+        defaults = dict(
+            run_id="RUN_RC_001",
+            script_path=self.script,
+            audio_path=self.audio,
+            frame_path=self.frame,
+            prompt_id="OFFICE_V1",
+            seed=101,
+            fallback_level=0,
+            attempts=1,
+            identity_confidence="HIGH",
+            identity_reason="verified_visual_identity",
+            visual_qc="PASS",
+            state_dir=self.state_dir,
+            prompts_dir=self.prompts_dir,
+        )
+        defaults.update(kwargs)
+        return handoff(**defaults)
+
+    def test_render_config_copied(self):
+        rc = self._make_render_config()
+        self._handoff(run_id="RUN_RC1", render_config_path=rc)
+        dst = self.state_dir / "runs" / "RUN_RC1" / "05_render_config.json"
+        self.assertTrue(dst.exists())
+
+    def test_render_config_sha1_in_manifest(self):
+        rc = self._make_render_config()
+        m = self._handoff(run_id="RUN_RC2", render_config_path=rc)
+        self.assertIsNotNone(m["assets"]["render_config"]["sha1"])
+        self.assertEqual(len(m["assets"]["render_config"]["sha1"]), 40)
+
+    def test_render_config_null_when_missing(self):
+        m = self._handoff(run_id="RUN_RC3")
+        self.assertIsNone(m["assets"]["render_config"]["sha1"])
+
+    def test_manifest_schema_version_1_1(self):
+        m = self._handoff(run_id="RUN_RC4")
+        self.assertEqual(m["schema_version"], "1.1")
+
+
+class TestRenderConfigTemplate(unittest.TestCase):
+    """Tests for render_config_template.json."""
+
+    def test_template_loadable(self):
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config" / "render_config_template.json").read_text()
+        )
+        self.assertEqual(cfg["version"], "1.0")
+
+    def test_template_video_section(self):
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config" / "render_config_template.json").read_text()
+        )
+        v = cfg["video"]
+        self.assertEqual(v["resolution"]["w"], 1920)
+        self.assertEqual(v["resolution"]["h"], 1080)
+        self.assertEqual(v["fps"], 30)
+        self.assertEqual(v["codec"], "h264")
+
+    def test_template_audio_section(self):
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config" / "render_config_template.json").read_text()
+        )
+        a = cfg["audio"]
+        self.assertEqual(a["target_lufs"], -14.0)
+        self.assertTrue(a["compressor"]["enabled"])
+
+    def test_template_layout_face_safe_box(self):
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config" / "render_config_template.json").read_text()
+        )
+        box = cfg["layout"]["ray_frame"]["face_safe_box"]
+        for k in ("x", "y", "w", "h"):
+            self.assertIn(k, box)
+            self.assertGreater(box[k], 0)
+            self.assertLessEqual(box[k], 1.0)
+
+    def test_template_timeline_pattern(self):
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config" / "render_config_template.json").read_text()
+        )
+        pattern = cfg["timeline"]["product_block"]["pattern"]
+        types = [p["type"] for p in pattern]
+        self.assertIn("ray_talking", types)
+        self.assertIn("broll", types)
+
+    def test_template_products_broll_preference(self):
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config" / "render_config_template.json").read_text()
+        )
+        prefs = cfg["products"]["render_rules"]["broll_preference"]
+        self.assertEqual(prefs, ["DZINE_I2V", "KEN_BURNS"])
+
+
+class TestProductAssetFetch(unittest.TestCase):
+    """Tests for rayvault.product_asset_fetch — product image download + materialization."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "run"
+        self.run_dir.mkdir()
+        self.products_dir = self.run_dir / "products"
+        self.products_dir.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _write_products_json(self, items):
+        from rayvault.product_asset_fetch import atomic_write_json
+        atomic_write_json(
+            self.products_dir / "products.json",
+            {"items": items},
+        )
+
+    def test_missing_products_json(self):
+        from rayvault.product_asset_fetch import run_product_fetch
+        result = run_product_fetch(self.run_dir, dry_run=True)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.errors, 1)
+
+    def test_empty_items(self):
+        self._write_products_json([])
+        from rayvault.product_asset_fetch import run_product_fetch
+        result = run_product_fetch(self.run_dir, dry_run=True)
+        self.assertFalse(result.ok)
+
+    def test_dry_run_creates_no_files(self):
+        self._write_products_json([
+            {"rank": 1, "asin": "B0TEST", "title": "Test Product",
+             "image_urls": ["https://example.com/img.jpg"]},
+        ])
+        from rayvault.product_asset_fetch import run_product_fetch
+        result = run_product_fetch(self.run_dir, dry_run=True)
+        self.assertTrue(result.ok)
+        # product.json should NOT be written in dry_run
+        self.assertFalse((self.products_dir / "p01" / "product.json").exists())
+
+    def test_no_image_urls_counts_error(self):
+        self._write_products_json([
+            {"rank": 1, "asin": "B0NOIMG", "title": "No Images", "image_urls": []},
+        ])
+        from rayvault.product_asset_fetch import run_product_fetch
+        result = run_product_fetch(self.run_dir, dry_run=True)
+        self.assertEqual(result.errors, 1)
+
+    def test_missing_asin_counts_error(self):
+        self._write_products_json([
+            {"rank": 1, "asin": "", "title": "No ASIN", "image_urls": ["https://x.com/a.jpg"]},
+        ])
+        from rayvault.product_asset_fetch import run_product_fetch
+        result = run_product_fetch(self.run_dir, dry_run=True)
+        self.assertEqual(result.errors, 1)
+
+    def test_pick_urls_prefers_hires(self):
+        from rayvault.product_asset_fetch import pick_urls
+        item = {
+            "image_urls": ["https://a.com/lo.jpg", "https://a.com/lo2.jpg"],
+            "hires_image_urls": ["https://a.com/hi.jpg"],
+        }
+        urls = pick_urls(item)
+        self.assertEqual(urls[0], "https://a.com/hi.jpg")
+        self.assertIn("https://a.com/lo.jpg", urls)
+
+    def test_pick_urls_dedupes(self):
+        from rayvault.product_asset_fetch import pick_urls
+        item = {
+            "image_urls": ["https://a.com/same.jpg"],
+            "hires_image_urls": ["https://a.com/same.jpg"],
+        }
+        urls = pick_urls(item)
+        self.assertEqual(len(urls), 1)
+
+    def test_safe_ext_from_url(self):
+        from rayvault.product_asset_fetch import safe_ext_from_url
+        self.assertEqual(safe_ext_from_url("https://x.com/img.png"), ".png")
+        self.assertEqual(safe_ext_from_url("https://x.com/img.jpeg"), ".jpg")
+        self.assertEqual(safe_ext_from_url("https://x.com/img.webp"), ".webp")
+        self.assertEqual(safe_ext_from_url("https://x.com/nope"), ".jpg")
+
+    def test_manifest_updated_with_products(self):
+        """Non-destructive manifest update sets products block."""
+        from rayvault.product_asset_fetch import load_manifest, update_manifest_products, atomic_write_json
+        # Write initial manifest
+        atomic_write_json(self.run_dir / "00_manifest.json", {
+            "run_id": "TEST", "status": "INIT", "assets": {}, "metadata": {},
+        })
+        manifest = load_manifest(self.run_dir)
+        update_manifest_products(manifest, [
+            {"rank": 1, "asin": "B0A", "title": "T", "fidelity": "UNKNOWN", "broll": "PENDING"},
+        ], "products/products.json")
+        self.assertIn("products", manifest)
+        self.assertEqual(manifest["products"]["count"], 1)
+        self.assertIn("products_summary", manifest)
+
+    def test_product_dir_structure_created(self):
+        """After non-dry fetch with local images, directory structure exists."""
+        self._write_products_json([
+            {"rank": 1, "asin": "B0LOCAL", "title": "Local Product",
+             "image_urls": ["https://example.com/fake.jpg"]},
+        ])
+        # Pre-create a "downloaded" image to simulate success
+        src_dir = self.products_dir / "p01" / "source_images"
+        src_dir.mkdir(parents=True)
+        (src_dir / "01_main.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 3000)
+
+        from rayvault.product_asset_fetch import run_product_fetch
+        result = run_product_fetch(self.run_dir, dry_run=False)
+        # Image was already there → skipped
+        self.assertEqual(result.skipped, 1)
+        self.assertTrue((self.products_dir / "p01" / "product.json").exists())
+        self.assertTrue((self.products_dir / "p01" / "qc.json").exists())
+        self.assertTrue((self.products_dir / "p01" / "broll").is_dir())
+        self.assertTrue((self.products_dir / "p01" / "source_images" / "hashes.json").exists())
+
+
+class TestProductBrollContract(unittest.TestCase):
+    """Tests for product_broll_contract.json."""
+
+    def test_contract_loadable(self):
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config" / "product_broll_contract.json").read_text()
+        )
+        self.assertEqual(cfg["version"], "1.0")
+
+    def test_golden_rule_present(self):
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config" / "product_broll_contract.json").read_text()
+        )
+        self.assertIn("golden_rule", cfg)
+        self.assertIn("never", cfg["golden_rule"].lower())
+
+    def test_reference_mode(self):
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config" / "product_broll_contract.json").read_text()
+        )
+        rm = cfg["reference_mode"]
+        self.assertEqual(rm["type"], "image_to_video")
+        self.assertGreaterEqual(rm["reference_strength_min"], 0.85)
+
+    def test_fast_fail_criteria(self):
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config" / "product_broll_contract.json").read_text()
+        )
+        ff = cfg["product_fidelity_qc"]["fast_fail"]
+        self.assertIn("product_shape_differs", ff)
+        self.assertIn("wrong_color_material", ff)
+
+    def test_shot_list_clips(self):
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config" / "product_broll_contract.json").read_text()
+        )
+        sl = cfg["shot_list"]
+        self.assertIn("clip_a", sl)
+        self.assertIn("clip_b", sl)
+
+    def test_script_truth_boundary(self):
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config" / "product_broll_contract.json").read_text()
+        )
+        stb = cfg["script_truth_boundary"]
+        self.assertIn("allowed", stb)
+        self.assertIn("forbidden", stb)
+        self.assertEqual(stb["cta"], "Link in description")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

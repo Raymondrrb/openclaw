@@ -1,0 +1,65 @@
+{
+  "_doc": "Dzine B-roll generation contract. Reference-only: never recreate products from text.",
+  "version": "1.0",
+
+  "golden_rule": "Never prompt Dzine to 'create the product'. Only: 'animate this exact reference image'.",
+
+  "reference_mode": {
+    "type": "image_to_video",
+    "source": "Amazon main product image (downloaded locally)",
+    "reference_strength_min": 0.85,
+    "reference_strength_max": 0.95,
+    "reference_strength_default": 0.90
+  },
+
+  "prompt_template": "Studio product shot animation of the exact same product from the reference image. Maintain identical shape, color, materials, buttons, ports, labels. Subtle cinematic lighting. Slow camera move (push-in 2-4%). No text overlays. No new features. No re-design.",
+
+  "negative_template": "incorrect shape, different color, added buttons, added screen, brand text, watermark, new labels, unrealistic redesign, cartoon, CGI look, distorted perspective",
+
+  "shot_list": {
+    "_doc": "Per product, generate 2 clips max. If either fails QC, use Ken Burns.",
+    "clip_a": {"motion": "slow push-in", "duration_sec": 3.5},
+    "clip_b": {"motion": "slow parallax/tilt", "duration_sec": 3.5},
+    "max_attempts_per_clip": 2
+  },
+
+  "fallback": {
+    "method": "KEN_BURNS",
+    "trigger": "any clip fails product fidelity QC",
+    "ken_burns_config": {
+      "zoom_start": 1.00,
+      "zoom_end": 1.08,
+      "pan": "auto_safe",
+      "duration_sec": 5.0
+    }
+  },
+
+  "product_fidelity_qc": {
+    "_doc": "Deterministic visual QC for product B-roll. Compare output to Amazon source image.",
+    "fast_fail": [
+      "product_shape_differs",
+      "extra_buttons_ports_features",
+      "wrong_color_material",
+      "fake_brand_text_appears"
+    ],
+    "soft_fail_to_fallback": [
+      "minor_lighting_mismatch",
+      "background_differs_but_product_identical"
+    ],
+    "pass_criteria": "Shape, color, materials, key features all match source image"
+  },
+
+  "script_truth_boundary": {
+    "_doc": "Rules for script generation to avoid hallucinated product claims.",
+    "allowed": [
+      "What is visible in Amazon images (downloaded locally)",
+      "What is in Amazon bullet points/specs (if stored in products.json)"
+    ],
+    "forbidden": [
+      "Performance claims not on Amazon page",
+      "Specs not evidenced by stored data",
+      "Subjective quality claims (best, amazing, etc.)"
+    ],
+    "cta": "Link in description"
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "version": "1.0",
+  "video": {
+    "resolution": {"w": 1920, "h": 1080},
+    "fps": 30,
+    "codec": "h264",
+    "bitrate_kbps": 12000,
+    "gop": 60
+  },
+  "audio": {
+    "target_lufs": -14.0,
+    "true_peak_db": -1.0,
+    "voice_gain_db": 0.0,
+    "music_gain_db": -18.0,
+    "compressor": {
+      "enabled": true,
+      "threshold_db": -18,
+      "ratio": 3.0,
+      "attack_ms": 10,
+      "release_ms": 120
+    }
+  },
+  "layout": {
+    "safe_margins": {"top": 0.08, "bottom": 0.10, "left": 0.06, "right": 0.06},
+    "ray_frame": {
+      "type": "image_or_video",
+      "path": "03_frame.png",
+      "placement": "full_screen_center",
+      "face_safe_box": {
+        "x": 0.30, "y": 0.14, "w": 0.40, "h": 0.62
+      },
+      "notes": "Face box is for lipsync crop stabilization; normalized coords."
+    },
+    "captions": {
+      "enabled": true,
+      "style": "minimal",
+      "max_lines": 2,
+      "position": "bottom_center"
+    }
+  },
+  "timeline": {
+    "intro_sec": 2.0,
+    "product_block": {
+      "per_product_sec": 10.0,
+      "pattern": [
+        {"type": "ray_talking", "sec": 3.5},
+        {"type": "broll", "sec": 5.0},
+        {"type": "cta_overlay", "sec": 1.5}
+      ]
+    },
+    "outro_sec": 2.0
+  },
+  "products": {
+    "source_list": "products/products.json",
+    "render_rules": {
+      "broll_preference": ["DZINE_I2V", "KEN_BURNS"],
+      "ken_burns": {
+        "zoom_start": 1.00,
+        "zoom_end": 1.08,
+        "pan": "auto_safe",
+        "blur_background": 0.0
+      },
+      "on_screen_card": {
+        "enabled": true,
+        "show_rank": true,
+        "show_title": true,
+        "show_price_text": true,
+        "show_affiliate_cta": "Link in description"
+      }
+    }
+  }
+}
