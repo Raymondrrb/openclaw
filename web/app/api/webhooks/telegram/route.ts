@@ -137,16 +137,23 @@ async function decideRun(
 
   if (updErr) throw updErr;
 
-  // Log event for forensics
+  // Log event for forensics — refetch includes force_refetch flag
+  // so the worker knows to re-collect evidence (not reuse cache)
+  const eventPayload: Record<string, unknown> = {
+    source: "telegram",
+    action,
+    operator: operatorName,
+    ts: new Date().toISOString(),
+  };
+  if (action === "refetch") {
+    eventPayload.force_refetch = true;
+    eventPayload.scope = ["price", "voltage", "compatibility"];
+  }
+
   const { error: evErr } = await sb.from("run_events").insert({
     run_id: runId,
     event_type: `user_${action}`,
-    payload: {
-      source: "telegram",
-      action,
-      operator: operatorName,
-      ts: new Date().toISOString(),
-    },
+    payload: eventPayload,
   });
   if (evErr) {
     console.error("[telegram] Event insert failed:", evErr);

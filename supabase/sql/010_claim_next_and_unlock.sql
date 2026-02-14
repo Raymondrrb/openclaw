@@ -32,13 +32,16 @@ create index if not exists idx_runs_worker_health
     where worker_state in ('active', 'panic', 'waiting');
 
 -- ==========================================================================
--- 2. rpc_claim_next_run — atomic "take the next eligible run"
+-- 2. rpc_claim_next_run — atomic "take the next eligible run" with recovery
 --
--- Uses FOR UPDATE SKIP LOCKED so two workers calling simultaneously
--- each get a different run (no collision, no retry).
+-- Two-phase priority:
+--   Phase 1 (recovery): If this worker already owns an active run with
+--     a valid lease, reclaim it. Prevents "losing your run" on restart.
+--   Phase 2 (fresh claim): Pick the next free/expired run via
+--     FOR UPDATE OF r SKIP LOCKED. No collision between workers.
 --
--- Priority: approved first (human already unblocked), then by created_at ASC.
--- Sets worker_state='active' and last_heartbeat_at on claim.
+-- Token + locked_at stability: only rotated when ownership changes.
+-- This prevents checkpoint invalidation on reclaim.
 -- ==========================================================================
 
 create or replace function public.rpc_claim_next_run(
@@ -53,21 +56,38 @@ set search_path = public
 as $$
 declare
     v_run_id uuid;
+    v_now    timestamptz := now();
+    v_lease  int := greatest(1, least(p_lease_minutes, 30));
 begin
     -- Validate worker_id (min 3 chars after trim)
     if length(trim(p_worker_id)) < 3 then
         raise exception 'worker_id must be at least 3 characters, got "%"', trim(p_worker_id);
     end if;
 
-    -- Clamp lease to 1-30 minutes
-    p_lease_minutes := greatest(1, least(p_lease_minutes, 30));
+    -- Phase 1: Recovery — reclaim our own active run (if any).
+    -- Worker restarted without checkpoint → get your last run back.
+    select r.id into v_run_id
+    from public.pipeline_runs r
+    where r.worker_id = p_worker_id
+      and r.lock_expires_at >= v_now
+      and r.status in ('running', 'in_progress', 'approved', 'waiting_approval')
+    order by r.locked_at desc
+    limit 1
+    for update of r;
 
-    -- Select next eligible run:
-    --   1. Status is claimable (running, in_progress, approved)
-    --   2. Lock is free, expired, or null (no active lock by another worker)
-    --   3. Optional task_type filter
-    --   4. Priority: approved > running/in_progress, then oldest first
-    --   5. FOR UPDATE OF r SKIP LOCKED: explicit table target, no ambiguity
+    if v_run_id is not null then
+        -- Reclaim: extend lease, keep token + locked_at (stable)
+        update public.pipeline_runs
+        set lock_expires_at      = v_now + make_interval(mins => v_lease),
+            last_heartbeat_at    = v_now,
+            worker_state         = 'active',
+            worker_last_error    = ''
+        where id = v_run_id;
+        return v_run_id;
+    end if;
+
+    -- Phase 2: Fresh claim — next free/expired run.
+    -- FOR UPDATE OF r SKIP LOCKED: atomic, no collision between workers.
     select r.id into v_run_id
     from public.pipeline_runs r
     where r.status in ('running', 'in_progress', 'approved')
@@ -75,7 +95,7 @@ begin
           r.worker_id is null
           or r.worker_id = ''
           or r.lock_expires_at is null
-          or r.lock_expires_at < now()
+          or r.lock_expires_at < v_now
       )
       and (p_task_type is null or r.task_type = p_task_type)
     order by
@@ -88,14 +108,14 @@ begin
         return null;  -- No eligible runs
     end if;
 
-    -- Claim it (inline, same transaction — no CAS race)
+    -- Fresh claim: new token + locked_at (ownership change)
     update public.pipeline_runs
     set worker_id            = p_worker_id,
-        locked_at            = now(),
-        lock_expires_at      = now() + make_interval(mins => p_lease_minutes),
+        locked_at            = v_now,
+        lock_expires_at      = v_now + make_interval(mins => v_lease),
         lock_token           = p_lock_token,
         worker_state         = 'active',
-        last_heartbeat_at    = now(),
+        last_heartbeat_at    = v_now,
         worker_last_error    = ''
     where id = v_run_id;
 

@@ -67,15 +67,20 @@ begin
     p_lease_minutes := greatest(1, least(p_lease_minutes, 30));
 
     -- Claim if: lock is free/expired, OR same worker reclaiming (idempotent).
-    -- Token logic: fresh claim → use new p_lock_token.
-    --              reclaim by same worker → keep existing token.
+    -- Token + locked_at logic: ownership change → new values.
+    --                          reclaim by same worker → keep existing (audit trail stays honest).
     update public.pipeline_runs
     set worker_id       = p_worker_id,
-        locked_at       = now(),
+        locked_at       = case
+            when worker_id = p_worker_id and lock_expires_at >= now()
+                then locked_at                                -- reclaim: keep original timestamp
+            else now()                                        -- fresh claim: new timestamp
+        end,
         lock_expires_at = now() + make_interval(mins => p_lease_minutes),
         lock_token      = case
-            when worker_id = p_worker_id then lock_token   -- reclaim: keep existing
-            else p_lock_token                               -- fresh claim: new token
+            when worker_id = p_worker_id and lock_expires_at >= now()
+                then lock_token                               -- reclaim: keep existing token
+            else p_lock_token                                 -- fresh claim: new token
         end
     where id = p_run_id
       and status in ('running', 'in_progress', 'approved')
