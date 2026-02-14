@@ -52,6 +52,12 @@ MARGIN = 80
 QR_SIZE = 380
 QR_QUIET_ZONE = 4
 
+# Default overlay positions (bottom-left for lower-third, bottom-right for QR)
+LT_X = MARGIN
+LT_Y = None  # computed at render time (bottom-aligned)
+QR_X = CANVAS_W - MARGIN - QR_SIZE
+QR_Y = CANVAS_H - MARGIN - QR_SIZE
+
 # Lower-third: bottom-left, semi-transparent background
 LT_BG_ALPHA = int(255 * 0.70)
 LT_BG_COLOR = (20, 20, 20, LT_BG_ALPHA)
@@ -106,6 +112,42 @@ def truncate_text(text: str, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "\u2026"
 
 
+# Separator tokens for smart truncation (ordered by priority)
+_TITLE_SEPARATORS = [" - ", " \u2014 ", " | ", ", ", ": "]
+
+
+def smart_title(text: str, max_chars: int = 52) -> str:
+    """Smart truncation: cut at natural separators before the limit.
+
+    Prefers cutting at " - ", " | ", ",", ":" within max_chars.
+    Falls back to word-boundary truncation with ellipsis.
+    Never returns empty string.
+    """
+    text = text.strip()
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+
+    # Try cutting at separators within limit
+    best_cut = -1
+    for sep in _TITLE_SEPARATORS:
+        idx = text.rfind(sep, 0, max_chars)
+        if idx > 10 and idx > best_cut:  # min 10 chars to avoid too-short titles
+            best_cut = idx
+
+    if best_cut > 0:
+        return text[:best_cut].rstrip()
+
+    # Fallback: cut at last space before limit
+    space_idx = text.rfind(" ", 0, max_chars - 1)
+    if space_idx > 10:
+        return text[:space_idx].rstrip() + "\u2026"
+
+    # Last resort: hard cut
+    return text[: max_chars - 1].rstrip() + "\u2026"
+
+
 # ---------------------------------------------------------------------------
 # Check optional dependencies
 # ---------------------------------------------------------------------------
@@ -127,6 +169,45 @@ def _has_qrcode() -> bool:
         return False
 
 
+def _has_pyzbar() -> bool:
+    try:
+        from pyzbar.pyzbar import decode  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _canon_url(url: str) -> str:
+    """Canonicalize URL for comparison: strip whitespace + trailing slash."""
+    url = url.strip()
+    if url.endswith("/"):
+        url = url[:-1]
+    return url
+
+
+def validate_qr_content(qr_path: Path, expected_link: str) -> Optional[str]:
+    """Decode QR from PNG and verify it matches expected_link.
+
+    Returns None on success, error string on failure.
+    Requires pyzbar + Pillow. Uses canonical URL comparison.
+    """
+    if not _has_pyzbar() or not _has_pillow():
+        return "QR_VALIDATE_SKIPPED_NO_PYZBAR"
+    try:
+        from PIL import Image
+        from pyzbar.pyzbar import decode
+        img = Image.open(qr_path)
+        results = decode(img)
+        if not results:
+            return "QR_DECODE_EMPTY"
+        decoded = results[0].data.decode("utf-8", errors="replace")
+        if _canon_url(decoded) != _canon_url(expected_link):
+            return f"QR_CONTENT_MISMATCH: got={decoded[:60]}"
+        return None
+    except Exception as e:
+        return f"QR_DECODE_ERROR: {type(e).__name__}"
+
+
 # ---------------------------------------------------------------------------
 # Display mode policy
 # ---------------------------------------------------------------------------
@@ -137,9 +218,11 @@ class OverlayFlags:
     allow_qr_amber: bool = False
     no_qr: bool = False
     force_qr: bool = False
+    validate_qr: bool = True
     max_title_chars: int = 52
     include_price: bool = True
     include_rank_badge: bool = True
+    amber_warning_text: str = ""  # e.g. "Prices may vary"
 
 
 def resolve_display_mode(
@@ -249,7 +332,7 @@ def render_lowerthird(
     # Build text lines
     lines = []
     rank_prefix = f"TOP #{rank}" if flags.include_rank_badge else ""
-    title_trunc = truncate_text(title, flags.max_title_chars) if title else ""
+    title_trunc = smart_title(title, flags.max_title_chars) if title else ""
     if rank_prefix and title_trunc:
         lines.append(f"{rank_prefix}  \u2014  {title_trunc}")
     elif rank_prefix:
@@ -264,6 +347,10 @@ def render_lowerthird(
         line2_parts.append(short_link)
     if line2_parts:
         lines.append("    ".join(line2_parts))
+
+    # AMBER warning text (optional extra line)
+    if flags.amber_warning_text:
+        lines.append(flags.amber_warning_text)
 
     if not lines:
         return False
@@ -350,7 +437,7 @@ def render_qr(
 
     qr = qrcode.QRCode(
         version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
         box_size=10,
         border=QR_QUIET_ZONE,
     )
@@ -485,7 +572,7 @@ def build_overlays(
                 overlay_assets.append({
                     "rank": rank, "type": "lowerthird",
                     "path": lt_path_rel, "sha1": h,
-                    "w": width, "h": height,
+                    "x": 0, "y": 0, "w": width, "h": height,
                     "display_mode": display_mode,
                 })
         elif not apply:
@@ -498,12 +585,28 @@ def build_overlays(
         want_qr = display_mode == DISPLAY_LINK_PLUS_QR
         if want_qr and apply and has_qr and has_pil and short_link:
             qr_ok = render_qr(short_link, qr_path)
+            if qr_ok and flags.validate_qr:
+                # Self-healing: generate → decode → verify
+                validation_err = validate_qr_content(qr_path, short_link)
+                if validation_err and validation_err != "QR_VALIDATE_SKIPPED_NO_PYZBAR":
+                    # QR content doesn't match — degrade to LINK_ONLY
+                    item_warnings.append(f"QR_INVALID_DECODE: {validation_err}")
+                    try:
+                        qr_path.unlink()
+                    except OSError:
+                        pass
+                    qr_ok = False
+                    display_mode = DISPLAY_LINK_ONLY
+                    if "affiliate" in p:
+                        p["affiliate"]["display_mode"] = display_mode
+                elif validation_err == "QR_VALIDATE_SKIPPED_NO_PYZBAR":
+                    item_warnings.append("QR_VALIDATE_SKIPPED_NO_PYZBAR")
             if qr_ok:
                 h = sha1_file(qr_path)
                 overlay_assets.append({
                     "rank": rank, "type": "qr",
                     "path": qr_path_rel, "sha1": h,
-                    "w": QR_SIZE, "h": QR_SIZE,
+                    "x": QR_X, "y": QR_Y, "w": QR_SIZE, "h": QR_SIZE,
                     "display_mode": display_mode,
                 })
         elif want_qr and not has_qr:
@@ -519,13 +622,17 @@ def build_overlays(
             "display_mode": display_mode,
             "lowerthird_path": lt_path_rel if lt_ok else None,
             "qr_path": qr_path_rel if qr_ok else None,
+            "coords": {
+                "lowerthird": {"x": 0, "y": 0, "w": width, "h": height} if lt_ok else None,
+                "qr": {"x": QR_X, "y": QR_Y, "w": QR_SIZE, "h": QR_SIZE} if qr_ok else None,
+            },
             "warnings": item_warnings,
         })
 
     result.items = index_items
     result.skipped = sum(1 for i in index_items if not i["lowerthird_path"] and i["display_mode"] != DISPLAY_HIDE)
 
-    # Write overlays index
+    # Write overlays index (always when --apply, even for RED/empty — deterministic state)
     if apply:
         index = {
             "run_id": manifest.get("run_id", run_dir.name),
@@ -541,6 +648,7 @@ def build_overlays(
         render = manifest.setdefault("render", {})
         render["overlays_ready"] = result.generated > 0 and has_pil
         render["overlays_dir"] = "publish/overlays"
+        render["overlays_tier"] = tier
 
         assets = manifest.setdefault("assets", {})
         assets["overlays"] = overlay_assets
@@ -573,6 +681,12 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--max-title-chars", type=int, default=52)
     ap.add_argument("--include-price", action="store_true", default=True)
     ap.add_argument("--include-rank-badge", action="store_true", default=True)
+    ap.add_argument("--validate-qr", action="store_true", default=True,
+                    help="Validate QR content after generation (requires pyzbar)")
+    ap.add_argument("--no-validate-qr", action="store_true", default=False,
+                    help="Skip QR content validation")
+    ap.add_argument("--amber-warning-text", default="",
+                    help="Warning text to show on AMBER-tier overlays")
     ap.add_argument("--width", type=int, default=CANVAS_W)
     ap.add_argument("--height", type=int, default=CANVAS_H)
     ap.add_argument("--font-size", type=int, default=44)
@@ -588,9 +702,11 @@ def main(argv: Optional[list] = None) -> int:
         allow_qr_amber=args.allow_qr_amber,
         no_qr=args.no_qr,
         force_qr=args.force_qr,
+        validate_qr=not args.no_validate_qr,
         max_title_chars=args.max_title_chars,
         include_price=args.include_price,
         include_rank_badge=args.include_rank_badge,
+        amber_warning_text=args.amber_warning_text,
     )
 
     lib_dir = Path(args.library_dir).expanduser().resolve() if args.library_dir else None

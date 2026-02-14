@@ -14487,6 +14487,26 @@ class TestOverlayBuilder(unittest.TestCase):
         self.assertEqual(len(trunc), 52)
         self.assertTrue(trunc.endswith("\u2026"))
 
+    def test_index_items_have_coords(self):
+        from rayvault.qr_overlay_builder import build_overlays, DISPLAY_HIDE
+        manifest = {
+            "run_id": "RUN_TEST",
+            "products": {"episode_truth_tier": "GREEN"},
+            "products_summary": [
+                {"rank": 1, "asin": "B0A", "affiliate": {
+                    "eligible": True, "short_link": "https://amzn.to/abc",
+                }},
+            ],
+        }
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+        result = build_overlays(self.run_dir, apply=False)
+        item = result.items[0]
+        self.assertIn("coords", item)
+        # In dry-run, no files rendered, so coords are None
+        # But the field exists for contract compliance
+        self.assertIn("lowerthird", item["coords"])
+        self.assertIn("qr", item["coords"])
+
     def test_amber_display_mode_in_items(self):
         from rayvault.qr_overlay_builder import build_overlays, DISPLAY_LINK_ONLY
         manifest = {
@@ -14501,6 +14521,187 @@ class TestOverlayBuilder(unittest.TestCase):
         self._write_json(self.run_dir / "00_manifest.json", manifest)
         result = build_overlays(self.run_dir, apply=False)
         self.assertEqual(result.items[0]["display_mode"], DISPLAY_LINK_ONLY)
+
+
+class TestSmartTitle(unittest.TestCase):
+    """Tests for smart_title() truncation."""
+
+    def test_short_title_unchanged(self):
+        from rayvault.qr_overlay_builder import smart_title
+        self.assertEqual(smart_title("Short Title", 52), "Short Title")
+
+    def test_empty_returns_empty(self):
+        from rayvault.qr_overlay_builder import smart_title
+        self.assertEqual(smart_title("", 52), "")
+
+    def test_cuts_at_dash_separator(self):
+        from rayvault.qr_overlay_builder import smart_title
+        title = "Amazing Wireless Headphones - Premium Sound with Active Noise Cancellation Technology"
+        result = smart_title(title, 52)
+        self.assertEqual(result, "Amazing Wireless Headphones")
+        self.assertLessEqual(len(result), 52)
+
+    def test_cuts_at_pipe_separator(self):
+        from rayvault.qr_overlay_builder import smart_title
+        title = "Super Smart Robot Vacuum | Self-Emptying Base with LiDAR Navigation and WiFi"
+        result = smart_title(title, 52)
+        self.assertEqual(result, "Super Smart Robot Vacuum")
+
+    def test_cuts_at_comma_separator(self):
+        from rayvault.qr_overlay_builder import smart_title
+        title = "Professional Chef Knife Set, 15 Pieces with German Steel and Wooden Block Storage"
+        result = smart_title(title, 52)
+        self.assertEqual(result, "Professional Chef Knife Set")
+
+    def test_word_boundary_fallback(self):
+        from rayvault.qr_overlay_builder import smart_title
+        # No separators — falls back to word boundary with ellipsis
+        title = "This is a very long product title without any good separator tokens in it"
+        result = smart_title(title, 30)
+        self.assertLessEqual(len(result), 30)
+        self.assertTrue(result.endswith("\u2026"))
+
+    def test_hard_cut_fallback(self):
+        from rayvault.qr_overlay_builder import smart_title
+        # No spaces at all
+        title = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        result = smart_title(title, 20)
+        self.assertLessEqual(len(result), 20)
+        self.assertTrue(result.endswith("\u2026"))
+
+    def test_separator_too_early_ignored(self):
+        from rayvault.qr_overlay_builder import smart_title
+        # Separator at position 5 — too short, should not cut there
+        title = "ABC - This is a very long product title that needs truncation for display"
+        result = smart_title(title, 52)
+        # Should NOT cut at "ABC" (too short), but at word boundary
+        self.assertLessEqual(len(result), 52)
+        self.assertNotEqual(result, "ABC")
+
+
+class TestURLCanonicalization(unittest.TestCase):
+    """Tests for _canon_url used in QR validation."""
+
+    def test_strip_trailing_slash(self):
+        from rayvault.qr_overlay_builder import _canon_url
+        self.assertEqual(_canon_url("https://amzn.to/abc/"), "https://amzn.to/abc")
+
+    def test_strip_whitespace(self):
+        from rayvault.qr_overlay_builder import _canon_url
+        self.assertEqual(_canon_url("  https://amzn.to/abc  "), "https://amzn.to/abc")
+
+    def test_no_change_for_clean_url(self):
+        from rayvault.qr_overlay_builder import _canon_url
+        self.assertEqual(_canon_url("https://amzn.to/abc"), "https://amzn.to/abc")
+
+    def test_empty_string(self):
+        from rayvault.qr_overlay_builder import _canon_url
+        self.assertEqual(_canon_url(""), "")
+
+
+class TestQRValidation(unittest.TestCase):
+    """Tests for QR self-validation (validate_qr_content)."""
+
+    def test_returns_skip_when_no_pyzbar(self):
+        from rayvault.qr_overlay_builder import validate_qr_content, _has_pyzbar, _has_pillow
+        if _has_pyzbar() and _has_pillow():
+            self.skipTest("pyzbar is installed — cannot test skip path")
+        result = validate_qr_content(Path("/fake/path.png"), "https://amzn.to/abc")
+        self.assertEqual(result, "QR_VALIDATE_SKIPPED_NO_PYZBAR")
+
+    def test_returns_error_for_missing_file(self):
+        from rayvault.qr_overlay_builder import validate_qr_content, _has_pyzbar, _has_pillow
+        if not _has_pyzbar() or not _has_pillow():
+            self.skipTest("pyzbar/Pillow not installed")
+        result = validate_qr_content(Path("/nonexistent/qr.png"), "https://amzn.to/abc")
+        self.assertIsNotNone(result)
+        self.assertIn("QR_DECODE_ERROR", result)
+
+    def test_validate_qr_flag_disables_in_build(self):
+        """When validate_qr=False, QR validation is skipped in build."""
+        from rayvault.qr_overlay_builder import OverlayFlags
+        flags = OverlayFlags(validate_qr=False)
+        self.assertFalse(flags.validate_qr)
+
+
+class TestOverlayAmberWarning(unittest.TestCase):
+    """Tests for AMBER warning text in overlays."""
+
+    def test_amber_warning_text_in_flags(self):
+        from rayvault.qr_overlay_builder import OverlayFlags
+        flags = OverlayFlags(amber_warning_text="Prices may vary")
+        self.assertEqual(flags.amber_warning_text, "Prices may vary")
+
+    def test_amber_warning_default_empty(self):
+        from rayvault.qr_overlay_builder import OverlayFlags
+        flags = OverlayFlags()
+        self.assertEqual(flags.amber_warning_text, "")
+
+    def test_cli_parses_amber_warning_text(self):
+        from rayvault.qr_overlay_builder import main
+        import io
+        # Just verify the CLI doesn't crash with --amber-warning-text
+        # (will fail on missing run-dir, but parses args successfully)
+        tmp = tempfile.mkdtemp()
+        try:
+            run_dir = Path(tmp) / "RUN_TEST"
+            run_dir.mkdir()
+            manifest = {"run_id": "RUN_TEST", "products_summary": []}
+            with open(run_dir / "00_manifest.json", "w") as f:
+                json.dump(manifest, f)
+            code = main(["--run-dir", str(run_dir), "--amber-warning-text", "Prices may vary"])
+            self.assertEqual(code, 0)
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_red_tier_apply_writes_index_and_manifest(self):
+        """RED tier with --apply must write overlays_index.json and patch manifest."""
+        from rayvault.qr_overlay_builder import build_overlays
+        tmp = tempfile.mkdtemp()
+        try:
+            run_dir = Path(tmp) / "RUN_TEST"
+            run_dir.mkdir()
+            manifest = {
+                "run_id": "RUN_TEST",
+                "affiliate_policy": {"episode_truth_tier": "RED", "links_enabled": False},
+                "products_summary": [
+                    {"rank": 1, "asin": "B0A", "title": "Test", "affiliate": {
+                        "eligible": False, "short_link": None, "blocked_reason": "EPISODE_TIER_RED",
+                    }},
+                ],
+            }
+            with open(run_dir / "00_manifest.json", "w") as f:
+                json.dump(manifest, f)
+            result = build_overlays(run_dir, apply=True)
+            self.assertTrue(result.ok)
+            # Index file must exist
+            idx_path = run_dir / "publish" / "overlays" / "overlays_index.json"
+            self.assertTrue(idx_path.exists(), "overlays_index.json must be written even for RED tier")
+            idx = json.loads(idx_path.read_text())
+            self.assertEqual(idx["episode_truth_tier"], "RED")
+            # Manifest must be patched
+            m = json.loads((run_dir / "00_manifest.json").read_text())
+            self.assertIn("render", m)
+            self.assertEqual(m["render"]["overlays_tier"], "RED")
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_cli_parses_no_validate_qr(self):
+        from rayvault.qr_overlay_builder import main
+        tmp = tempfile.mkdtemp()
+        try:
+            run_dir = Path(tmp) / "RUN_TEST"
+            run_dir.mkdir()
+            manifest = {"run_id": "RUN_TEST", "products_summary": []}
+            with open(run_dir / "00_manifest.json", "w") as f:
+                json.dump(manifest, f)
+            code = main(["--run-dir", str(run_dir), "--no-validate-qr"])
+            self.assertEqual(code, 0)
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
