@@ -10031,5 +10031,221 @@ class TestPolicyConstants(unittest.TestCase):
             self.assertEqual(result, CONFIDENCE_HIGH)
 
 
+# ---------------------------------------------------------------------------
+# Keyframe scoring tests
+# ---------------------------------------------------------------------------
+
+class TestKeyframeScoring(unittest.TestCase):
+    """Tests for keyframe_score.py scoring logic."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_compute_zone_green(self):
+        """All criteria high → green zone."""
+        self._add_scripts_path()
+        from keyframe_score import compute_zone, _load_rubric
+        rubric = _load_rubric()
+        scores = {
+            "identity": 2, "hands_body": 2, "face_artifacts": 2,
+            "consistency": 2, "lipsync_ready": 2,
+        }
+        self.assertEqual(compute_zone(scores, rubric), "green")
+
+    def test_compute_zone_red_identity_zero(self):
+        """Identity at 0 → red zone regardless of total."""
+        self._add_scripts_path()
+        from keyframe_score import compute_zone, _load_rubric
+        rubric = _load_rubric()
+        scores = {
+            "identity": 0, "hands_body": 2, "face_artifacts": 2,
+            "consistency": 2, "lipsync_ready": 2,
+        }
+        self.assertEqual(compute_zone(scores, rubric), "red")
+
+    def test_compute_zone_red_lipsync_zero(self):
+        """Lipsync at 0 → red zone."""
+        self._add_scripts_path()
+        from keyframe_score import compute_zone, _load_rubric
+        rubric = _load_rubric()
+        scores = {
+            "identity": 2, "hands_body": 2, "face_artifacts": 2,
+            "consistency": 2, "lipsync_ready": 0,
+        }
+        self.assertEqual(compute_zone(scores, rubric), "red")
+
+    def test_compute_zone_yellow(self):
+        """Total >= 7 but identity or lipsync not both 2 → yellow."""
+        self._add_scripts_path()
+        from keyframe_score import compute_zone, _load_rubric
+        rubric = _load_rubric()
+        scores = {
+            "identity": 1, "hands_body": 2, "face_artifacts": 2,
+            "consistency": 2, "lipsync_ready": 2,
+        }
+        zone = compute_zone(scores, rubric)
+        # Total=9 but identity=1 → not green
+        self.assertEqual(zone, "yellow")
+
+    def test_score_entry_validates_criteria(self):
+        """Unknown criterion name returns error."""
+        self._add_scripts_path()
+        from keyframe_score import score_entry
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({"items": {"aa": {}}, "meta_info": {}}))
+            result = score_entry("aa", {"bogus_criterion": 2}, index_path=idx_path)
+            self.assertIn("error", result)
+
+    def test_score_entry_validates_range(self):
+        """Score value > 2 returns error."""
+        self._add_scripts_path()
+        from keyframe_score import score_entry
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({"items": {"aa": {}}, "meta_info": {}}))
+            result = score_entry("aa", {"identity": 5}, index_path=idx_path)
+            self.assertIn("error", result)
+
+    def test_score_entry_apply_persists(self):
+        """--apply persists scores in index entry."""
+        self._add_scripts_path()
+        from keyframe_score import score_entry, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({
+                "items": {
+                    "aabbccdd": {"path": "/some/file.mp4", "duration": 5.0},
+                },
+                "meta_info": {},
+            }))
+            scores = {
+                "identity": 2, "hands_body": 2, "face_artifacts": 1,
+                "consistency": 2, "lipsync_ready": 2,
+            }
+            result = score_entry("aabbccdd", scores, index_path=idx_path, apply=True)
+            self.assertEqual(result["zone"], "green")  # total=9, all>=1, identity=2, lipsync=2 → green
+            self.assertEqual(result["total"], 9)
+            idx = _load_index(idx_path)
+            entry_qc = idx["items"]["aabbccdd"]["visual_qc"]
+            self.assertEqual(entry_qc["total"], 9)
+            self.assertIn("scored_at", entry_qc)
+            # Score history persisted
+            history = idx["meta_info"]["score_history"]
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["sha8"], "aabbccdd")
+
+    def test_score_entry_not_found(self):
+        """Scoring non-existent entry returns error."""
+        self._add_scripts_path()
+        from keyframe_score import score_entry
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({"items": {}, "meta_info": {}}))
+            result = score_entry("nonexist", {"identity": 2}, index_path=idx_path, apply=True)
+            self.assertIn("error", result)
+
+    def test_summary_counts(self):
+        """Summary correctly counts scored/unscored/zones."""
+        self._add_scripts_path()
+        from keyframe_score import summary
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({
+                "items": {
+                    "aa": {
+                        "visual_qc": {"total": 10, "zone": "green", "scored_at": "now"},
+                    },
+                    "bb": {
+                        "visual_qc": {"total": 7, "zone": "yellow", "scored_at": "now"},
+                    },
+                    "cc": {},  # unscored
+                },
+                "meta_info": {},
+            }))
+            stats = summary(index_path=idx_path)
+            self.assertEqual(stats["total_items"], 3)
+            self.assertEqual(stats["scored"], 2)
+            self.assertEqual(stats["unscored"], 1)
+            self.assertEqual(stats["green"], 1)
+            self.assertEqual(stats["yellow"], 1)
+            self.assertEqual(stats["library_ready"], 1)
+            self.assertEqual(stats["avg_score"], 8.5)
+
+    def test_cli_summary(self):
+        """CLI --summary runs without error."""
+        self._add_scripts_path()
+        from keyframe_score import main as score_main
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({"items": {}, "meta_info": {}}))
+            rc = score_main(["--state-dir", str(td), "--summary"])
+            self.assertEqual(rc, 0)  # no items → no unscored → 0
+
+
+# ---------------------------------------------------------------------------
+# Config files loadable
+# ---------------------------------------------------------------------------
+
+class TestVisualConfigFiles(unittest.TestCase):
+    """Test that config JSON files are valid and loadable."""
+
+    def _config_dir(self):
+        return Path(__file__).resolve().parent.parent / "config"
+
+    def test_visual_identity_loadable(self):
+        path = self._config_dir() / "visual_identity.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("identity", data)
+        self.assertIn("frame_spec", data)
+        self.assertIn("variation_limits", data)
+        self.assertIn("locked_traits", data["identity"])
+
+    def test_prompt_cookbook_loadable(self):
+        path = self._config_dir() / "prompt_cookbook.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("templates", data)
+        self.assertIn("office_default", data["templates"])
+        self.assertIn("studio_pro", data["templates"])
+        self.assertIn("casual_controlled", data["templates"])
+        # Every template has a prompt and negative
+        for name, tmpl in data["templates"].items():
+            self.assertIn("prompt", tmpl, f"{name} missing prompt")
+            self.assertIn("negative", tmpl, f"{name} missing negative")
+
+    def test_visual_qc_loadable(self):
+        path = self._config_dir() / "visual_qc.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("scoring", data)
+        self.assertIn("zones", data)
+        self.assertIn("criteria", data["scoring"])
+        # All 5 criteria present
+        criteria = data["scoring"]["criteria"]
+        for c in ["identity", "hands_body", "face_artifacts", "consistency", "lipsync_ready"]:
+            self.assertIn(c, criteria, f"Missing criterion: {c}")
+
+    def test_lipsync_mandatory_phrases_present(self):
+        path = self._config_dir() / "prompt_cookbook.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        phrases = data.get("lipsync_mandatory_phrases", [])
+        self.assertGreater(len(phrases), 0)
+        self.assertIn("mouth closed", phrases)
+        self.assertIn("same exact face", phrases)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

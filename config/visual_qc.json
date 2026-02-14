@@ -1,0 +1,124 @@
+{
+  "_doc": "Visual QC rubric for keyframe scoring. Machine-readable; used by keyframe_score.py and doctor_report.py.",
+
+  "version": 1,
+
+  "scoring": {
+    "_doc": "Each criterion scored 0-2. Total max = 10. Pass threshold = 7 (daily) / 8 (keyframe library).",
+    "criteria": {
+      "identity": {
+        "weight": 1,
+        "max": 2,
+        "description": "Same face/features as Keyframe Zero reference",
+        "score_2": "Identical — eyes, jaw, skin tone, hairline match perfectly",
+        "score_1": "Minor deviation — recognizable but slightly off",
+        "score_0": "Different person or major trait drift"
+      },
+      "hands_body": {
+        "weight": 1,
+        "max": 2,
+        "description": "Hands/body natural, no artifacts",
+        "score_2": "Hands out of frame or natural, body proportions correct",
+        "score_1": "Minor artifact (slight distortion, extra crease)",
+        "score_0": "Extra fingers, deformed hands, body proportion error"
+      },
+      "face_artifacts": {
+        "weight": 1,
+        "max": 2,
+        "description": "No artifacts on teeth, eyes, skin, edges",
+        "score_2": "Clean face, no digital artifacts",
+        "score_1": "Minor skin noise or slight edge artifact",
+        "score_0": "Visible teeth/eye/skin artifacts, double chin, shadow break"
+      },
+      "consistency": {
+        "weight": 1,
+        "max": 2,
+        "description": "Clothing/lighting/background match reference set",
+        "score_2": "Matches variation parameters exactly",
+        "score_1": "Slight deviation (color shift, bokeh strength)",
+        "score_0": "Wrong outfit, wrong lighting, wrong background"
+      },
+      "lipsync_ready": {
+        "weight": 1,
+        "max": 2,
+        "description": "Mouth/chin clean and lipsync-compatible",
+        "score_2": "Mouth closed, clean chin, clear lip line, front-facing",
+        "score_1": "Slight lip noise or minor chin shadow",
+        "score_0": "Open mouth, deformed lips, chin artifact, extreme angle"
+      }
+    },
+    "max_total": 10,
+    "pass_daily": 7,
+    "pass_keyframe_library": 8
+  },
+
+  "zones": {
+    "red": {
+      "_doc": "Auto-reject and re-try. Never passes.",
+      "triggers": [
+        {"criterion": "lipsync_ready", "condition": "score == 0", "label": "boca_mandibula_suja"},
+        {"criterion": "face_artifacts", "condition": "score == 0", "label": "olhos_errados_ou_artefatos"},
+        {"criterion": "identity", "condition": "score == 0", "label": "identity_drift"},
+        {"criterion": "consistency", "condition": "score == 0 and background_sharp", "label": "fundo_brigando"}
+      ],
+      "action": "reject_and_retry",
+      "max_retries": 3,
+      "on_max_retries": "fallback_to_keyframe_library"
+    },
+    "yellow": {
+      "_doc": "Passes for daily use but NOT for keyframe library.",
+      "triggers": [
+        {"criterion": "face_artifacts", "condition": "score == 1 and beard_noise", "label": "barba_ruido_leve"},
+        {"criterion": "face_artifacts", "condition": "score == 1 and eyebrow_asymmetry", "label": "sobrancelha_micro_assimetria"},
+        {"criterion": "consistency", "condition": "score == 1 and bokeh_weak", "label": "bokeh_fraco"},
+        {"criterion": "consistency", "condition": "score == 1 and outfit_texture_noise", "label": "roupa_textura_ruido"}
+      ],
+      "action": "pass_daily_only"
+    },
+    "green": {
+      "_doc": "Approved for keyframe library. All criteria >= 1, total >= 8, no red triggers.",
+      "requirements": {
+        "min_total": 8,
+        "min_per_criterion": 1,
+        "no_red_triggers": true,
+        "identity_score": 2,
+        "lipsync_ready_score": 2
+      },
+      "action": "approve_for_library"
+    }
+  },
+
+  "retry_strategy": {
+    "_doc": "What to do when a specific zone-red trigger fires.",
+    "identity_drift": {
+      "action": "regen_with_stricter_prompt",
+      "prompt_modifier": "Add 'same exact person, identical facial structure' + increase reference strength if available"
+    },
+    "olhos_errados_ou_artefatos": {
+      "action": "regen_same_prompt",
+      "note": "Usually random; same prompt often works on retry"
+    },
+    "boca_mandibula_suja": {
+      "action": "regen_same_prompt",
+      "note": "Add 'clean jawline, no shadow artifacts under chin' to negative if persistent"
+    },
+    "fundo_brigando": {
+      "action": "regen_with_stronger_bokeh",
+      "prompt_modifier": "Add 'heavily blurred background, shallow depth of field, f/1.8'"
+    }
+  },
+
+  "baptism_visual": {
+    "_doc": "Mini-benchmark protocol: 30 generations in 3 blocks to measure model reliability.",
+    "blocks": {
+      "A_base": {"count": 10, "description": "Same prompt, same setup, baseline"},
+      "B_variation": {"count": 10, "description": "Change 1 variable per image (background OR outfit OR light)"},
+      "C_stress": {"count": 10, "description": "Challenging: hand visible, 3/4 profile, smile, lateral gaze, gesture"}
+    },
+    "pass_rates": {
+      "automate_with_qc": 0.8,
+      "automate_with_fallbacks": 0.5,
+      "use_fixed_library": 0.0
+    }
+  }
+}

@@ -1,0 +1,105 @@
+{
+  "_doc": "Ray visual identity — invariants and controlled variation limits. Machine-readable; used by prompt_cookbook and keyframe_score.",
+
+  "identity": {
+    "_doc": "NEVER changes. If any of these drift, the frame is rejected.",
+    "character_name": "Ray",
+    "character_ref": "dzine_character_ray",
+    "locked_traits": [
+      "facial_structure",
+      "nose_shape",
+      "eye_distance",
+      "jaw_width",
+      "hairline",
+      "hairstyle",
+      "beard_shape",
+      "skin_tone",
+      "ear_shape"
+    ],
+    "negative_identity": [
+      "different person",
+      "changed hairstyle",
+      "changed hairline",
+      "changed beard shape",
+      "changed nose shape",
+      "changed eye distance",
+      "changed jaw width",
+      "aged face",
+      "younger face"
+    ]
+  },
+
+  "frame_spec": {
+    "_doc": "Non-negotiable frame requirements for lipsync compatibility.",
+    "shot": "medium_close_up",
+    "framing": "chest and shoulders up",
+    "angle_deg_max": 12,
+    "angle_default_deg": 0,
+    "lens_mm_min": 70,
+    "lens_mm_max": 100,
+    "lens_mm_default": 85,
+    "headroom_pct": 8,
+    "eye_level": true,
+    "centered": true,
+    "mouth": "closed_relaxed",
+    "mouth_rules": [
+      "mouth closed",
+      "relaxed lips",
+      "clear lip line",
+      "clean chin contour",
+      "no facial hair covering lips",
+      "no extreme expression"
+    ],
+    "eyes": "camera_focus",
+    "background": "bokeh_soft",
+    "hands": "out_of_frame"
+  },
+
+  "lighting": {
+    "_doc": "Face lighting is invariant. Only ambient/background light varies.",
+    "key_light": "soft front-left 45deg",
+    "fill_light": "gentle front-right",
+    "rim_light": "subtle behind for separation",
+    "face_invariant": true,
+    "no_harsh_shadows": ["under_nose", "under_chin"],
+    "no_artifacts": ["bigode_sombrio", "queixo_fantasma"]
+  },
+
+  "variation_limits": {
+    "_doc": "What CAN change, and how much. Vary max 2 dimensions per frame.",
+    "max_simultaneous_changes": 2,
+    "background": {
+      "allowed": ["office_blur_a", "office_blur_b", "studio_dark", "desk_warm"],
+      "rule": "always blurred, no readable text, no logos, no patterns"
+    },
+    "outfit": {
+      "allowed_colors": ["black", "charcoal", "white", "brand_accent"],
+      "rule": "solid color only, no patterns, no logos, no text"
+    },
+    "ambient_light": {
+      "allowed": ["warm_backlight", "cool_backlight", "neutral"],
+      "rule": "face lighting stays constant, only background ambient changes"
+    },
+    "camera_offset": {
+      "allowed_deg": [0, 5, -5, 8, -8],
+      "rule": "frontal default, small offsets only"
+    }
+  },
+
+  "crops": {
+    "landscape_16_9": {"use": "youtube_video", "priority": 1},
+    "portrait_9_16": {"use": "shorts", "priority": 2},
+    "square_1_1": {"use": "thumbnail_test", "priority": 3}
+  },
+
+  "keyframe_library": {
+    "target_count": 12,
+    "distribution": {
+      "office": 6,
+      "studio": 4,
+      "casual": 2
+    },
+    "approval_threshold": "green_zone_only",
+    "min_qc_score": 8
+  }
+}

@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism
 
 # --- Morning routine ---
 doctor:
@@ -187,6 +187,16 @@ status-notify:
 
 notify-summary:
 	@./scripts/telegram_send.sh state/status_summary.txt
+
+# --- Keyframe scoring ---
+keyframe-score:
+	python3 scripts/keyframe_score.py --state-dir state
+
+keyframe-summary:
+	python3 scripts/keyframe_score.py --state-dir state --summary
+
+keyframe-baptism:
+	python3 scripts/keyframe_score.py --state-dir state --baptism
 
 # --- Maintenance (safe + apply) ---
 # SAFE MODE: refresh + dry-run reports. Does not remove or modify anything.
