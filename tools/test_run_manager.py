@@ -2440,12 +2440,12 @@ class TestBrowserContextManager(unittest.TestCase):
         self.assertEqual(bcm.viewport, custom)
 
     def test_paths_set(self):
-        """BrowserContextManager sets storage and trace paths."""
-        from lib.browser import BrowserContextManager
+        """BrowserSession sets profile and trace paths."""
+        from lib.browser import BrowserSession
         from lib.config import WorkerConfig
         cfg = WorkerConfig(worker_id="test")
-        bcm = BrowserContextManager(cfg)
-        self.assertIn("storage_state.json", str(bcm._storage_path))
+        bcm = BrowserSession(cfg)
+        self.assertIn("default.json", str(bcm._storage_path("default")))
         self.assertIn("traces", str(bcm._traces_dir))
 
     def test_no_context_before_enter(self):
@@ -2882,6 +2882,781 @@ class TestSmokeTestHelpers(unittest.TestCase):
         self.assertEqual(h["apikey"], "test-key-123")
         self.assertEqual(h["Authorization"], "Bearer test-key-123")
         self.assertEqual(h["Content-Type"], "application/json")
+
+
+# ==========================================================================
+# JSON Patch tests
+# ==========================================================================
+
+class TestApplyPatch(unittest.TestCase):
+    """Tests for apply_patch.py — JSON Patch operations + guardrails."""
+
+    def test_replace_basic(self):
+        """Replace a top-level key."""
+        from lib.apply_patch import apply_patch
+        base = {"name": "old", "value": 1}
+        ops = [{"op": "replace", "path": "/name", "value": "new"}]
+        result = apply_patch(base, ops)
+        self.assertEqual(result["name"], "new")
+        self.assertEqual(result["value"], 1)
+        # Original not mutated
+        self.assertEqual(base["name"], "old")
+
+    def test_replace_nested(self):
+        """Replace a nested key."""
+        from lib.apply_patch import apply_patch
+        base = {"script": {"hook": "old hook", "cta": "Buy now"}}
+        ops = [{"op": "replace", "path": "/script/hook", "value": "This changed everything"}]
+        result = apply_patch(base, ops)
+        self.assertEqual(result["script"]["hook"], "This changed everything")
+        self.assertEqual(result["script"]["cta"], "Buy now")
+
+    def test_add_new_key(self):
+        """Add a new key to an object."""
+        from lib.apply_patch import apply_patch
+        base = {"a": 1}
+        ops = [{"op": "add", "path": "/b", "value": 2}]
+        result = apply_patch(base, ops)
+        self.assertEqual(result["b"], 2)
+
+    def test_remove_key(self):
+        """Remove a key from an object."""
+        from lib.apply_patch import apply_patch
+        base = {"a": 1, "b": 2}
+        ops = [{"op": "remove", "path": "/b"}]
+        result = apply_patch(base, ops)
+        self.assertNotIn("b", result)
+        self.assertEqual(result["a"], 1)
+
+    def test_multiple_ops(self):
+        """Apply multiple operations in sequence."""
+        from lib.apply_patch import apply_patch
+        base = {"facts": {"price": 99, "rating": 4.5}}
+        ops = [
+            {"op": "replace", "path": "/facts/price", "value": 199},
+            {"op": "replace", "path": "/facts/rating", "value": 4.8},
+        ]
+        result = apply_patch(base, ops)
+        self.assertEqual(result["facts"]["price"], 199)
+        self.assertEqual(result["facts"]["rating"], 4.8)
+
+    def test_strict_mode_raises(self):
+        """Strict mode raises PatchError on invalid op."""
+        from lib.apply_patch import apply_patch, PatchError
+        base = {"a": 1}
+        ops = [{"op": "replace", "path": "/missing", "value": 2}]
+        with self.assertRaises(PatchError):
+            apply_patch(base, ops, strict=True)
+
+    def test_non_strict_collects_errors(self):
+        """Non-strict mode collects errors in _patch_errors."""
+        from lib.apply_patch import apply_patch
+        base = {"a": 1}
+        ops = [{"op": "replace", "path": "/missing", "value": 2}]
+        result = apply_patch(base, ops, strict=False)
+        self.assertIn("_patch_errors", result)
+        self.assertEqual(len(result["_patch_errors"]), 1)
+
+    def test_allowed_prefixes_blocks(self):
+        """Path allowlist blocks unauthorized paths."""
+        from lib.apply_patch import apply_patch, PatchError
+        base = {"script": {"hook": "x"}, "secret": "y"}
+        ops = [{"op": "replace", "path": "/secret", "value": "hacked"}]
+        with self.assertRaises(PatchError):
+            apply_patch(base, ops, allowed_prefixes=("/script", "/facts"))
+
+    def test_allowed_prefixes_allows(self):
+        """Path allowlist permits authorized paths."""
+        from lib.apply_patch import apply_patch
+        base = {"script": {"hook": "x"}, "facts": {"price": 99}}
+        ops = [{"op": "replace", "path": "/script/hook", "value": "new"}]
+        result = apply_patch(base, ops, allowed_prefixes=("/script", "/facts"))
+        self.assertEqual(result["script"]["hook"], "new")
+
+    def test_disallowed_ops_blocks_remove(self):
+        """Disallowed ops blocks remove operations."""
+        from lib.apply_patch import apply_patch, PatchError
+        base = {"a": 1, "b": 2}
+        ops = [{"op": "remove", "path": "/b"}]
+        with self.assertRaises(PatchError):
+            apply_patch(base, ops, disallowed_ops=frozenset({"remove"}))
+
+    def test_max_ops_limit(self):
+        """Max ops limit prevents oversized patches."""
+        from lib.apply_patch import apply_patch, PatchError
+        base = {"a": 1}
+        ops = [{"op": "replace", "path": "/a", "value": i} for i in range(25)]
+        with self.assertRaises(PatchError):
+            apply_patch(base, ops, max_ops=20)
+
+    def test_extract_patch_ops(self):
+        """Extract patch_ops from LLM response."""
+        from lib.apply_patch import extract_patch_ops
+        resp = {"status": "ok", "patch_ops": [{"op": "replace", "path": "/a", "value": 1}]}
+        ops = extract_patch_ops(resp)
+        self.assertEqual(len(ops), 1)
+
+    def test_extract_patch_ops_missing(self):
+        """Extract returns empty list if no patch_ops."""
+        from lib.apply_patch import extract_patch_ops
+        self.assertEqual(extract_patch_ops({}), [])
+        self.assertEqual(extract_patch_ops("not a dict"), [])
+
+
+# ==========================================================================
+# Coercion tests
+# ==========================================================================
+
+class TestCoercion(unittest.TestCase):
+    """Tests for coercion helpers — cheap fixes before LLM repair."""
+
+    def test_coerce_price_usd(self):
+        from lib.apply_patch import coerce_price
+        self.assertAlmostEqual(coerce_price("$199.99"), 199.99)
+
+    def test_coerce_price_brl(self):
+        from lib.apply_patch import coerce_price
+        self.assertAlmostEqual(coerce_price("R$ 1.299,90"), 1299.90)
+
+    def test_coerce_price_plain(self):
+        from lib.apply_patch import coerce_price
+        self.assertAlmostEqual(coerce_price("199"), 199.0)
+
+    def test_coerce_price_empty(self):
+        from lib.apply_patch import coerce_price
+        self.assertIsNone(coerce_price(""))
+
+    def test_coerce_rating_out_of_5(self):
+        from lib.apply_patch import coerce_rating
+        self.assertAlmostEqual(coerce_rating("4.7 out of 5"), 4.7)
+
+    def test_coerce_rating_slash(self):
+        from lib.apply_patch import coerce_rating
+        self.assertAlmostEqual(coerce_rating("4.7/5"), 4.7)
+
+    def test_coerce_rating_plain(self):
+        from lib.apply_patch import coerce_rating
+        self.assertAlmostEqual(coerce_rating("4.7"), 4.7)
+
+    def test_coerce_reviews_with_comma(self):
+        from lib.apply_patch import coerce_reviews
+        self.assertEqual(coerce_reviews("1,234 ratings"), 1234)
+
+    def test_coerce_reviews_k_suffix(self):
+        from lib.apply_patch import coerce_reviews
+        self.assertEqual(coerce_reviews("12K"), 12000)
+
+    def test_coerce_reviews_plain(self):
+        from lib.apply_patch import coerce_reviews
+        self.assertEqual(coerce_reviews("567"), 567)
+
+
+# ==========================================================================
+# JSON Schema Guard tests
+# ==========================================================================
+
+class TestSchemaGuard(unittest.TestCase):
+    """Tests for json_schema_guard.py — LLM output validation + repair prompts."""
+
+    def test_valid_output(self):
+        """Valid output passes validation."""
+        from lib.json_schema_guard import validate_output
+        schema = {
+            "type": "object",
+            "required": ["name", "value"],
+            "properties": {
+                "name": {"type": "string"},
+                "value": {"type": "integer"},
+            },
+        }
+        errors = validate_output({"name": "test", "value": 42}, schema)
+        self.assertEqual(errors, [])
+
+    def test_missing_required_field(self):
+        """Missing required field detected."""
+        from lib.json_schema_guard import validate_output
+        schema = {
+            "type": "object",
+            "required": ["name", "value"],
+            "properties": {},
+        }
+        errors = validate_output({"name": "test"}, schema)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("value", errors[0].path)
+
+    def test_wrong_type(self):
+        """Wrong type detected."""
+        from lib.json_schema_guard import validate_output
+        schema = {"type": "string"}
+        errors = validate_output(42, schema)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("string", errors[0].message)
+
+    def test_string_too_long(self):
+        """String exceeding maxLength detected."""
+        from lib.json_schema_guard import validate_output
+        schema = {"type": "string", "maxLength": 5}
+        errors = validate_output("toolong", schema)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("too long", errors[0].message)
+
+    def test_array_too_short(self):
+        """Array below minItems detected."""
+        from lib.json_schema_guard import validate_output
+        schema = {"type": "array", "minItems": 3}
+        errors = validate_output([1, 2], schema)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("too short", errors[0].message)
+
+    def test_enum_violation(self):
+        """Enum violation detected."""
+        from lib.json_schema_guard import validate_output
+        schema = {"type": "string", "enum": ["ok", "needs_human"]}
+        errors = validate_output("invalid", schema)
+        self.assertEqual(len(errors), 1)
+
+    def test_nested_validation(self):
+        """Nested object validation works."""
+        from lib.json_schema_guard import validate_output
+        schema = {
+            "type": "object",
+            "properties": {
+                "facts": {
+                    "type": "object",
+                    "required": ["price"],
+                    "properties": {"price": {"type": "number"}},
+                },
+            },
+        }
+        errors = validate_output({"facts": {"price": "not_a_number"}}, schema)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("facts.price", errors[0].path)
+
+    def test_multiple_errors_returned(self):
+        """Multiple errors detected in one pass."""
+        from lib.json_schema_guard import validate_output
+        schema = {
+            "type": "object",
+            "required": ["a", "b", "c"],
+        }
+        errors = validate_output({}, schema)
+        self.assertEqual(len(errors), 3)
+
+    def test_build_repair_prompt(self):
+        """Repair prompt generated correctly."""
+        from lib.json_schema_guard import validate_output, build_repair_prompt, SchemaValidationError
+        errors = [SchemaValidationError("$.name", "Required field missing")]
+        schema = {"type": "object", "required": ["name"]}
+        prompt = build_repair_prompt({"value": 42}, schema, errors)
+        self.assertIn("REPAIR REQUEST", prompt)
+        self.assertIn("$.name", prompt)
+        self.assertIn("Required field missing", prompt)
+
+    def test_parse_llm_json_clean(self):
+        """Parse clean JSON from LLM."""
+        from lib.json_schema_guard import parse_llm_json
+        obj, errors = parse_llm_json('{"status": "ok"}')
+        self.assertIsNotNone(obj)
+        self.assertEqual(obj["status"], "ok")
+        self.assertEqual(errors, [])
+
+    def test_parse_llm_json_with_markdown(self):
+        """Parse JSON wrapped in markdown code fences."""
+        from lib.json_schema_guard import parse_llm_json
+        raw = '```json\n{"status": "ok"}\n```'
+        obj, errors = parse_llm_json(raw)
+        self.assertIsNotNone(obj)
+        self.assertEqual(obj["status"], "ok")
+
+    def test_parse_llm_json_with_preamble(self):
+        """Parse JSON with text before it."""
+        from lib.json_schema_guard import parse_llm_json
+        raw = 'Here is the result:\n{"status": "ok", "value": 42}'
+        obj, errors = parse_llm_json(raw)
+        self.assertIsNotNone(obj)
+        self.assertEqual(obj["status"], "ok")
+
+
+# ==========================================================================
+# Prompt contract loader tests
+# ==========================================================================
+
+class TestPromptContractLoader(unittest.TestCase):
+    """Tests for prompt_contract_loader.py."""
+
+    def test_strip_volatile(self):
+        """Volatile keys are stripped for cache stability."""
+        from lib.prompt_contract_loader import strip_volatile
+        payload = {
+            "topic": "earbuds",
+            "timestamp": "2024-01-01",
+            "retry_count": 3,
+            "nested": {"trace_id": "abc", "data": 42},
+        }
+        result = strip_volatile(payload)
+        self.assertIn("topic", result)
+        self.assertNotIn("timestamp", result)
+        self.assertNotIn("retry_count", result)
+        self.assertNotIn("trace_id", result["nested"])
+        self.assertEqual(result["nested"]["data"], 42)
+
+    def test_compute_cache_key_deterministic(self):
+        """Same inputs produce same cache key."""
+        from lib.prompt_contract_loader import compute_cache_key, ContractSpec, CACHE_POLICIES
+        spec = ContractSpec(name="test", version="v1", cache_policy=CACHE_POLICIES["daily"])
+        payload = {"topic": "earbuds"}
+        k1 = compute_cache_key(spec, payload)
+        k2 = compute_cache_key(spec, payload)
+        self.assertEqual(k1, k2)
+
+    def test_compute_cache_key_ignores_volatile(self):
+        """Cache key is stable despite volatile field changes."""
+        from lib.prompt_contract_loader import compute_cache_key, ContractSpec, CACHE_POLICIES
+        spec = ContractSpec(name="test", version="v1", cache_policy=CACHE_POLICIES["daily"])
+        p1 = {"topic": "earbuds", "timestamp": "2024-01-01"}
+        p2 = {"topic": "earbuds", "timestamp": "2024-12-31"}
+        self.assertEqual(compute_cache_key(spec, p1), compute_cache_key(spec, p2))
+
+    def test_cache_set_and_get(self):
+        """Cache round-trip works."""
+        from lib.prompt_contract_loader import LLMCache
+        with tempfile.TemporaryDirectory() as td:
+            cache = LLMCache(td)
+            cache.set("k1", {"answer": 42}, ttl_sec=3600, meta={"contract": "test"})
+            hit = cache.get("k1")
+            self.assertIsNotNone(hit)
+            self.assertEqual(hit["value"]["answer"], 42)
+
+    def test_cache_ttl_expiry(self):
+        """Expired cache entries return None."""
+        from lib.prompt_contract_loader import LLMCache
+        with tempfile.TemporaryDirectory() as td:
+            cache = LLMCache(td)
+            cache.set("k1", {"answer": 42}, ttl_sec=1, meta={})
+            # Manually backdate
+            p = cache._path("k1")
+            data = json.loads(p.read_text())
+            data["_meta"]["created_at"] = time.time() - 100
+            p.write_text(json.dumps(data))
+            self.assertIsNone(cache.get("k1"))
+
+    def test_cache_invalidate(self):
+        """Cache invalidation removes entry."""
+        from lib.prompt_contract_loader import LLMCache
+        with tempfile.TemporaryDirectory() as td:
+            cache = LLMCache(td)
+            cache.set("k1", {"x": 1}, ttl_sec=3600, meta={})
+            self.assertTrue(cache.invalidate("k1"))
+            self.assertIsNone(cache.get("k1"))
+            self.assertFalse(cache.invalidate("k1"))  # already gone
+
+    def test_prompt_builder(self):
+        """PromptBuilder produces structured prompt."""
+        from lib.prompt_contract_loader import PromptBuilder, ContractLoader, ContractSpec, CACHE_POLICIES
+        with tempfile.TemporaryDirectory() as td:
+            loader = ContractLoader(td)
+            builder = PromptBuilder(loader)
+            spec = ContractSpec(
+                name="test", version="v1",
+                cache_policy=CACHE_POLICIES["daily"],
+                schema={"type": "object", "required": ["name"]},
+            )
+            prompt = builder.build(
+                spec, {"topic": "earbuds"},
+                contract_text_override="You are a test contract.",
+            )
+            self.assertIn("### CONTRACT", prompt)
+            self.assertIn("### ECONOMY RULES", prompt)
+            self.assertIn("### OUTPUT SCHEMA", prompt)
+            self.assertIn("### payload", prompt)
+
+    def test_prompt_builder_patch_mode(self):
+        """PromptBuilder includes patch mode section."""
+        from lib.prompt_contract_loader import PromptBuilder, ContractLoader, ContractSpec, CACHE_POLICIES
+        with tempfile.TemporaryDirectory() as td:
+            loader = ContractLoader(td)
+            builder = PromptBuilder(loader)
+            spec = ContractSpec(
+                name="test", version="v1",
+                cache_policy=CACHE_POLICIES["daily"],
+                schema={"type": "object"},
+            )
+            prompt = builder.build(
+                spec, {"topic": "earbuds"},
+                contract_text_override="test",
+                patch_against={"old": "data"},
+            )
+            self.assertIn("### PATCH MODE", prompt)
+            self.assertIn("### base", prompt)
+
+    def test_contract_engine_roundtrip(self):
+        """ContractEngine build + cache + retrieve."""
+        from lib.prompt_contract_loader import ContractEngine, ContractSpec, CACHE_POLICIES
+        with tempfile.TemporaryDirectory() as td:
+            engine = ContractEngine(contracts_dir=td, cache_dir=os.path.join(td, "cache"))
+            spec = ContractSpec(
+                name="test", version="v1",
+                cache_policy=CACHE_POLICIES["daily"],
+                schema={"type": "object"},
+            )
+            payload = {"topic": "earbuds"}
+            prompt, key = engine.build_prompt_and_cache_key(spec, payload)
+            self.assertIsNone(engine.try_cache(key))
+            engine.save_cache(key, {"result": "ok"}, spec, payload)
+            cached = engine.try_cache(key)
+            self.assertIsNotNone(cached)
+            self.assertEqual(cached["result"], "ok")
+
+
+# ==========================================================================
+# Schemas + prefilter tests
+# ==========================================================================
+
+class TestSchemas(unittest.TestCase):
+    """Tests for schemas.py — Amazon extract + ranker schemas + prefilter."""
+
+    def test_amazon_schema_valid(self):
+        """Valid Amazon extract output passes schema validation."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import AMAZON_EXTRACT_SCHEMA
+        valid_output = {
+            "status": "ok",
+            "asin": "B0EXAMPLE1",
+            "facts": {
+                "title": "Test Product",
+                "price": {"amount": 49.99, "currency": "USD"},
+                "rating": 4.5,
+                "reviews": 1234,
+                "availability": "In Stock",
+                "brand": "TestBrand",
+                "top_features": ["Feature 1", "Feature 2"],
+            },
+            "signals": {
+                "confidence": 0.95,
+                "needs_refetch": False,
+                "suspected_layout_change": False,
+            },
+            "issues": [],
+        }
+        errors = validate_output(valid_output, AMAZON_EXTRACT_SCHEMA)
+        self.assertEqual(errors, [])
+
+    def test_amazon_schema_missing_facts(self):
+        """Missing facts detected by schema validation."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import AMAZON_EXTRACT_SCHEMA
+        bad = {"status": "ok", "asin": "B0EXAMPLE1"}
+        errors = validate_output(bad, AMAZON_EXTRACT_SCHEMA)
+        self.assertTrue(len(errors) > 0)
+
+    def test_ranker_schema_valid(self):
+        """Valid ranker output passes validation."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import RANKER_SCHEMA
+        valid = {
+            "status": "ok",
+            "winners": [
+                {
+                    "asin": "B0EXAMPLE1",
+                    "slot": "best_overall",
+                    "score": 85,
+                    "why": ["Great rating", "Good price"],
+                },
+            ],
+            "rejected": [
+                {"asin": "B0BADONE01", "reason_code": "rating_too_low"},
+            ],
+            "notes": {"decision_trace": ["Applied hard rules first"]},
+        }
+        errors = validate_output(valid, RANKER_SCHEMA)
+        self.assertEqual(errors, [])
+
+    def test_prefilter_removes_needs_human(self):
+        """Prefilter rejects candidates with status=needs_human."""
+        from lib.schemas import prefilter_candidates
+        candidates = [
+            {"asin": "B0OK000001", "status": "ok", "facts": {"title": "X", "price": {"amount": 50, "currency": "USD"}, "rating": 4.5, "reviews": 500, "brand": "Y"}},
+            {"asin": "B0BAD00001", "status": "needs_human"},
+        ]
+        passed, rejected = prefilter_candidates(candidates, budget_max=100)
+        self.assertEqual(len(passed), 1)
+        self.assertEqual(passed[0]["asin"], "B0OK000001")
+        self.assertEqual(rejected[0]["reason_code"], "needs_human_upstream")
+
+    def test_prefilter_budget_check(self):
+        """Prefilter rejects candidates outside budget."""
+        from lib.schemas import prefilter_candidates
+        candidates = [
+            {"asin": "B0CHEAP001", "status": "ok", "facts": {"title": "X", "price": {"amount": 30, "currency": "USD"}, "rating": 4.5, "reviews": 500, "brand": "Y"}},
+            {"asin": "B0PRICEY01", "status": "ok", "facts": {"title": "X", "price": {"amount": 500, "currency": "USD"}, "rating": 4.5, "reviews": 500, "brand": "Y"}},
+        ]
+        passed, rejected = prefilter_candidates(candidates, budget_max=100)
+        self.assertEqual(len(passed), 1)
+        self.assertEqual(passed[0]["asin"], "B0CHEAP001")
+
+    def test_prefilter_rating_threshold(self):
+        """Prefilter rejects low-rated candidates."""
+        from lib.schemas import prefilter_candidates
+        candidates = [
+            {"asin": "B0GOOD0001", "status": "ok", "facts": {"title": "X", "price": {"amount": 50, "currency": "USD"}, "rating": 4.5, "reviews": 500, "brand": "Y"}},
+            {"asin": "B0LOW00001", "status": "ok", "facts": {"title": "X", "price": {"amount": 50, "currency": "USD"}, "rating": 3.0, "reviews": 500, "brand": "Y"}},
+        ]
+        passed, rejected = prefilter_candidates(candidates, min_rating=4.0)
+        self.assertEqual(len(passed), 1)
+        self.assertEqual(passed[0]["asin"], "B0GOOD0001")
+
+    def test_prefilter_max_candidates(self):
+        """Prefilter limits output to max_candidates."""
+        from lib.schemas import prefilter_candidates
+        candidates = [
+            {"asin": f"B0TEST{i:05d}", "status": "ok",
+             "facts": {"title": f"P{i}", "price": {"amount": 50, "currency": "USD"}, "rating": 4.0 + i * 0.01, "reviews": 100 + i, "brand": "Y"},
+             "signals": {"confidence": 0.9}}
+            for i in range(20)
+        ]
+        passed, rejected = prefilter_candidates(candidates, max_candidates=5)
+        self.assertEqual(len(passed), 5)
+
+    def test_prefilter_brand_exclusion(self):
+        """Prefilter rejects excluded brands."""
+        from lib.schemas import prefilter_candidates
+        candidates = [
+            {"asin": "B0GOOD0001", "status": "ok", "facts": {"title": "X", "price": {"amount": 50, "currency": "USD"}, "rating": 4.5, "reviews": 500, "brand": "GoodBrand"}},
+            {"asin": "B0BAD00001", "status": "ok", "facts": {"title": "X", "price": {"amount": 50, "currency": "USD"}, "rating": 4.5, "reviews": 500, "brand": "BadBrand"}},
+        ]
+        passed, rejected = prefilter_candidates(candidates, exclude_brands=["BadBrand"])
+        self.assertEqual(len(passed), 1)
+        self.assertEqual(passed[0]["asin"], "B0GOOD0001")
+
+
+# ==========================================================================
+# BrowserSession tests
+# ==========================================================================
+
+class TestBrowserSession(unittest.TestCase):
+    """Tests for browser.py — BrowserSession profile paths + config."""
+
+    def test_storage_path_per_profile(self):
+        """Each profile gets its own storage_state path."""
+        from lib.browser import BrowserSession
+        from lib.config import WorkerConfig
+        cfg = WorkerConfig(
+            state_dir=tempfile.mkdtemp(),
+            heartbeat_interval_sec=30,
+            lease_minutes=15,
+        )
+        session = BrowserSession(cfg)
+        dzine = session._storage_path("dzine")
+        chatgpt = session._storage_path("chatgpt")
+        default = session._storage_path("default")
+        self.assertNotEqual(dzine, chatgpt)
+        self.assertNotEqual(chatgpt, default)
+        self.assertTrue(str(dzine).endswith("dzine.json"))
+        self.assertTrue(str(chatgpt).endswith("chatgpt.json"))
+
+    def test_backward_compat_alias(self):
+        """BrowserContextManager alias exists for backward compatibility."""
+        from lib.browser import BrowserContextManager, BrowserSession
+        self.assertIs(BrowserContextManager, BrowserSession)
+
+    def test_load_browser_config_defaults(self):
+        """load_browser_config returns defaults when no env vars set."""
+        from lib.browser import load_browser_config
+        # Clear relevant env vars
+        for key in ["BROWSER_HEADLESS", "BROWSER_USER_AGENT", "BROWSER_PROXY_SERVER"]:
+            os.environ.pop(key, None)
+        opts = load_browser_config()
+        self.assertTrue(opts["headless"])
+
+    def test_load_browser_config_headless_false(self):
+        """load_browser_config respects BROWSER_HEADLESS=false."""
+        from lib.browser import load_browser_config
+        os.environ["BROWSER_HEADLESS"] = "false"
+        try:
+            opts = load_browser_config()
+            self.assertFalse(opts["headless"])
+        finally:
+            os.environ.pop("BROWSER_HEADLESS", None)
+
+    def test_known_profiles(self):
+        """KNOWN_PROFILES includes expected services."""
+        from lib.browser import KNOWN_PROFILES
+        self.assertIn("dzine", KNOWN_PROFILES)
+        self.assertIn("chatgpt", KNOWN_PROFILES)
+        self.assertIn("claude", KNOWN_PROFILES)
+        self.assertIn("default", KNOWN_PROFILES)
+
+
+# ==========================================================================
+# Media probe tests
+# ==========================================================================
+
+class TestMediaProbe(unittest.TestCase):
+    """Tests for media_probe.py — ffprobe validation (no ffprobe dependency)."""
+
+    def test_render_validation_error_missing_file(self):
+        """RenderValidationError raised for missing file."""
+        from lib.media_probe import validate_render, RenderValidationError
+        with self.assertRaises(RenderValidationError) as ctx:
+            validate_render(Path("/nonexistent/video.mp4"))
+        self.assertIn("missing", str(ctx.exception).lower())
+
+    def test_get_duration_returns_zero_on_error(self):
+        """get_duration returns 0.0 when file doesn't exist."""
+        from lib.media_probe import get_duration
+        self.assertEqual(get_duration(Path("/nonexistent/video.mp4")), 0.0)
+
+    def test_get_video_info_returns_empty_on_error(self):
+        """get_video_info returns {} when file doesn't exist."""
+        from lib.media_probe import get_video_info
+        self.assertEqual(get_video_info(Path("/nonexistent/video.mp4")), {})
+
+
+# ==========================================================================
+# ElevenLabs TTS tests
+# ==========================================================================
+
+class TestElevenLabsTTS(unittest.TestCase):
+    """Tests for elevenlabs_tts.py — config + validation (no API calls)."""
+
+    def test_config_defaults(self):
+        """ElevenLabsConfig has sensible defaults."""
+        from agents.elevenlabs_tts import ElevenLabsConfig
+        cfg = ElevenLabsConfig(api_key="test", voice_id="voice123")
+        self.assertEqual(cfg.model_id, "eleven_multilingual_v2")
+        self.assertEqual(cfg.min_output_bytes, 50_000)
+        self.assertEqual(cfg.max_text_chars, 5000)
+
+    def test_validation_error_empty_text(self):
+        """TTSValidationError raised for empty text."""
+        from agents.elevenlabs_tts import ElevenLabsTTS, ElevenLabsConfig, TTSValidationError
+        cfg = ElevenLabsConfig(
+            api_key="test", voice_id="voice123",
+            output_dir=tempfile.mkdtemp(),
+        )
+        tts = ElevenLabsTTS(cfg)
+        with self.assertRaises(TTSValidationError):
+            tts.synthesize(run_id="test", text="")
+
+    def test_validation_error_text_too_long(self):
+        """TTSValidationError raised for text exceeding limit."""
+        from agents.elevenlabs_tts import ElevenLabsTTS, ElevenLabsConfig, TTSValidationError
+        cfg = ElevenLabsConfig(
+            api_key="test", voice_id="voice123",
+            output_dir=tempfile.mkdtemp(),
+            max_text_chars=10,
+        )
+        tts = ElevenLabsTTS(cfg)
+        with self.assertRaises(TTSValidationError):
+            tts.synthesize(run_id="test", text="x" * 20)
+
+    def test_has_artifact_false(self):
+        """has_artifact returns False when no file exists."""
+        from agents.elevenlabs_tts import ElevenLabsTTS, ElevenLabsConfig
+        cfg = ElevenLabsConfig(
+            api_key="test", voice_id="voice123",
+            output_dir=tempfile.mkdtemp(),
+        )
+        tts = ElevenLabsTTS(cfg)
+        self.assertFalse(tts.has_artifact("nonexistent"))
+
+
+# ==========================================================================
+# WebChatAgent tests
+# ==========================================================================
+
+class TestWebChatAgent(unittest.TestCase):
+    """Tests for webchat_agent.py — config + target setup (no browser)."""
+
+    def test_target_configs_exist(self):
+        """TARGET_CONFIGS has entries for both services."""
+        from agents.webchat_agent import TARGET_CONFIGS, WebChatTarget
+        self.assertIn(WebChatTarget.CHATGPT, TARGET_CONFIGS)
+        self.assertIn(WebChatTarget.CLAUDE, TARGET_CONFIGS)
+
+    def test_chatgpt_config(self):
+        """ChatGPT config has correct URL and profile."""
+        from agents.webchat_agent import TARGET_CONFIGS, WebChatTarget
+        cfg = TARGET_CONFIGS[WebChatTarget.CHATGPT]
+        self.assertEqual(cfg.profile, "chatgpt")
+        self.assertIn("chatgpt.com", cfg.url)
+
+    def test_claude_config(self):
+        """Claude config has correct URL and profile."""
+        from agents.webchat_agent import TARGET_CONFIGS, WebChatTarget
+        cfg = TARGET_CONFIGS[WebChatTarget.CLAUDE]
+        self.assertEqual(cfg.profile, "claude")
+        self.assertIn("claude.ai", cfg.url)
+
+    def test_agent_init(self):
+        """WebChatAgent initializes with target config."""
+        from agents.webchat_agent import WebChatAgent, WebChatTarget
+        agent = WebChatAgent(WebChatTarget.CHATGPT)
+        self.assertEqual(agent.config.name, "ChatGPT")
+
+    def test_webchat_result_fields(self):
+        """WebChatResult has expected fields."""
+        from agents.webchat_agent import WebChatResult
+        r = WebChatResult(text="Hello", success=True)
+        self.assertEqual(r.text, "Hello")
+        self.assertTrue(r.success)
+        self.assertFalse(r.needs_login)
+        self.assertEqual(r.stable_ticks, 0)
+
+
+# ==========================================================================
+# Execute stage wiring tests
+# ==========================================================================
+
+try:
+    import httpx as _httpx_check
+    _HAS_HTTPX = True
+except ImportError:
+    _HAS_HTTPX = False
+
+
+@unittest.skipUnless(_HAS_HTTPX, "httpx not installed")
+class TestExecuteStageWiring(unittest.TestCase):
+    """Tests for execute_stage dispatch to real agents."""
+
+    def test_execute_stage_placeholder_returns_true(self):
+        """Placeholder stages return True."""
+        import asyncio
+        from worker_async import execute_stage
+        from lib.config import Stage
+        result = asyncio.run(execute_stage(Stage.UPLOAD, "run-1", "vid-1"))
+        self.assertTrue(result)
+
+    def test_execute_stage_write_script(self):
+        """WRITE_SCRIPT stage executes without error."""
+        import asyncio
+        from worker_async import execute_stage
+        from lib.config import Stage
+        result = asyncio.run(execute_stage(Stage.WRITE_SCRIPT, "run-1", "vid-1"))
+        self.assertTrue(result)
+
+    def test_execute_stage_render_no_file(self):
+        """RENDER stage passes when no MP4 file exists (placeholder)."""
+        import asyncio
+        from worker_async import execute_stage
+        from lib.config import Stage, WorkerConfig
+        cfg = WorkerConfig(
+            state_dir=tempfile.mkdtemp(),
+            heartbeat_interval_sec=30,
+            lease_minutes=15,
+        )
+        result = asyncio.run(execute_stage(Stage.RENDER, "run-1", "vid-1", cfg=cfg))
+        self.assertTrue(result)
+
+    def test_execute_stage_fetch_products_with_page(self):
+        """FETCH_PRODUCTS stage accepts page parameter."""
+        import asyncio
+        from worker_async import execute_stage
+        from lib.config import Stage
+        result = asyncio.run(execute_stage(
+            Stage.FETCH_PRODUCTS, "run-1", "vid-1", page=None,
+        ))
+        self.assertTrue(result)
 
 
 if __name__ == "__main__":
