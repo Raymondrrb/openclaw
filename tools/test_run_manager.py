@@ -6727,5 +6727,682 @@ class TestHasFfprobe(unittest.TestCase):
         self.assertIsInstance(result, bool)
 
 
+# ---------------------------------------------------------------------------
+# Dzine Handoff — "Alfândega" tests
+# ---------------------------------------------------------------------------
+
+class TestDzineHandoffProbeResult(unittest.TestCase):
+    """Tests for ProbeResult dataclass."""
+
+    def test_probe_result_ok(self):
+        from lib.dzine_handoff import ProbeResult
+        r = ProbeResult(True, 12.0, 2_000_000, "h264", "aac", 1_000_000)
+        self.assertTrue(r.ok)
+        self.assertEqual(r.duration_sec, 12.0)
+        self.assertEqual(r.bitrate_bps, 2_000_000)
+        self.assertEqual(r.video_codec, "h264")
+        self.assertEqual(r.audio_codec, "aac")
+        self.assertIsNone(r.reason)
+
+    def test_probe_result_failure(self):
+        from lib.dzine_handoff import ProbeResult
+        r = ProbeResult(False, 0.0, 0, None, None, 0, "missing_file")
+        self.assertFalse(r.ok)
+        self.assertEqual(r.reason, "missing_file")
+
+    def test_probe_result_file_bytes(self):
+        from lib.dzine_handoff import ProbeResult
+        r = ProbeResult(True, 5.0, 1_000_000, "h264", "aac", 750_000)
+        self.assertEqual(r.file_bytes, 750_000)
+
+
+class TestWaitFileStable(unittest.TestCase):
+    """Tests for wait_file_stable with mtime + size checks."""
+
+    def test_nonexistent_file_returns_false(self):
+        from lib.dzine_handoff import wait_file_stable
+        result = wait_file_stable(
+            Path("/tmp/nonexistent_9876543.mp4"),
+            timeout=0.5, check_interval=0.1, stable_cycles=2,
+        )
+        self.assertFalse(result)
+
+    def test_stable_file_returns_true(self):
+        from lib.dzine_handoff import wait_file_stable
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "test.mp4"
+            p.write_bytes(b"x" * 100)
+            result = wait_file_stable(
+                p, timeout=5.0, check_interval=0.1, stable_cycles=2,
+            )
+            self.assertTrue(result)
+
+    def test_empty_file_not_stable(self):
+        from lib.dzine_handoff import wait_file_stable
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "empty.mp4"
+            p.write_bytes(b"")
+            result = wait_file_stable(
+                p, timeout=0.5, check_interval=0.1, stable_cycles=2,
+            )
+            self.assertFalse(result)
+
+
+class TestValidateVideoFile(unittest.TestCase):
+    """Tests for validate_video_file — size/probe gates."""
+
+    def test_missing_file(self):
+        from lib.dzine_handoff import validate_video_file
+        r = validate_video_file(
+            Path("/tmp/missing_video_test.mp4"),
+            target_duration_sec=5.0,
+        )
+        self.assertFalse(r.ok)
+        self.assertEqual(r.reason, "missing_file")
+
+    def test_too_small(self):
+        from lib.dzine_handoff import validate_video_file
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tiny.mp4"
+            p.write_bytes(b"x" * 100)
+            r = validate_video_file(
+                p, target_duration_sec=5.0, min_bytes=500_000,
+            )
+            self.assertFalse(r.ok)
+            self.assertEqual(r.reason, "too_small")
+            self.assertEqual(r.file_bytes, 100)
+
+
+class TestAtomicWriteJson(unittest.TestCase):
+    """Tests for atomic JSON write with fsync."""
+
+    def test_write_and_read(self):
+        from lib.dzine_handoff import atomic_write_json, load_index
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "test_index.json"
+            data = {"version": "1.0", "items": {"abc12345": {"run_id": "R1"}}}
+            atomic_write_json(p, data)
+            loaded = json.loads(p.read_text(encoding="utf-8"))
+            self.assertEqual(loaded["version"], "1.0")
+            self.assertIn("abc12345", loaded["items"])
+
+    def test_no_tmp_leftover(self):
+        from lib.dzine_handoff import atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "idx.json"
+            atomic_write_json(p, {"version": "1.0", "items": {}})
+            files = list(Path(td).glob("*"))
+            self.assertEqual(len(files), 1)
+            self.assertEqual(files[0].name, "idx.json")
+
+
+class TestLoadIndex(unittest.TestCase):
+    """Tests for load_index with missing/corrupt files."""
+
+    def test_missing_returns_empty(self):
+        from lib.dzine_handoff import load_index
+        idx = load_index(Path("/tmp/nonexistent_index_987.json"))
+        self.assertEqual(idx["version"], "1.0")
+        self.assertEqual(idx["items"], {})
+
+    def test_corrupt_returns_empty(self):
+        from lib.dzine_handoff import load_index
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "bad.json"
+            p.write_text("not json at all {{{", encoding="utf-8")
+            idx = load_index(p)
+            self.assertEqual(idx["version"], "1.0")
+
+    def test_valid_index_loads(self):
+        from lib.dzine_handoff import load_index, atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "idx.json"
+            data = {"version": "1.0", "items": {"a1b2c3d4": {"path": "/x.mp4"}}}
+            atomic_write_json(p, data)
+            loaded = load_index(p)
+            self.assertIn("a1b2c3d4", loaded["items"])
+
+
+class TestInferSha8FromFilename(unittest.TestCase):
+    """Tests for sha8 extraction from deterministic video filenames."""
+
+    def test_valid_filename(self):
+        from lib.dzine_handoff import infer_sha8_from_filename
+        result = infer_sha8_from_filename(Path("V_RAY-99_intro_a1b2c3d4.mp4"))
+        self.assertEqual(result, "a1b2c3d4")
+
+    def test_no_sha8(self):
+        from lib.dzine_handoff import infer_sha8_from_filename
+        result = infer_sha8_from_filename(Path("random_video.mp4"))
+        self.assertIsNone(result)
+
+    def test_uppercase_normalized(self):
+        from lib.dzine_handoff import infer_sha8_from_filename
+        result = infer_sha8_from_filename(Path("V_R1_seg_AABBCCDD.mp4"))
+        self.assertEqual(result, "aabbccdd")
+
+
+class TestFindOrphanVideos(unittest.TestCase):
+    """Tests for zombie/orphan video detection."""
+
+    def test_no_orphans_when_all_indexed(self):
+        from lib.dzine_handoff import find_orphan_videos, atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            v = final / "V_R1_s1_aabb.mp4"
+            v.write_bytes(b"x" * 100)
+            idx_path = Path(td) / "index.json"
+            atomic_write_json(idx_path, {
+                "version": "1.0",
+                "items": {"aabb": {"path": str(v)}},
+            })
+            report = find_orphan_videos(final_dir=final, index_path=idx_path)
+            self.assertEqual(report.orphan_count, 0)
+
+    def test_orphan_detected(self):
+        from lib.dzine_handoff import find_orphan_videos, atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            v1 = final / "V_R1_s1_aabb.mp4"
+            v1.write_bytes(b"x" * 100)
+            v2 = final / "V_R1_s2_ccdd.mp4"
+            v2.write_bytes(b"y" * 100)
+            idx_path = Path(td) / "index.json"
+            atomic_write_json(idx_path, {
+                "version": "1.0",
+                "items": {"aabb": {"path": str(v1)}},
+            })
+            report = find_orphan_videos(final_dir=final, index_path=idx_path)
+            self.assertEqual(report.orphan_count, 1)
+            self.assertEqual(report.orphan_files[0].name, "V_R1_s2_ccdd.mp4")
+
+    def test_no_final_dir(self):
+        from lib.dzine_handoff import find_orphan_videos
+        report = find_orphan_videos(
+            final_dir=Path("/tmp/nonexistent_dir_999"),
+            index_path=Path("/tmp/nonexistent_idx_999.json"),
+        )
+        self.assertEqual(report.orphan_count, 0)
+
+
+class TestSha256File(unittest.TestCase):
+    """Tests for sha256_file utility."""
+
+    def test_deterministic(self):
+        from lib.dzine_handoff import sha256_file
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "test.bin"
+            p.write_bytes(b"hello world")
+            h1 = sha256_file(p)
+            h2 = sha256_file(p)
+            self.assertEqual(h1, h2)
+            self.assertEqual(len(h1), 64)
+
+    def test_different_content_different_hash(self):
+        from lib.dzine_handoff import sha256_file
+        with tempfile.TemporaryDirectory() as td:
+            p1 = Path(td) / "a.bin"
+            p2 = Path(td) / "b.bin"
+            p1.write_bytes(b"aaa")
+            p2.write_bytes(b"bbb")
+            self.assertNotEqual(sha256_file(p1), sha256_file(p2))
+
+
+# ---------------------------------------------------------------------------
+# Doctor Report tests
+# ---------------------------------------------------------------------------
+
+class TestDoctorReportExtractRefs(unittest.TestCase):
+    """Tests for extract_segment_refs from job manifest."""
+
+    def test_basic_extraction(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import extract_segment_refs
+        doc = {
+            "run_id": "R1",
+            "segments": [
+                {
+                    "segment_id": "intro",
+                    "approx_duration_sec": 5.0,
+                    "audio_sha256": "aabbccddee112233",
+                },
+                {
+                    "segment_id": "p1",
+                    "approx_duration_sec": 12.0,
+                    "audio_sha256": "1122334455667788",
+                },
+            ],
+        }
+        refs = extract_segment_refs(doc, Path("state"))
+        self.assertEqual(len(refs), 2)
+        self.assertEqual(refs[0].segment_id, "intro")
+        self.assertEqual(refs[0].sha8, "aabbccdd")
+        self.assertEqual(refs[1].order, 1)
+
+    def test_missing_sha_uses_unknown(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import extract_segment_refs
+        doc = {
+            "run_id": "R2",
+            "segments": [{"segment_id": "s1"}],
+        }
+        refs = extract_segment_refs(doc, Path("state"))
+        self.assertEqual(refs[0].sha8, "unknown")
+
+
+class TestDoctorReportComputeReport(unittest.TestCase):
+    """Tests for compute_report with mock state directory."""
+
+    def test_empty_state(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import compute_report
+        with tempfile.TemporaryDirectory() as td:
+            summaries, details = compute_report(
+                state_dir=Path(td),
+                enable_bitrate_gate=False,
+            )
+            self.assertEqual(len(summaries), 0)
+            self.assertEqual(details["jobs_found"], 0)
+            self.assertEqual(details["total_credits_needed"], 0)
+
+    def test_report_with_job(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import compute_report
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td)
+            jobs_dir = state / "jobs"
+            jobs_dir.mkdir(parents=True)
+            job = {
+                "run_id": "TEST-1",
+                "segments": [
+                    {"segment_id": "s1", "approx_duration_sec": 5.0,
+                     "audio_sha256": "aabbccdd11223344"},
+                    {"segment_id": "s2", "approx_duration_sec": 10.0,
+                     "audio_sha256": "eeff00112233aabb"},
+                ],
+            }
+            (jobs_dir / "test.json").write_text(
+                json.dumps(job), encoding="utf-8",
+            )
+            summaries, details = compute_report(
+                state_dir=state, enable_bitrate_gate=False,
+            )
+            self.assertEqual(len(summaries), 1)
+            self.assertEqual(summaries[0].segments_total, 2)
+            self.assertEqual(summaries[0].segments_need, 2)
+            self.assertEqual(details["total_credits_needed"], 2)
+
+    def test_obsolete_hash_detected(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import compute_report
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td)
+            jobs_dir = state / "jobs"
+            jobs_dir.mkdir(parents=True)
+            video_dir = state / "video"
+            video_dir.mkdir(parents=True)
+            # Job references sha8 "aabbccdd"
+            job = {
+                "run_id": "R1",
+                "segments": [
+                    {"segment_id": "s1", "audio_sha256": "aabbccdd11223344"},
+                ],
+            }
+            (jobs_dir / "j.json").write_text(json.dumps(job), encoding="utf-8")
+            # Index has "aabbccdd" (referenced) + "deadbeef" (orphan)
+            idx = {
+                "items": {
+                    "aabbccdd": {"path": "/x.mp4"},
+                    "deadbeef": {"path": "/y.mp4"},
+                },
+            }
+            (video_dir / "index.json").write_text(
+                json.dumps(idx), encoding="utf-8",
+            )
+            _, details = compute_report(
+                state_dir=state, enable_bitrate_gate=False,
+            )
+            self.assertEqual(details["obsolete_sha8_count"], 1)
+            self.assertIn("deadbeef", details["obsolete_sha8"])
+
+
+class TestDoctorFinancial(unittest.TestCase):
+    """Tests for compute_financial projection."""
+
+    def test_no_pricing(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import compute_financial
+        f = compute_financial(10, 5, credit_price_usd=0.0)
+        self.assertNotIn("projected_cost_usd", f)
+
+    def test_usd_only(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import compute_financial
+        f = compute_financial(10, 5, credit_price_usd=1.50)
+        self.assertEqual(f["projected_cost_usd"], 15.0)
+        self.assertEqual(f["saved_usd"], 7.5)
+        self.assertNotIn("projected_cost_brl", f)
+
+    def test_usd_and_brl(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import compute_financial
+        f = compute_financial(10, 5, credit_price_usd=1.50, usd_brl=5.0)
+        self.assertEqual(f["projected_cost_usd"], 15.0)
+        self.assertEqual(f["projected_cost_brl"], 75.0)
+        self.assertEqual(f["saved_brl"], 37.5)
+
+
+class TestDoctorTimeline(unittest.TestCase):
+    """Tests for build_timeline + timeline_to_csv."""
+
+    def test_build_timeline_cumulative(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import build_timeline, SegmentRef
+        refs = [
+            SegmentRef("R1", "intro", "aa", 5.0, Path("/missing.mp4"), 1, "intro", 0),
+            SegmentRef("R1", "p1", "bb", 12.0, Path("/missing2.mp4"), 1, "product", 1),
+            SegmentRef("R1", "outro", "cc", 3.0, Path("/missing3.mp4"), 1, "outro", 2),
+        ]
+        rows = build_timeline(refs, include_probe=False)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0].start_sec, 0.0)
+        self.assertEqual(rows[0].end_sec, 5.0)
+        self.assertEqual(rows[1].start_sec, 5.0)
+        self.assertEqual(rows[1].end_sec, 17.0)
+        self.assertEqual(rows[2].start_sec, 17.0)
+        self.assertEqual(rows[2].end_sec, 20.0)
+        self.assertEqual(rows[0].category, "intro")
+        self.assertEqual(rows[1].category, "product")
+        self.assertEqual(rows[2].category, "outro")
+        for r in rows:
+            self.assertEqual(r.status, "MISSING")
+
+    def test_timeline_to_csv_format(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import build_timeline, timeline_to_csv, SegmentRef
+        refs = [
+            SegmentRef("R1", "s1", "aa", 5.0, Path("/x.mp4"), 1, "product", 0),
+        ]
+        rows = build_timeline(refs, include_probe=False)
+        csv_str = timeline_to_csv(rows)
+        self.assertIn("Order", csv_str)
+        self.assertIn("Segment_ID", csv_str)
+        self.assertIn("Cum_Drift_Sec", csv_str)
+        lines = csv_str.strip().split("\n")
+        self.assertEqual(len(lines), 2)  # header + 1 row
+
+    def test_category_inference(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import _infer_category
+        self.assertEqual(_infer_category("intro_v1", ""), "intro")
+        self.assertEqual(_infer_category("outro_end", ""), "outro")
+        self.assertEqual(_infer_category("transition_1", ""), "transition")
+        self.assertEqual(_infer_category("p1_product", ""), "product")
+        self.assertEqual(_infer_category("p1_product", "product"), "product")
+
+
+class TestDoctorOrphanSearch(unittest.TestCase):
+    """Tests for find_orphan_videos in doctor_report."""
+
+    def test_finds_orphans(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import find_orphan_videos
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td)
+            final = state / "video" / "final"
+            final.mkdir(parents=True)
+            v1 = final / "V_R1_s1_aabb.mp4"
+            v1.write_bytes(b"x" * 100)
+            v2 = final / "V_R1_s2_ccdd.mp4"
+            v2.write_bytes(b"y" * 100)
+            # Index only has v1
+            idx_dir = state / "video"
+            (idx_dir / "index.json").write_text(
+                json.dumps({"items": {"aabb": {"path": str(v1)}}}),
+                encoding="utf-8",
+            )
+            orphans = find_orphan_videos(state)
+            self.assertEqual(len(orphans), 1)
+            self.assertEqual(orphans[0].name, "V_R1_s2_ccdd.mp4")
+
+    def test_no_orphans(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import find_orphan_videos
+        with tempfile.TemporaryDirectory() as td:
+            orphans = find_orphan_videos(Path(td))
+            self.assertEqual(len(orphans), 0)
+
+
+class TestDoctorCLI(unittest.TestCase):
+    """Tests for doctor_report CLI main()."""
+
+    def test_main_empty_state(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import main
+        with tempfile.TemporaryDirectory() as td:
+            rc = main(["--state-dir", td, "--no-bitrate-gate"])
+            self.assertEqual(rc, 0)
+
+    def test_main_fail_if_needed(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import main
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td)
+            jobs_dir = state / "jobs"
+            jobs_dir.mkdir(parents=True)
+            job = {
+                "run_id": "R1",
+                "segments": [
+                    {"segment_id": "s1", "audio_sha256": "aabbccdd11223344"},
+                ],
+            }
+            (jobs_dir / "j.json").write_text(json.dumps(job), encoding="utf-8")
+            rc = main([
+                "--state-dir", td,
+                "--no-bitrate-gate",
+                "--fail-if-needed-gt", "0",
+            ])
+            self.assertEqual(rc, 2)
+
+
+# ---------------------------------------------------------------------------
+# Doctor Cleanup tests
+# ---------------------------------------------------------------------------
+
+class TestDoctorCleanupFindOrphans(unittest.TestCase):
+    """Tests for find_orphans in doctor_cleanup."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_no_orphans_all_referenced(self):
+        self._add_scripts_path()
+        from doctor_cleanup import find_orphans
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            v = final / "V_R1_s1_aabb.mp4"
+            v.write_bytes(b"x" * 600_000)
+            orphans = find_orphans(
+                final, referenced_filenames={v.name},
+                min_size_kb=500, keep_last_n=0,
+            )
+            self.assertEqual(len(orphans), 0)
+
+    def test_orphan_detected(self):
+        self._add_scripts_path()
+        from doctor_cleanup import find_orphans
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            v = final / "V_R1_s1_aabb.mp4"
+            v.write_bytes(b"x" * 600_000)
+            orphans = find_orphans(
+                final, referenced_filenames=set(),
+                min_size_kb=500, keep_last_n=0,
+            )
+            self.assertEqual(len(orphans), 1)
+            self.assertEqual(orphans[0].path.name, "V_R1_s1_aabb.mp4")
+
+    def test_keep_last_n_protects(self):
+        self._add_scripts_path()
+        from doctor_cleanup import find_orphans
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            v = final / "V_R1_s1_aabb.mp4"
+            v.write_bytes(b"x" * 600_000)
+            orphans = find_orphans(
+                final, referenced_filenames=set(),
+                min_size_kb=500, keep_last_n=5,
+            )
+            self.assertEqual(len(orphans), 0)
+
+    def test_min_size_filter(self):
+        self._add_scripts_path()
+        from doctor_cleanup import find_orphans
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            v = final / "tiny.mp4"
+            v.write_bytes(b"x" * 100)
+            orphans = find_orphans(
+                final, referenced_filenames=set(),
+                min_size_kb=500, keep_last_n=0,
+            )
+            self.assertEqual(len(orphans), 0)
+
+    def test_nonexistent_dir(self):
+        self._add_scripts_path()
+        from doctor_cleanup import find_orphans
+        orphans = find_orphans(
+            Path("/tmp/nonexistent_cleanup_test_999"),
+            referenced_filenames=set(),
+        )
+        self.assertEqual(len(orphans), 0)
+
+
+class TestDoctorCleanupDanglingIndex(unittest.TestCase):
+    """Tests for find_dangling_index_entries."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_no_dangling(self):
+        self._add_scripts_path()
+        from doctor_cleanup import find_dangling_index_entries
+        with tempfile.TemporaryDirectory() as td:
+            v = Path(td) / "test.mp4"
+            v.write_bytes(b"x")
+            index = {"items": {"aa": {"path": str(v)}}}
+            dangling = find_dangling_index_entries(index)
+            self.assertEqual(len(dangling), 0)
+
+    def test_dangling_detected(self):
+        self._add_scripts_path()
+        from doctor_cleanup import find_dangling_index_entries
+        index = {"items": {"aa": {"path": "/tmp/nonexistent_cleanup_dangle.mp4"}}}
+        dangling = find_dangling_index_entries(index)
+        self.assertEqual(len(dangling), 1)
+        self.assertEqual(dangling[0][0], "aa")
+
+
+class TestDoctorCleanupQuarantine(unittest.TestCase):
+    """Tests for quarantine_or_delete actions."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_dry_run_no_action(self):
+        self._add_scripts_path()
+        from doctor_cleanup import quarantine_or_delete, Orphan
+        from datetime import datetime, timezone
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "orphan.mp4"
+            src.write_bytes(b"x" * 100)
+            orphan = Orphan(path=src, size_bytes=100, mtime_utc=datetime.now(timezone.utc))
+            qdir = Path(td) / "quarantine"
+            result = quarantine_or_delete(
+                [orphan], qdir,
+                do_quarantine=True, do_delete=False, dry_run=True,
+            )
+            self.assertTrue(src.exists())
+            self.assertEqual(result["moved"], 0)
+
+    def test_quarantine_moves_file(self):
+        self._add_scripts_path()
+        from doctor_cleanup import quarantine_or_delete, Orphan
+        from datetime import datetime, timezone
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "orphan.mp4"
+            src.write_bytes(b"x" * 100)
+            orphan = Orphan(path=src, size_bytes=100, mtime_utc=datetime.now(timezone.utc))
+            qdir = Path(td) / "quarantine"
+            result = quarantine_or_delete(
+                [orphan], qdir,
+                do_quarantine=True, do_delete=False, dry_run=False,
+            )
+            self.assertFalse(src.exists())
+            self.assertEqual(result["moved"], 1)
+            q_files = list(qdir.glob("*orphan*"))
+            self.assertEqual(len(q_files), 1)
+
+    def test_delete_removes_file(self):
+        self._add_scripts_path()
+        from doctor_cleanup import quarantine_or_delete, Orphan
+        from datetime import datetime, timezone
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "orphan.mp4"
+            src.write_bytes(b"x" * 100)
+            orphan = Orphan(path=src, size_bytes=100, mtime_utc=datetime.now(timezone.utc))
+            qdir = Path(td) / "quarantine"
+            result = quarantine_or_delete(
+                [orphan], qdir,
+                do_quarantine=False, do_delete=True, dry_run=False,
+            )
+            self.assertFalse(src.exists())
+            self.assertEqual(result["deleted"], 1)
+
+
+class TestDoctorCleanupCLI(unittest.TestCase):
+    """Tests for doctor_cleanup CLI main()."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_dry_run_empty(self):
+        self._add_scripts_path()
+        from doctor_cleanup import main
+        with tempfile.TemporaryDirectory() as td:
+            rc = main([
+                "--index", str(Path(td) / "idx.json"),
+                "--final-dir", str(Path(td) / "final"),
+                "--dry-run",
+            ])
+            self.assertEqual(rc, 0)
+
+    def test_both_flags_error(self):
+        self._add_scripts_path()
+        from doctor_cleanup import main
+        with tempfile.TemporaryDirectory() as td:
+            rc = main([
+                "--index", str(Path(td) / "idx.json"),
+                "--final-dir", str(Path(td) / "final"),
+                "--quarantine",
+                "--delete",
+            ])
+            self.assertEqual(rc, 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

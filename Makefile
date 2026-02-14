@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete
 
 # --- Morning routine ---
 doctor:
@@ -85,3 +85,29 @@ purge_spool:
 	fi
 	rm -f spool/*.json spool/quarantine/*.json spool/bad/*.json 2>/dev/null || true
 	@echo "Spool purged."
+
+# --- Doctor Report (financial + timeline + orphans) ---
+ID ?= RAY-TEST
+
+report:
+	python3 scripts/doctor_report.py --state-dir state
+
+timeline:
+	python3 scripts/doctor_report.py --state-dir state --timeline --include-probe
+
+orphans:
+	python3 scripts/doctor_report.py --state-dir state --orphans
+
+preflight:
+	python3 scripts/doctor_report.py --state-dir state --preflight
+
+clean-hard:
+	rm -rf state/tmp/* state/runtime/*.tmp 2>/dev/null || true
+	@echo "Cleaned tmp + runtime temp files."
+
+# --- Zombie cleanup (orphan quarantine) ---
+clean-zombies:
+	python3 scripts/doctor_cleanup.py --quarantine --older-than-hours 6 --min-size-kb 500 --keep-last-n 2
+
+clean-zombies-delete:
+	python3 scripts/doctor_cleanup.py --delete --older-than-hours 48 --min-size-kb 500 --keep-last-n 2
