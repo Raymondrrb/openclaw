@@ -182,6 +182,32 @@ def compute_audio_digest(
     ).hexdigest()
 
 
+def compute_final_digest(
+    tts_digest: str,
+    target_duration_sec: float,
+    action: str = "ok",
+    rate: Optional[float] = None,
+) -> str:
+    """Compute idempotent digest for finalized (post-processed) audio.
+
+    Separate from TTS digest — changing target_duration or padding mode
+    doesn't waste ElevenLabs credits (raw TTS is cached by tts_digest).
+
+    Cache A (ElevenLabs): digest_tts = sha(text + voice + settings)
+    Cache B (Final):      digest_final = sha(digest_tts + target + action + rate)
+    """
+    payload = {
+        "tts_digest": tts_digest,
+        "target_duration_sec": round(target_duration_sec, 3),
+        "action": action,
+    }
+    if rate is not None:
+        payload["rate"] = round(rate, 4)
+    return hashlib.sha256(
+        canonical_json(payload).encode("utf-8")
+    ).hexdigest()
+
+
 def compute_file_sha256(path: Path) -> str:
     """Compute SHA-256 of a file. For manifest integrity checks."""
     h = hashlib.sha256()

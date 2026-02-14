@@ -10,10 +10,22 @@ Per-segment audio paths use content-addressed digests for idempotency:
   audio_digest = sha256(voice_id + model + text + settings)
   path = state/audio/{run_id}/seg_{digest[:16]}.mp3
 
+Naming convention (deterministic, hash-versioned):
+  Audio: A_{run_id}_{segment_id}_{sha8}.mp3
+  Video: V_{run_id}_{segment_id}_{sha8}.mp4
+  where sha8 = audio_sha256[:8] of the finalized audio file.
+
+prepare_manifest_for_dzine() adds:
+  - sha256 + measured_duration per audio file
+  - dzine block (upload/settings/export) for UI agent
+  - budget_control with credit_cost + cache_hit (SKIP_DZINE)
+  - budget_summary with total estimated credits
+
 Stdlib only — no external deps.
 
 Usage:
     from tools.lib.media_manifest import build_media_manifest, compute_audio_digest
+    from tools.lib.media_manifest import prepare_manifest_for_dzine, DzineHints
 
     manifest = build_media_manifest(
         voice_script=validated_voice_script,
@@ -239,3 +251,135 @@ def validate_manifest_integrity(manifest: Dict[str, Any]) -> List[str]:
                 )
 
     return issues
+
+
+# ---------------------------------------------------------------------------
+# Dzine manifest preparation — UI-proof contract for lip-sync agent
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DzineHints:
+    """Configuration for Dzine UI agent."""
+    avatar_ref: str = "assets/avatars/ray.png"
+    project_preset: str = "Ray_16x9_Lipsync"
+    lip_sync_style_default: str = "neutral"
+    credit_cost_per_segment: int = 1
+    min_video_bytes: int = 500_000
+
+
+def _video_expected_path(
+    video_dir: Path, run_id: str, segment_id: str, sha8: str,
+) -> Path:
+    """Deterministic video filename: V_{run_id}_{segment_id}_{sha8}.mp4"""
+    return video_dir / f"V_{run_id}_{segment_id}_{sha8}.mp4"
+
+
+def _audio_final_path(
+    audio_dir: Path, run_id: str, segment_id: str, sha8: str,
+) -> Path:
+    """Deterministic audio filename: A_{run_id}_{segment_id}_{sha8}.mp3"""
+    return audio_dir / f"A_{run_id}_{segment_id}_{sha8}.mp3"
+
+
+def prepare_manifest_for_dzine(
+    manifest: Dict[str, Any],
+    *,
+    video_final_dir: str = "state/video/final",
+    hints: Optional[DzineHints] = None,
+) -> Dict[str, Any]:
+    """Prepare manifest for Dzine UI agent with budget control.
+
+    For each segment with an audio_path:
+    1. Compute sha256 of the finalized audio file
+    2. Determine expected video path (deterministic naming)
+    3. Check if video already exists (cache hit → SKIP_DZINE)
+    4. Build dzine block with upload/settings/export + ui_checklist
+    5. Calculate budget summary (total credits needed)
+
+    Returns a new manifest with dzine blocks + budget_summary.
+    Does not modify the original.
+    """
+    import copy
+
+    if hints is None:
+        hints = DzineHints()
+
+    ready = copy.deepcopy(manifest)
+    run_id = ready.get("run_id", "unknown")
+    vdir = Path(video_final_dir)
+
+    segments_to_render = []
+    total_credits = 0
+
+    for seg in ready.get("segments", []):
+        audio_path_str = seg.get("audio_path", "")
+        if not audio_path_str:
+            continue
+
+        audio_p = Path(audio_path_str)
+        seg_id = seg.get("segment_id", "?")
+
+        # Compute sha256 of finalized audio
+        if audio_p.exists():
+            audio_sha = _file_sha256(audio_p)
+            seg["audio_sha256"] = audio_sha
+            seg["audio_bytes"] = audio_p.stat().st_size
+        else:
+            audio_sha = seg.get("audio_digest", "unknown")[:64]
+            seg["audio_sha256"] = audio_sha
+
+        sha8 = audio_sha[:8]
+
+        # Deterministic expected video path
+        expected_video = _video_expected_path(vdir, run_id, seg_id, sha8)
+
+        # Cache hit check
+        cache_hit = (
+            expected_video.exists()
+            and expected_video.stat().st_size >= hints.min_video_bytes
+        )
+
+        credit_cost = 0 if cache_hit else hints.credit_cost_per_segment
+
+        seg["video_path"] = str(expected_video)
+        seg["dzine"] = {
+            "budget_control": {
+                "credit_cost": credit_cost,
+                "cache_hit": cache_hit,
+                "skip_dzine": cache_hit,
+                "expected_video_path": str(expected_video),
+            },
+            "upload": {
+                "audio_file": str(audio_p.resolve()) if audio_p.exists() else audio_path_str,
+                "avatar_ref": hints.avatar_ref,
+                "project_preset": hints.project_preset,
+            },
+            "settings": {
+                "lip_sync_hint": seg.get("lip_sync_hint", hints.lip_sync_style_default),
+                "target_duration_sec": seg.get("approx_duration_sec", 0),
+            },
+            "export": {
+                "expected_filename": expected_video.name,
+            },
+            "ui_checklist": [
+                f"Upload audio: {audio_p.name}",
+                f"Select preset: {hints.project_preset}",
+                f"Set avatar: {hints.avatar_ref}",
+                "Generate lip-sync",
+                f"Export as: {expected_video.name}",
+                f"Move to: {expected_video}",
+            ],
+        }
+
+        if not cache_hit:
+            segments_to_render.append(seg_id)
+            total_credits += hints.credit_cost_per_segment
+
+    ready["budget_summary"] = {
+        "estimated_dzine_credits": total_credits,
+        "segments_to_render": segments_to_render,
+        "segments_cached": len(ready.get("segments", [])) - len(segments_to_render),
+    }
+    ready["prepared_at"] = datetime.now(timezone.utc).isoformat()
+
+    return ready

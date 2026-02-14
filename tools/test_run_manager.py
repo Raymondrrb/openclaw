@@ -6136,5 +6136,346 @@ class TestOrchestratorFinalizeIntegration(unittest.TestCase):
             self.assertIsNone(result[0]["audio_path"])
 
 
+# ==========================================================================
+# Repair loop tests
+# ==========================================================================
+
+class TestRepairLoop(unittest.TestCase):
+    """Tests for voice_gen_with_repair in orchestrator."""
+
+    def _make_mock_panic(self):
+        class MockPanic:
+            def __init__(self):
+                self.calls = []
+            def report_panic(self, reason_key, run_id, error_msg, **kw):
+                self.calls.append((reason_key, run_id, error_msg))
+        return MockPanic()
+
+    def test_repair_loop_without_repair_engine(self):
+        """Without repair engine, voice_gen_with_repair == voice_gen."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            orch = RayVaultOrchestrator(
+                config=cfg, panic_mgr=self._make_mock_panic(),
+            )
+            segs = [{"segment_id": "x", "text": "Hello", "needs_repair": True}]
+            result = orch.voice_gen_with_repair("TEST-R1", segs)
+            self.assertIsNone(result[0]["audio_path"])
+
+    def test_repair_loop_succeeds(self):
+        """Repair engine fixes text, re-TTS succeeds."""
+        try:
+            from pydub import AudioSegment
+        except ImportError:
+            self.skipTest("pydub not installed")
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+                max_repair_attempts=2,
+            )
+            audio_dir = Path(td) / "audio"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+
+            call_count = [0]
+
+            class MockTTS:
+                def synthesize(self, *, run_id, text):
+                    call_count[0] += 1
+                    path = audio_dir / f"{run_id}.mp3"
+                    # First call: 8s (way over), repair calls: 5s (fits)
+                    dur = 8000 if call_count[0] == 1 else 5000
+                    seg = AudioSegment.silent(duration=dur)
+                    seg.export(path, format="mp3")
+                    return path
+                def has_artifact(self, run_id):
+                    return False
+
+            class MockRepair:
+                def repair_segment(self, *, segment_id, text, reduce_by_ms):
+                    return "Shorter text here."
+
+            pm = self._make_mock_panic()
+            orch = RayVaultOrchestrator(
+                config=cfg, panic_mgr=pm,
+                tts_engine=MockTTS(),
+                repair_engine=MockRepair(),
+            )
+
+            segs = [{
+                "segment_id": "intro",
+                "kind": "intro",
+                "text": "Very long text that exceeds duration.",
+                "approx_duration_sec": 5.0,
+            }]
+
+            # First voice_gen marks needs_repair, then repair loop fixes it
+            result = orch.voice_gen_with_repair("TEST-R2", segs)
+            self.assertFalse(result[0].get("needs_repair", False))
+            self.assertIsNotNone(result[0].get("audio_path"))
+            self.assertEqual(result[0].get("repair_attempts"), 1)
+
+    def test_repair_loop_exhausted_panics(self):
+        """Repair exhausted triggers panic."""
+        try:
+            from pydub import AudioSegment
+        except ImportError:
+            self.skipTest("pydub not installed")
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+                max_repair_attempts=1,
+            )
+            audio_dir = Path(td) / "audio"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+
+            class MockTTS:
+                def synthesize(self, *, run_id, text):
+                    path = audio_dir / f"{run_id}.mp3"
+                    # Always 8s — never fits
+                    seg = AudioSegment.silent(duration=8000)
+                    seg.export(path, format="mp3")
+                    return path
+                def has_artifact(self, run_id):
+                    return False
+
+            class MockRepair:
+                def repair_segment(self, *, segment_id, text, reduce_by_ms):
+                    return "Still too long text."
+
+            pm = self._make_mock_panic()
+            orch = RayVaultOrchestrator(
+                config=cfg, panic_mgr=pm,
+                tts_engine=MockTTS(),
+                repair_engine=MockRepair(),
+            )
+
+            segs = [{
+                "segment_id": "intro",
+                "kind": "intro",
+                "text": "Long text.",
+                "approx_duration_sec": 5.0,
+            }]
+
+            result = orch.voice_gen_with_repair("TEST-R3", segs)
+            self.assertTrue(result[0].get("needs_human"))
+            self.assertTrue(result[0].get("repair_exhausted"))
+            # Panic was reported
+            self.assertTrue(any("panic_voice_contract_drift" in c[0] for c in pm.calls))
+
+
+# ==========================================================================
+# Dual cache digest tests
+# ==========================================================================
+
+class TestDualCacheDigest(unittest.TestCase):
+    """Tests for compute_final_digest (Cache A vs Cache B)."""
+
+    def test_same_tts_different_target_different_final(self):
+        """Different target_duration → different final digest."""
+        from lib.audio_utils import compute_audio_digest, compute_final_digest
+        tts_d = compute_audio_digest("v1", "Hello world", "model1")
+        final_a = compute_final_digest(tts_d, target_duration_sec=5.0)
+        final_b = compute_final_digest(tts_d, target_duration_sec=10.0)
+        self.assertNotEqual(final_a, final_b)
+        # But TTS digest is the same (no ElevenLabs re-gen needed)
+        self.assertEqual(len(final_a), 64)
+
+    def test_same_inputs_same_final(self):
+        """Same inputs → same final digest (deterministic)."""
+        from lib.audio_utils import compute_final_digest
+        d1 = compute_final_digest("abc123", target_duration_sec=5.0, action="pad_silence")
+        d2 = compute_final_digest("abc123", target_duration_sec=5.0, action="pad_silence")
+        self.assertEqual(d1, d2)
+
+    def test_rate_changes_digest(self):
+        """Different rate → different final digest."""
+        from lib.audio_utils import compute_final_digest
+        d1 = compute_final_digest("abc123", target_duration_sec=5.0, rate=1.02)
+        d2 = compute_final_digest("abc123", target_duration_sec=5.0, rate=1.05)
+        self.assertNotEqual(d1, d2)
+
+    def test_action_changes_digest(self):
+        """Different action → different final digest."""
+        from lib.audio_utils import compute_final_digest
+        d1 = compute_final_digest("abc123", target_duration_sec=5.0, action="ok")
+        d2 = compute_final_digest("abc123", target_duration_sec=5.0, action="pad_silence")
+        self.assertNotEqual(d1, d2)
+
+
+# ==========================================================================
+# Dzine manifest preparation tests
+# ==========================================================================
+
+class TestDzineManifestPreparation(unittest.TestCase):
+    """Tests for prepare_manifest_for_dzine."""
+
+    def test_adds_dzine_block(self):
+        """Adds dzine block with upload/settings/export."""
+        from lib.media_manifest import prepare_manifest_for_dzine, DzineHints
+        with tempfile.TemporaryDirectory() as td:
+            # Create fake audio
+            audio = Path(td) / "seg_intro.mp3"
+            audio.write_bytes(b"fake" * 100)
+
+            manifest = {
+                "run_id": "RAY-42",
+                "segments": [{
+                    "segment_id": "intro",
+                    "kind": "intro",
+                    "audio_path": str(audio),
+                    "approx_duration_sec": 10,
+                    "lip_sync_hint": "excited",
+                }],
+            }
+
+            ready = prepare_manifest_for_dzine(
+                manifest,
+                video_final_dir=td,
+                hints=DzineHints(avatar_ref="test_avatar.png"),
+            )
+
+            seg = ready["segments"][0]
+            self.assertIn("dzine", seg)
+            self.assertIn("upload", seg["dzine"])
+            self.assertIn("settings", seg["dzine"])
+            self.assertIn("export", seg["dzine"])
+            self.assertIn("ui_checklist", seg["dzine"])
+            self.assertIn("budget_control", seg["dzine"])
+            self.assertEqual(seg["dzine"]["settings"]["lip_sync_hint"], "excited")
+
+    def test_budget_summary(self):
+        """Budget summary counts credits and segments to render."""
+        from lib.media_manifest import prepare_manifest_for_dzine
+        with tempfile.TemporaryDirectory() as td:
+            a1 = Path(td) / "a1.mp3"
+            a2 = Path(td) / "a2.mp3"
+            a1.write_bytes(b"x" * 100)
+            a2.write_bytes(b"y" * 100)
+
+            manifest = {
+                "run_id": "RAY-50",
+                "segments": [
+                    {"segment_id": "s1", "audio_path": str(a1), "approx_duration_sec": 5},
+                    {"segment_id": "s2", "audio_path": str(a2), "approx_duration_sec": 5},
+                ],
+            }
+
+            ready = prepare_manifest_for_dzine(manifest, video_final_dir=td)
+            bs = ready["budget_summary"]
+            self.assertEqual(bs["estimated_dzine_credits"], 2)
+            self.assertEqual(len(bs["segments_to_render"]), 2)
+
+    def test_cache_hit_skips_dzine(self):
+        """Existing video file triggers cache hit → skip_dzine."""
+        from lib.media_manifest import (
+            prepare_manifest_for_dzine, DzineHints,
+            _video_expected_path, _file_sha256,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            audio = Path(td) / "seg.mp3"
+            audio.write_bytes(b"audio data")
+            sha8 = _file_sha256(audio)[:8]
+
+            # Pre-create the expected video
+            expected = _video_expected_path(
+                Path(td), "RAY-60", "intro", sha8,
+            )
+            expected.write_bytes(b"v" * 600_000)  # > min_video_bytes
+
+            manifest = {
+                "run_id": "RAY-60",
+                "segments": [{
+                    "segment_id": "intro",
+                    "audio_path": str(audio),
+                    "approx_duration_sec": 10,
+                }],
+            }
+
+            ready = prepare_manifest_for_dzine(manifest, video_final_dir=td)
+            seg = ready["segments"][0]
+            self.assertTrue(seg["dzine"]["budget_control"]["cache_hit"])
+            self.assertTrue(seg["dzine"]["budget_control"]["skip_dzine"])
+            self.assertEqual(seg["dzine"]["budget_control"]["credit_cost"], 0)
+            self.assertEqual(ready["budget_summary"]["estimated_dzine_credits"], 0)
+
+    def test_sha256_added_to_segment(self):
+        """Audio sha256 added to segment."""
+        from lib.media_manifest import prepare_manifest_for_dzine
+        with tempfile.TemporaryDirectory() as td:
+            audio = Path(td) / "seg.mp3"
+            audio.write_bytes(b"test data")
+
+            manifest = {
+                "run_id": "RAY-70",
+                "segments": [{
+                    "segment_id": "x",
+                    "audio_path": str(audio),
+                    "approx_duration_sec": 5,
+                }],
+            }
+
+            ready = prepare_manifest_for_dzine(manifest, video_final_dir=td)
+            seg = ready["segments"][0]
+            self.assertIn("audio_sha256", seg)
+            self.assertEqual(len(seg["audio_sha256"]), 64)
+            self.assertIn("audio_bytes", seg)
+
+    def test_deterministic_video_naming(self):
+        """Video path follows V_{run_id}_{segment_id}_{sha8}.mp4 convention."""
+        from lib.media_manifest import prepare_manifest_for_dzine, _file_sha256
+        with tempfile.TemporaryDirectory() as td:
+            audio = Path(td) / "seg.mp3"
+            audio.write_bytes(b"naming test")
+            sha8 = _file_sha256(audio)[:8]
+
+            manifest = {
+                "run_id": "RAY-80",
+                "segments": [{
+                    "segment_id": "intro",
+                    "audio_path": str(audio),
+                    "approx_duration_sec": 5,
+                }],
+            }
+
+            ready = prepare_manifest_for_dzine(manifest, video_final_dir=td)
+            seg = ready["segments"][0]
+            expected_name = f"V_RAY-80_intro_{sha8}.mp4"
+            self.assertTrue(seg["video_path"].endswith(expected_name))
+
+    def test_original_manifest_not_modified(self):
+        """prepare_manifest_for_dzine doesn't modify original."""
+        from lib.media_manifest import prepare_manifest_for_dzine
+        with tempfile.TemporaryDirectory() as td:
+            audio = Path(td) / "seg.mp3"
+            audio.write_bytes(b"immutable test")
+
+            manifest = {
+                "run_id": "RAY-90",
+                "segments": [{
+                    "segment_id": "x",
+                    "audio_path": str(audio),
+                    "approx_duration_sec": 5,
+                }],
+            }
+
+            prepare_manifest_for_dzine(manifest, video_final_dir=td)
+            # Original should NOT have dzine block
+            self.assertNotIn("dzine", manifest["segments"][0])
+            self.assertNotIn("budget_summary", manifest)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

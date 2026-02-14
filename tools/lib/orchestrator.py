@@ -67,6 +67,15 @@ class TTSEngineLike(Protocol):
     def has_artifact(self, run_id: str) -> bool: ...
 
 
+class RepairEngineLike(Protocol):
+    """Interface for LLM-based text repair (shorten segment)."""
+    def repair_segment(
+        self, *, segment_id: str, text: str, reduce_by_ms: int,
+    ) -> Optional[str]:
+        """Return shortened text, or None if repair failed."""
+        ...
+
+
 class EventSinkLike(Protocol):
     """Interface for run_event insertion (async)."""
     async def insert_run_event(self, event: dict) -> None: ...
@@ -155,6 +164,7 @@ class RayVaultOrchestrator:
         config: OrchestratorConfig = OrchestratorConfig(),
         panic_mgr: PanicLike,
         tts_engine: Optional[TTSEngineLike] = None,
+        repair_engine: Optional[RepairEngineLike] = None,
         event_sink: Optional[EventSinkLike] = None,
         resolve_script: str = "scripts/resolve_assemble.py",
         render_probe_script: str = "scripts/render_probe.py",
@@ -162,6 +172,7 @@ class RayVaultOrchestrator:
         self.cfg = config
         self.panic = panic_mgr
         self.tts = tts_engine
+        self.repair = repair_engine
         self.events = event_sink
         self.resolve_script = resolve_script
         self.render_probe_script = render_probe_script
@@ -393,6 +404,108 @@ class RayVaultOrchestrator:
         return out
 
     # ------------------------------------------------------------------
+    # Repair loop: TTS → finalize → (repair if needed) → re-TTS
+    # ------------------------------------------------------------------
+
+    _SAFETY_MS = 250  # extra buffer on repair prompt
+
+    def voice_gen_with_repair(
+        self, run_id: str, segments: List[dict],
+    ) -> List[dict]:
+        """TTS → finalize gate → repair loop (max attempts).
+
+        For each segment that comes back as needs_repair:
+        1. Calculate reduce_by_ms = over_ms + safety (250ms)
+        2. Call repair_engine to shorten text
+        3. Re-synthesize + re-finalize
+        4. If still needs_repair after max attempts → panic
+
+        Requires repair_engine. Without it, behaves like voice_gen.
+        """
+        segs = self.voice_gen(run_id, segments)
+
+        if not self.repair or not self.tts:
+            return segs
+
+        max_attempts = self.cfg.max_repair_attempts
+        out: List[dict] = []
+
+        for s in segs:
+            if not s.get("needs_repair") or not s.get("finalize_result"):
+                out.append(s)
+                continue
+
+            seg_id = s.get("segment_id", "?")
+            text = s.get("text", "")
+            approx = _safe_float(s.get("approx_duration_sec", 0))
+            kind = s.get("kind", "product")
+
+            repaired = False
+            for attempt in range(1, max_attempts + 1):
+                fr = s.get("finalize_result", {})
+                over_ms = abs(fr.get("delta_ms", 0))
+                reduce_by_ms = over_ms + self._SAFETY_MS
+
+                # Ask LLM to shorten
+                new_text = self.repair.repair_segment(
+                    segment_id=seg_id,
+                    text=text,
+                    reduce_by_ms=reduce_by_ms,
+                )
+                if not new_text:
+                    break
+
+                # Re-synthesize with repaired text
+                artifact_id = f"{run_id}_{seg_id}_r{attempt}"
+                try:
+                    audio_path = self.tts.synthesize(
+                        run_id=artifact_id, text=new_text,
+                    )
+                except Exception as e:
+                    s["tts_error"] = f"repair attempt {attempt}: {e}"
+                    break
+
+                # Re-finalize
+                if approx > 0:
+                    fr_new = finalize_segment_audio(
+                        audio_path, target_duration=approx,
+                        source_text=new_text, kind=kind,
+                    )
+                    s["finalize_result"] = {
+                        "action": fr_new.action,
+                        "delta_ms": fr_new.delta_ms,
+                        "measured_sec": round(fr_new.measured_duration_sec, 3),
+                        "target_sec": fr_new.target_duration_sec,
+                        "rate": fr_new.rate,
+                        "reason": fr_new.reason,
+                    }
+
+                    if fr_new.action != "needs_repair":
+                        s["audio_path"] = str(audio_path)
+                        s["text"] = new_text
+                        s["repair_attempts"] = attempt
+                        s.pop("needs_repair", None)
+                        s.pop("repair_reason", None)
+                        repaired = True
+                        break
+
+                    text = new_text  # use repaired text for next attempt
+
+            if not repaired and s.get("needs_repair"):
+                s["needs_human"] = True
+                s["repair_exhausted"] = True
+                self.panic.report_panic(
+                    "panic_voice_contract_drift", run_id,
+                    f"segment {seg_id}: repair exhausted after "
+                    f"{max_attempts} attempts, still over by "
+                    f"{abs(s.get('finalize_result', {}).get('delta_ms', 0))}ms",
+                )
+
+            out.append(s)
+
+        return out
+
+    # ------------------------------------------------------------------
     # Stage: MEDIA_SYNC (build manifest)
     # ------------------------------------------------------------------
 
@@ -540,7 +653,11 @@ class RayVaultOrchestrator:
 
             if stage == "VOICE_GEN":
                 await self._emit(run_id, "stage_enter", "INFO", {"stage": "VOICE_GEN"})
-                segs = self.voice_gen(run_id, data["segments"])
+                # Use repair loop when repair engine is available
+                if self.repair:
+                    segs = self.voice_gen_with_repair(run_id, data["segments"])
+                else:
+                    segs = self.voice_gen(run_id, data["segments"])
 
                 # Emit per-segment finalize telemetry (SRE)
                 for seg in segs:
