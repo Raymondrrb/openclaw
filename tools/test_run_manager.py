@@ -2595,5 +2595,50 @@ class TestBrowserEnvConfig(unittest.TestCase):
         self.assertNotIn("proxy", opts)
 
 
+# ==========================================================================
+# Smoke test helper tests
+# ==========================================================================
+
+class TestSmokeTestHelpers(unittest.TestCase):
+    """Tests for smoke_test_observability.py helpers (no network)."""
+
+    def test_smoke_result_all_passed(self):
+        """SmokeResult.all_passed when all steps pass."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from smoke_test_observability import SmokeResult
+        r = SmokeResult()
+        r.record("step1", True, "ok")
+        r.record("step2", True, "ok")
+        self.assertTrue(r.all_passed)
+
+    def test_smoke_result_partial_fail(self):
+        """SmokeResult.all_passed is False when any step fails."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from smoke_test_observability import SmokeResult
+        r = SmokeResult()
+        r.record("step1", True, "ok")
+        r.record("step2", False, "failed")
+        self.assertFalse(r.all_passed)
+
+    def test_smoke_result_summary_format(self):
+        """SmokeResult.summary shows N/M format."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from smoke_test_observability import SmokeResult
+        r = SmokeResult()
+        r.record("a", True)
+        r.record("b", False)
+        r.record("c", True)
+        self.assertEqual(r.summary, "2/3 checks passed")
+
+    def test_supabase_headers(self):
+        """_supabase_headers includes apikey and Authorization."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from smoke_test_observability import _supabase_headers
+        h = _supabase_headers("test-key-123")
+        self.assertEqual(h["apikey"], "test-key-123")
+        self.assertEqual(h["Authorization"], "Bearer test-key-123")
+        self.assertEqual(h["Content-Type"], "application/json")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

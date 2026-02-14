@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress clean logs quarantine purge_spool cockpit
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit
 
 # --- Morning routine ---
 doctor:
@@ -35,6 +35,13 @@ test:
 
 stress:
 	python3 tools/stress_test_claim.py
+
+# Smoke test: validates incidents view + run_events + panic state (requires .env)
+smoke:
+	python3 scripts/smoke_test_observability.py
+
+smoke-telegram:
+	python3 scripts/smoke_test_observability.py --telegram
 
 # --- Observability ---
 # Quick Cockpit: fleet status from pipeline_runs (no incidents view needed)
