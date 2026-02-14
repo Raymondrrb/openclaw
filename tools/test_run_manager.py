@@ -1717,5 +1717,92 @@ class TestPanicTaxonomy(unittest.TestCase):
             worker_ops.reset_panic_flag()
 
 
+class TestClaimNextRecoveryLocal(unittest.TestCase):
+    """Local tests for claim_next recovery and exclusivity logic."""
+
+    def test_claim_next_local_returns_none(self):
+        """claim_next in local mode (no supabase) returns None."""
+        from lib.run_manager import RunManager
+        result = RunManager.claim_next(
+            worker_id="LocalWorker",
+            use_supabase=False,
+        )
+        self.assertIsNone(result)
+
+    def test_claim_next_short_worker_returns_none(self):
+        """claim_next rejects worker_id < 3 chars."""
+        from lib.run_manager import RunManager
+        result = RunManager.claim_next(worker_id="ab", use_supabase=False)
+        self.assertIsNone(result)
+
+    def test_claim_next_whitespace_worker_returns_none(self):
+        """claim_next rejects whitespace-only worker_id."""
+        from lib.run_manager import RunManager
+        result = RunManager.claim_next(worker_id="  ", use_supabase=False)
+        self.assertIsNone(result)
+
+    def test_claim_lease_clamped(self):
+        """claim_next clamps lease to [1,30]."""
+        from lib.run_manager import RunManager
+        # This calls the static _clamp_lease or the internal clamp.
+        # We test via claim() with local mode.
+        rm = RunManager("clamp-test", use_supabase=False, worker_id="ClampWorker")
+        rm._state.status = "in_progress"
+        # Claiming with absurd lease should clamp
+        ok = rm.claim(lease_minutes=999)
+        self.assertTrue(ok)
+        # Verify expiry is ~30min (not 999min)
+        from datetime import datetime, timezone
+        exp = datetime.fromisoformat(rm._state.lock_expires_at)
+        now = datetime.now(timezone.utc)
+        delta_min = (exp - now).total_seconds() / 60
+        self.assertLessEqual(delta_min, 31)
+        self.assertGreaterEqual(delta_min, 28)
+
+    def test_heartbeat_rejects_empty_token(self):
+        """heartbeat() returns False when lock_token is empty."""
+        from lib.run_manager import RunManager
+        rm = RunManager("hb-empty", use_supabase=False, worker_id="HBWorker")
+        rm._state.status = "in_progress"
+        rm._state.lock_token = ""
+        self.assertFalse(rm.heartbeat())
+
+    def test_heartbeat_succeeds_with_valid_token_local(self):
+        """heartbeat() succeeds in local mode with valid token."""
+        from lib.run_manager import RunManager
+        rm = RunManager("hb-valid", use_supabase=False, worker_id="HBWorker")
+        rm._state.status = "in_progress"
+        rm._state.lock_token = "tok-valid"
+        self.assertTrue(rm.heartbeat())
+
+    def test_lost_lock_exception_on_panic(self):
+        """HeartbeatManager raises LostLock after panic."""
+        from lib.run_manager import HeartbeatManager, RunManager, LostLock
+        rm = RunManager("ll-test", use_supabase=False, worker_id="LLWorker")
+        rm._state.status = "in_progress"
+        rm._state.lock_token = "tok-ll"
+        hb = HeartbeatManager(rm, interval_seconds=999)
+        # Simulate panic
+        hb._lost_event.set()
+        hb._panic_reason = "test panic"
+        with self.assertRaises(LostLock) as ctx:
+            hb.check_or_raise()
+        self.assertIn("test panic", str(ctx.exception))
+
+    def test_claim_next_supabase_mock_returns_rm(self):
+        """claim_next with mocked RPC returns a RunManager."""
+        from lib.run_manager import RunManager
+        fake_id = "12345678-1234-1234-1234-123456789abc"
+        with patch.object(RunManager, "_supabase_claim_next", return_value=fake_id):
+            rm = RunManager.claim_next(
+                worker_id="MockWorker",
+                use_supabase=True,
+            )
+        self.assertIsNotNone(rm)
+        self.assertEqual(rm.run_id, fake_id)
+        self.assertEqual(rm._state.worker_id, "MockWorker")
+        self.assertTrue(rm._state.lock_token)  # should have a token
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
