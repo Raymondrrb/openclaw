@@ -164,3 +164,78 @@ def validate_manifest_paths(manifest: Dict[str, Any]) -> List[str]:
         if video and not Path(video).exists():
             missing.append(f"video missing: {video}")
     return missing
+
+
+def stamp_manifest_integrity(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """Add sha256 + bytes to each segment's audio/video paths.
+
+    Call this AFTER all media files are generated but BEFORE assembly.
+    Enables the media gate to detect:
+    - Truncated files (size mismatch)
+    - Swapped files (hash mismatch)
+    - Corrupt files (hash mismatch)
+
+    Returns a new manifest with integrity fields added.
+    Does not modify the original.
+    """
+    import copy
+    stamped = copy.deepcopy(manifest)
+
+    for seg in stamped.get("segments", []):
+        for key in ("audio_path", "video_path"):
+            path_str = seg.get(key, "")
+            if not path_str:
+                continue
+            p = Path(path_str)
+            if p.exists():
+                seg[f"{key}_bytes"] = p.stat().st_size
+                seg[f"{key}_sha256"] = _file_sha256(p)
+
+    return stamped
+
+
+def _file_sha256(path: Path) -> str:
+    """Compute SHA-256 of a file."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def validate_manifest_integrity(manifest: Dict[str, Any]) -> List[str]:
+    """Validate manifest integrity stamps against actual files.
+
+    Checks sha256 and bytes for each stamped path.
+    Returns list of issues (empty = all intact).
+    """
+    issues = []
+    for seg in manifest.get("segments", []):
+        for key in ("audio_path", "video_path"):
+            path_str = seg.get(key, "")
+            expected_sha = seg.get(f"{key}_sha256")
+            expected_bytes = seg.get(f"{key}_bytes")
+
+            if not path_str or not expected_sha:
+                continue
+
+            p = Path(path_str)
+            if not p.exists():
+                issues.append(f"{key} missing: {path_str}")
+                continue
+
+            actual_bytes = p.stat().st_size
+            if expected_bytes is not None and actual_bytes != expected_bytes:
+                issues.append(
+                    f"{key} size mismatch: {path_str} "
+                    f"(expected {expected_bytes}, got {actual_bytes})"
+                )
+
+            actual_sha = _file_sha256(p)
+            if actual_sha != expected_sha:
+                issues.append(
+                    f"{key} hash mismatch: {path_str} "
+                    f"(expected {expected_sha[:12]}..., got {actual_sha[:12]}...)"
+                )
+
+    return issues

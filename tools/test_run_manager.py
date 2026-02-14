@@ -5485,5 +5485,363 @@ class TestOrchestrator(unittest.TestCase):
             self.assertNotIn("just", result[0]["text"].lower().split())
 
 
+# ==========================================================================
+# v0.1.1 tests — pause tags, manifest integrity, cleanup, orchestrator fail
+# ==========================================================================
+
+class TestPauseTags(unittest.TestCase):
+    """Tests for pause tag parsing (audio_utils v0.1.1)."""
+
+    def test_tokenize_simple(self):
+        """Parses text with a single pause tag."""
+        from lib.audio_utils import tokenize_pause_tags, PauseToken, TextToken
+        tokens = tokenize_pause_tags("Hello [pause=300ms] world")
+        self.assertEqual(len(tokens), 3)
+        self.assertIsInstance(tokens[0], TextToken)
+        self.assertEqual(tokens[0].text, "Hello ")
+        self.assertIsInstance(tokens[1], PauseToken)
+        self.assertEqual(tokens[1].ms, 300)
+        self.assertIsInstance(tokens[2], TextToken)
+        self.assertEqual(tokens[2].text, " world")
+
+    def test_tokenize_multiple(self):
+        """Parses multiple pause tags."""
+        from lib.audio_utils import tokenize_pause_tags, PauseToken
+        tokens = tokenize_pause_tags("A [pause=100ms] B [pause=500ms] C")
+        pauses = [t for t in tokens if isinstance(t, PauseToken)]
+        self.assertEqual(len(pauses), 2)
+        self.assertEqual(pauses[0].ms, 100)
+        self.assertEqual(pauses[1].ms, 500)
+
+    def test_tokenize_no_tags(self):
+        """Text without pause tags returns single TextToken."""
+        from lib.audio_utils import tokenize_pause_tags, TextToken
+        tokens = tokenize_pause_tags("Just plain text here.")
+        self.assertEqual(len(tokens), 1)
+        self.assertIsInstance(tokens[0], TextToken)
+
+    def test_total_pause_ms(self):
+        """Sums all pause durations."""
+        from lib.audio_utils import total_pause_ms
+        self.assertEqual(total_pause_ms("A [pause=200ms] B [pause=300ms]"), 500)
+        self.assertEqual(total_pause_ms("No pauses here"), 0)
+
+    def test_total_pause_ms_case_insensitive(self):
+        """Pause tags are case-insensitive."""
+        from lib.audio_utils import total_pause_ms
+        self.assertEqual(total_pause_ms("A [PAUSE=200MS] B"), 200)
+
+    def test_tokenize_adjacent_tags(self):
+        """Adjacent pause tags parsed correctly."""
+        from lib.audio_utils import tokenize_pause_tags, PauseToken
+        tokens = tokenize_pause_tags("[pause=100ms][pause=200ms]")
+        pauses = [t for t in tokens if isinstance(t, PauseToken)]
+        self.assertEqual(len(pauses), 2)
+        self.assertEqual(pauses[0].ms, 100)
+        self.assertEqual(pauses[1].ms, 200)
+
+
+class TestManifestIntegrity(unittest.TestCase):
+    """Tests for manifest integrity stamps (v0.1.1)."""
+
+    def test_stamp_adds_sha256_and_bytes(self):
+        """stamp_manifest_integrity adds hash and size fields."""
+        from lib.media_manifest import stamp_manifest_integrity
+        with tempfile.TemporaryDirectory() as td:
+            # Create fake audio + video files
+            audio = Path(td) / "seg_intro.mp3"
+            video = Path(td) / "intro.mp4"
+            audio.write_bytes(b"fake audio data" * 100)
+            video.write_bytes(b"fake video data" * 200)
+
+            manifest = {
+                "segments": [{
+                    "segment_id": "intro",
+                    "audio_path": str(audio),
+                    "video_path": str(video),
+                }],
+            }
+
+            stamped = stamp_manifest_integrity(manifest)
+
+            # Original not modified
+            self.assertNotIn("audio_path_sha256", manifest["segments"][0])
+
+            # Stamped has fields
+            seg = stamped["segments"][0]
+            self.assertIn("audio_path_sha256", seg)
+            self.assertIn("audio_path_bytes", seg)
+            self.assertIn("video_path_sha256", seg)
+            self.assertIn("video_path_bytes", seg)
+            self.assertEqual(seg["audio_path_bytes"], len(b"fake audio data" * 100))
+            self.assertEqual(len(seg["audio_path_sha256"]), 64)
+
+    def test_stamp_skips_missing_files(self):
+        """Missing files don't get stamps (no crash)."""
+        from lib.media_manifest import stamp_manifest_integrity
+        manifest = {
+            "segments": [{
+                "segment_id": "x",
+                "audio_path": "/nonexistent/audio.mp3",
+                "video_path": "/nonexistent/video.mp4",
+            }],
+        }
+        stamped = stamp_manifest_integrity(manifest)
+        seg = stamped["segments"][0]
+        self.assertNotIn("audio_path_sha256", seg)
+        self.assertNotIn("video_path_sha256", seg)
+
+    def test_validate_integrity_ok(self):
+        """Validation passes when files match stamps."""
+        from lib.media_manifest import stamp_manifest_integrity, validate_manifest_integrity
+        with tempfile.TemporaryDirectory() as td:
+            audio = Path(td) / "seg.mp3"
+            audio.write_bytes(b"consistent data")
+            manifest = {"segments": [{"segment_id": "x", "audio_path": str(audio), "video_path": ""}]}
+            stamped = stamp_manifest_integrity(manifest)
+            issues = validate_manifest_integrity(stamped)
+            self.assertEqual(issues, [])
+
+    def test_validate_integrity_detects_corruption(self):
+        """Validation catches modified file (hash mismatch)."""
+        from lib.media_manifest import stamp_manifest_integrity, validate_manifest_integrity
+        with tempfile.TemporaryDirectory() as td:
+            audio = Path(td) / "seg.mp3"
+            audio.write_bytes(b"original data")
+            manifest = {"segments": [{"segment_id": "x", "audio_path": str(audio), "video_path": ""}]}
+            stamped = stamp_manifest_integrity(manifest)
+
+            # Corrupt the file
+            audio.write_bytes(b"tampered data!!")
+            issues = validate_manifest_integrity(stamped)
+            self.assertTrue(any("hash mismatch" in i for i in issues))
+
+    def test_validate_integrity_detects_size_mismatch(self):
+        """Validation catches truncated file (size mismatch)."""
+        from lib.media_manifest import stamp_manifest_integrity, validate_manifest_integrity
+        with tempfile.TemporaryDirectory() as td:
+            audio = Path(td) / "seg.mp3"
+            audio.write_bytes(b"x" * 1000)
+            manifest = {"segments": [{"segment_id": "x", "audio_path": str(audio), "video_path": ""}]}
+            stamped = stamp_manifest_integrity(manifest)
+
+            # Truncate the file
+            audio.write_bytes(b"x" * 100)
+            issues = validate_manifest_integrity(stamped)
+            self.assertTrue(any("size mismatch" in i for i in issues))
+
+    def test_validate_integrity_detects_missing(self):
+        """Validation catches deleted file."""
+        from lib.media_manifest import stamp_manifest_integrity, validate_manifest_integrity
+        with tempfile.TemporaryDirectory() as td:
+            audio = Path(td) / "seg.mp3"
+            audio.write_bytes(b"will be deleted")
+            manifest = {"segments": [{"segment_id": "x", "audio_path": str(audio), "video_path": ""}]}
+            stamped = stamp_manifest_integrity(manifest)
+
+            audio.unlink()
+            issues = validate_manifest_integrity(stamped)
+            self.assertTrue(any("missing" in i for i in issues))
+
+
+class TestCleanupPolicy(unittest.TestCase):
+    """Tests for cleanup_policy script."""
+
+    def test_dry_run_does_not_delete(self):
+        """Dry run reports but doesn't delete."""
+        # Import inline to avoid path issues
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "cleanup_policy",
+            str(Path(__file__).parent.parent / "scripts" / "cleanup_policy.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with tempfile.TemporaryDirectory() as td:
+            # Create old audio dir
+            audio_dir = Path(td) / "audio" / "RAY-OLD"
+            audio_dir.mkdir(parents=True)
+            fake_file = audio_dir / "seg_abc.mp3"
+            fake_file.write_bytes(b"x" * 100)
+            # Set mtime to 30 days ago
+            old_time = time.time() - (30 * 86400)
+            os.utime(audio_dir, (old_time, old_time))
+            os.utime(fake_file, (old_time, old_time))
+
+            summary = mod.run_cleanup(
+                state_dir=td, audio_days=7.0, video_days=7.0,
+                traces_days=7.0, dry_run=True,
+            )
+            self.assertEqual(summary["audio_deleted"], 1)
+            self.assertTrue(summary["dry_run"])
+            # File still exists
+            self.assertTrue(fake_file.exists())
+
+    def test_execute_deletes(self):
+        """Execute mode actually deletes."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "cleanup_policy",
+            str(Path(__file__).parent.parent / "scripts" / "cleanup_policy.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with tempfile.TemporaryDirectory() as td:
+            audio_dir = Path(td) / "audio" / "RAY-OLD"
+            audio_dir.mkdir(parents=True)
+            fake_file = audio_dir / "seg_abc.mp3"
+            fake_file.write_bytes(b"x" * 100)
+            old_time = time.time() - (30 * 86400)
+            os.utime(audio_dir, (old_time, old_time))
+            os.utime(fake_file, (old_time, old_time))
+
+            summary = mod.run_cleanup(
+                state_dir=td, audio_days=7.0, video_days=7.0,
+                traces_days=7.0, dry_run=False,
+            )
+            self.assertEqual(summary["audio_deleted"], 1)
+            self.assertFalse(summary["dry_run"])
+            self.assertFalse(audio_dir.exists())
+
+    def test_recent_files_not_deleted(self):
+        """Recent files are left alone."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "cleanup_policy",
+            str(Path(__file__).parent.parent / "scripts" / "cleanup_policy.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        with tempfile.TemporaryDirectory() as td:
+            audio_dir = Path(td) / "audio" / "RAY-NEW"
+            audio_dir.mkdir(parents=True)
+            fake_file = audio_dir / "seg_abc.mp3"
+            fake_file.write_bytes(b"x" * 100)
+            # mtime is now (fresh)
+
+            summary = mod.run_cleanup(
+                state_dir=td, audio_days=7.0, video_days=7.0,
+                traces_days=7.0, dry_run=False,
+            )
+            self.assertEqual(summary["audio_deleted"], 0)
+            self.assertTrue(fake_file.exists())
+
+
+class TestOrchestratorFailCheckpoint(unittest.TestCase):
+    """Tests for orchestrator fail_reason in checkpoint (v0.1.1)."""
+
+    def _make_mock_panic(self):
+        class MockPanic:
+            def __init__(self):
+                self.calls = []
+            def report_panic(self, reason_key, run_id, error_msg, **kw):
+                self.calls.append((reason_key, run_id, error_msg))
+        return MockPanic()
+
+    def test_fail_writes_reason_to_checkpoint(self):
+        """Stage failure writes fail_reason and failed_at to checkpoint."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            pm = self._make_mock_panic()
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=pm)
+
+            # Force a failure by starting at ASSEMBLY with bad manifest
+            from lib.audio_utils import atomic_write_json
+            cp_path = Path(f"{td}/cp/FAIL-1.json")
+            atomic_write_json(cp_path, {
+                "run_id": "FAIL-1",
+                "stage": "RENDER_PROBE",
+                "updated_at": "2025-01-01T00:00:00+00:00",
+                "data": {"output_path": "/nonexistent/video.mp4"},
+            })
+
+            with self.assertRaises(RuntimeError):
+                import asyncio
+                asyncio.run(orch.run(run_id="FAIL-1", segments_plan=[]))
+
+            # Reload checkpoint — should have fail_reason
+            cp = json.loads(cp_path.read_text())
+            self.assertIn("fail_reason", cp)
+            self.assertIn("RENDER_PROBE_FAIL", cp["fail_reason"])
+            self.assertIn("failed_at", cp)
+
+    def test_fail_reason_truncated(self):
+        """fail_reason is truncated to 500 chars."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            pm = self._make_mock_panic()
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=pm)
+
+            # Set checkpoint at RENDER_PROBE with missing output
+            from lib.audio_utils import atomic_write_json
+            cp_path = Path(f"{td}/cp/FAIL-2.json")
+            atomic_write_json(cp_path, {
+                "run_id": "FAIL-2",
+                "stage": "RENDER_PROBE",
+                "updated_at": "2025-01-01T00:00:00+00:00",
+                "data": {"output_path": "/nonexistent/video.mp4"},
+            })
+
+            with self.assertRaises(RuntimeError):
+                import asyncio
+                asyncio.run(orch.run(run_id="FAIL-2", segments_plan=[]))
+
+            cp = json.loads(cp_path.read_text())
+            self.assertLessEqual(len(cp["fail_reason"]), 500)
+
+
+class TestResolveAssembleFindByName(unittest.TestCase):
+    """Tests for resolve_assemble.py _build_clip_index helper."""
+
+    def test_build_clip_index_imported(self):
+        """_build_clip_index function is importable."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "resolve_assemble",
+            str(Path(__file__).parent.parent / "scripts" / "resolve_assemble.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertTrue(callable(getattr(mod, "_build_clip_index", None)))
+
+
+class TestComputeFileSha256(unittest.TestCase):
+    """Tests for compute_file_sha256 in audio_utils."""
+
+    def test_file_sha256_deterministic(self):
+        """Same content produces same hash."""
+        from lib.audio_utils import compute_file_sha256
+        with tempfile.TemporaryDirectory() as td:
+            f1 = Path(td) / "a.bin"
+            f2 = Path(td) / "b.bin"
+            f1.write_bytes(b"hello world")
+            f2.write_bytes(b"hello world")
+            self.assertEqual(compute_file_sha256(f1), compute_file_sha256(f2))
+            self.assertEqual(len(compute_file_sha256(f1)), 64)
+
+    def test_file_sha256_different_content(self):
+        """Different content produces different hash."""
+        from lib.audio_utils import compute_file_sha256
+        with tempfile.TemporaryDirectory() as td:
+            f1 = Path(td) / "a.bin"
+            f2 = Path(td) / "b.bin"
+            f1.write_bytes(b"hello")
+            f2.write_bytes(b"world")
+            self.assertNotEqual(compute_file_sha256(f1), compute_file_sha256(f2))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

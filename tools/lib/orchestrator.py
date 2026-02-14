@@ -352,11 +352,14 @@ class RayVaultOrchestrator:
                 )
                 s2["audio_path"] = str(audio_path)
 
-                # Optional: pad to target duration
+                # Finalize: inject pauses + pad to target duration
                 approx = _safe_float(s2.get("approx_duration_sec", 0))
                 if approx > 0:
                     try:
-                        finalize_segment_audio(audio_path, target_duration=approx)
+                        finalize_segment_audio(
+                            audio_path, target_duration=approx,
+                            source_text=text,  # enables [pause=] injection
+                        )
                     except Exception:
                         pass  # Padding failure is non-fatal
             except Exception as e:
@@ -572,5 +575,13 @@ class RayVaultOrchestrator:
             # Report panic (local-first — always succeeds)
             self.panic.report_panic("panic_orchestrator", run_id, str(e))
 
-            # Checkpoint stays at current stage — enables resume
+            # Write fail reason to checkpoint — enables forensics on resume
+            try:
+                cp = self.load_checkpoint(run_id)
+                cp["fail_reason"] = str(e)[:500]
+                cp["failed_at"] = _utcnow_iso()
+                atomic_write_json(self.checkpoint_path(run_id), cp)
+            except Exception:
+                pass  # Best-effort — don't mask the original error
+
             raise

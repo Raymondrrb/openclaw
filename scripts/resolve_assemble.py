@@ -71,6 +71,33 @@ def ensure_project(resolve, name: str):
     return proj
 
 
+def _build_clip_index(media_pool) -> dict:
+    """Build name→MediaPoolItem map by recursively scanning all folders.
+
+    Resolve's GetClipList() only returns clips in the current folder.
+    After ImportMedia, clips may land in the root or a sub-bin.
+    This helper walks the entire folder tree to find every clip.
+    """
+    index = {}
+
+    def _scan_folder(folder):
+        if not folder:
+            return
+        clips = folder.GetClipList() or []
+        for clip in clips:
+            name = clip.GetName()
+            if name and name not in index:
+                index[name] = clip
+        # Recurse into sub-folders
+        subs = folder.GetSubFolderList() or []
+        for sub in subs:
+            _scan_folder(sub)
+
+    root = media_pool.GetRootFolder()
+    _scan_folder(root)
+    return index
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: resolve_assemble.py <manifest_path>", file=sys.stderr)
@@ -136,12 +163,10 @@ def main():
     all_paths = [str(Path(p).resolve()) for p in video_paths + audio_paths if p]
     imported = mp.ImportMedia(all_paths) or []
 
-    # Build name→item map
-    root = mp.GetRootFolder()
-    items = root.GetClipList() if root else []
-    by_name = {item.GetName(): item for item in items} if items else {}
+    # Build name→item map (recursive scan of all folders)
+    by_name = _build_clip_index(mp)
 
-    # Append segments in order
+    # Append segments in order (video on V1, audio on A1)
     for seg in segments:
         vp = seg.get("video_path")
         ap = seg.get("audio_path")
@@ -151,12 +176,16 @@ def main():
             v_item = by_name.get(v_name)
             if v_item:
                 mp.AppendToTimeline([v_item])
+            else:
+                print(f"Warning: clip not found in pool: {v_name}", file=sys.stderr)
 
         if ap:
             a_name = Path(ap).name
             a_item = by_name.get(a_name)
             if a_item:
                 mp.AppendToTimeline([a_item])
+            else:
+                print(f"Warning: clip not found in pool: {a_name}", file=sys.stderr)
 
     proj.SetCurrentTimeline(timeline)
     proj.Save()
