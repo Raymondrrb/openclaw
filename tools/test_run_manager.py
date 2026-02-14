@@ -14136,5 +14136,178 @@ class TestContentTypeValidation(unittest.TestCase):
         self.assertNotIn("application/json", ALLOWED_IMAGE_CONTENT_TYPES)
 
 
+class TestAffiliateResolver(unittest.TestCase):
+    """Tests for AffiliateResolver module."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.aff_path = Path(self.tmp) / "affiliates.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_no_file_returns_none(self):
+        from rayvault.affiliate_resolver import AffiliateResolver
+        aff = AffiliateResolver(self.aff_path)
+        self.assertIsNone(aff.resolve("B0TEST"))
+
+    def test_resolve_known_asin(self):
+        from rayvault.affiliate_resolver import AffiliateResolver
+        data = {
+            "version": "1",
+            "items": {
+                "B0TEST123": {
+                    "short_link": "https://amzn.to/abc123",
+                    "source": "manual",
+                    "last_verified_utc": "2026-02-14T00:00:00Z",
+                }
+            },
+        }
+        self.aff_path.write_text(json.dumps(data))
+        aff = AffiliateResolver(self.aff_path)
+        result = aff.resolve("B0TEST123")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["short_link"], "https://amzn.to/abc123")
+        self.assertEqual(result["source"], "manual")
+        self.assertIsNotNone(result["affiliates_file_hash"])
+
+    def test_resolve_unknown_asin(self):
+        from rayvault.affiliate_resolver import AffiliateResolver
+        data = {"version": "1", "items": {"B0OTHER": {"short_link": "https://amzn.to/x"}}}
+        self.aff_path.write_text(json.dumps(data))
+        aff = AffiliateResolver(self.aff_path)
+        self.assertIsNone(aff.resolve("B0UNKNOWN"))
+
+    def test_resolve_case_insensitive_asin(self):
+        from rayvault.affiliate_resolver import AffiliateResolver
+        data = {"version": "1", "items": {"B0ABC": {"short_link": "https://amzn.to/y"}}}
+        self.aff_path.write_text(json.dumps(data))
+        aff = AffiliateResolver(self.aff_path)
+        # Input lowercase, mapping uppercase
+        result = aff.resolve("b0abc")
+        self.assertIsNotNone(result)
+
+    def test_resolve_invalid_link_returns_none(self):
+        from rayvault.affiliate_resolver import AffiliateResolver
+        data = {"version": "1", "items": {"B0BAD": {"short_link": "not-a-url"}}}
+        self.aff_path.write_text(json.dumps(data))
+        aff = AffiliateResolver(self.aff_path)
+        self.assertIsNone(aff.resolve("B0BAD"))
+
+    def test_resolve_batch(self):
+        from rayvault.affiliate_resolver import AffiliateResolver
+        data = {
+            "version": "1",
+            "items": {
+                "B0A": {"short_link": "https://amzn.to/a"},
+                "B0B": {"short_link": "https://amzn.to/b"},
+            },
+        }
+        self.aff_path.write_text(json.dumps(data))
+        aff = AffiliateResolver(self.aff_path)
+        batch = aff.resolve_batch(["B0A", "B0B", "B0C"])
+        self.assertIsNotNone(batch["B0A"])
+        self.assertIsNotNone(batch["B0B"])
+        self.assertIsNone(batch["B0C"])
+
+    def test_stats(self):
+        from rayvault.affiliate_resolver import AffiliateResolver
+        data = {"version": "1", "items": {"B0X": {"short_link": "https://amzn.to/x"}}}
+        self.aff_path.write_text(json.dumps(data))
+        aff = AffiliateResolver(self.aff_path)
+        stats = aff.stats()
+        self.assertTrue(stats["file_exists"])
+        self.assertEqual(stats["total_mappings"], 1)
+        self.assertEqual(stats["version"], "1")
+
+    def test_reload(self):
+        from rayvault.affiliate_resolver import AffiliateResolver
+        data1 = {"version": "1", "items": {}}
+        self.aff_path.write_text(json.dumps(data1))
+        aff = AffiliateResolver(self.aff_path)
+        self.assertIsNone(aff.resolve("B0NEW"))
+
+        data2 = {"version": "2", "items": {"B0NEW": {"short_link": "https://amzn.to/new"}}}
+        self.aff_path.write_text(json.dumps(data2))
+        aff.reload()
+        self.assertIsNotNone(aff.resolve("B0NEW"))
+
+
+class TestPlaceholderDetection(unittest.TestCase):
+    """Tests for post-download image placeholder detection."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_placeholder_dims_blacklist(self):
+        from rayvault.product_asset_fetch import PLACEHOLDER_DIMS
+        self.assertIn((1, 1), PLACEHOLDER_DIMS)
+        self.assertIn((160, 160), PLACEHOLDER_DIMS)
+        self.assertIn((120, 120), PLACEHOLDER_DIMS)
+
+    def test_validate_too_small(self):
+        from rayvault.product_asset_fetch import validate_downloaded_image
+        small = Path(self.tmp) / "tiny.jpg"
+        small.write_bytes(b"\xff\xd8" + b"\x00" * 100)
+        err = validate_downloaded_image(small)
+        self.assertIsNotNone(err)
+        self.assertIn("too_small", err)
+
+    def test_validate_good_image(self):
+        from rayvault.product_asset_fetch import validate_downloaded_image
+        # Create a fake "big enough" file with no parseable dims
+        good = Path(self.tmp) / "good.jpg"
+        good.write_bytes(b"\xff\xd8" + b"\x00" * 50000)
+        err = validate_downloaded_image(good)
+        self.assertIsNone(err)
+
+    def test_validate_missing_file(self):
+        from rayvault.product_asset_fetch import validate_downloaded_image
+        err = validate_downloaded_image(Path(self.tmp) / "nope.jpg")
+        self.assertEqual(err, "file_missing")
+
+    def test_read_png_dims(self):
+        from rayvault.product_asset_fetch import _read_image_dims
+        # Build a minimal PNG IHDR with 800x600
+        sig = b"\x89PNG\r\n\x1a\n"
+        # chunk length (13 bytes for IHDR data)
+        ihdr_len = (13).to_bytes(4, "big")
+        ihdr_type = b"IHDR"
+        w_bytes = (800).to_bytes(4, "big")
+        h_bytes = (600).to_bytes(4, "big")
+        rest = b"\x08\x02\x00\x00\x00"  # bit depth, color, compress, filter, interlace
+        ihdr_data = w_bytes + h_bytes + rest
+        buf = sig + ihdr_len + ihdr_type + ihdr_data + b"\x00" * 100
+        f = Path(self.tmp) / "test.png"
+        f.write_bytes(buf)
+        dims = _read_image_dims(f)
+        self.assertEqual(dims, (800, 600))
+
+    def test_read_png_placeholder_1x1(self):
+        from rayvault.product_asset_fetch import _read_image_dims, PLACEHOLDER_DIMS
+        sig = b"\x89PNG\r\n\x1a\n"
+        ihdr_len = (13).to_bytes(4, "big")
+        ihdr_type = b"IHDR"
+        w_bytes = (1).to_bytes(4, "big")
+        h_bytes = (1).to_bytes(4, "big")
+        rest = b"\x08\x02\x00\x00\x00"
+        ihdr_data = w_bytes + h_bytes + rest
+        buf = sig + ihdr_len + ihdr_type + ihdr_data + b"\x00" * 40000
+        f = Path(self.tmp) / "pixel.png"
+        f.write_bytes(buf)
+        dims = _read_image_dims(f)
+        self.assertEqual(dims, (1, 1))
+        self.assertIn(dims, PLACEHOLDER_DIMS)
+
+    def test_min_product_image_bytes(self):
+        from rayvault.product_asset_fetch import MIN_PRODUCT_IMAGE_BYTES
+        self.assertEqual(MIN_PRODUCT_IMAGE_BYTES, 30_000)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

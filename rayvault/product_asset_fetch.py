@@ -91,6 +91,10 @@ ALLOWED_IMAGE_CONTENT_TYPES = frozenset({
 })
 
 MIN_IMAGE_BYTES = 2048
+# Post-download: real product photos should be > 30KB
+MIN_PRODUCT_IMAGE_BYTES = 30_000
+# Known placeholder dimensions served by CDNs on soft-block
+PLACEHOLDER_DIMS = frozenset({(1, 1), (120, 120), (160, 160), (200, 200)})
 
 
 def http_get_bytes(
@@ -101,6 +105,71 @@ def http_get_bytes(
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         return resp.read(), ctype
+
+
+def _read_image_dims(path: Path) -> Optional[Tuple[int, int]]:
+    """Read image dimensions from file header (JPEG/PNG only). Returns (w,h) or None."""
+    try:
+        buf = b""
+        with open(path, "rb") as f:
+            buf = f.read(1024)  # first 1KB is enough for headers
+        if len(buf) < 24:
+            return None
+        # PNG: signature + IHDR
+        if buf[:8] == b"\x89PNG\r\n\x1a\n" and buf[12:16] == b"IHDR":
+            w = int.from_bytes(buf[16:20], "big")
+            h = int.from_bytes(buf[20:24], "big")
+            return (w, h) if w > 0 and h > 0 else None
+        # JPEG: scan for SOF marker
+        if buf[0:2] == b"\xff\xd8":
+            i = 2
+            while i + 9 < len(buf):
+                if buf[i] != 0xFF:
+                    i += 1
+                    continue
+                while i < len(buf) and buf[i] == 0xFF:
+                    i += 1
+                if i >= len(buf):
+                    break
+                marker = buf[i]
+                i += 1
+                if marker in (0xD9, 0xDA):
+                    break
+                if i + 1 >= len(buf):
+                    break
+                seg_len = int.from_bytes(buf[i : i + 2], "big")
+                if seg_len < 2:
+                    break
+                seg_start = i + 2
+                # SOF markers with dimensions
+                if marker in (0xC0, 0xC1, 0xC2):
+                    if seg_start + 5 <= len(buf):
+                        h = int.from_bytes(buf[seg_start + 1 : seg_start + 3], "big")
+                        w = int.from_bytes(buf[seg_start + 3 : seg_start + 5], "big")
+                        return (w, h) if w > 0 and h > 0 else None
+                i = i + seg_len
+            return None
+        return None
+    except Exception:
+        return None
+
+
+def validate_downloaded_image(path: Path) -> Optional[str]:
+    """Validate a downloaded image file. Returns error reason or None if OK.
+
+    Checks:
+      - File size >= MIN_PRODUCT_IMAGE_BYTES (30KB)
+      - Image dimensions not in PLACEHOLDER_DIMS blacklist
+    """
+    if not path.exists():
+        return "file_missing"
+    size = path.stat().st_size
+    if size < MIN_PRODUCT_IMAGE_BYTES:
+        return f"too_small_{size}_bytes"
+    dims = _read_image_dims(path)
+    if dims and dims in PLACEHOLDER_DIMS:
+        return f"placeholder_dims_{dims[0]}x{dims[1]}"
+    return None
 
 
 def download_with_retries(
@@ -437,6 +506,19 @@ def run_product_fetch(
 
             ok, reason = download_with_retries(url, out_path)
             if ok:
+                # Post-download validation: reject placeholders
+                validation_err = validate_downloaded_image(out_path)
+                if validation_err and idx == 1:
+                    # Main image is a placeholder — reject
+                    try:
+                        out_path.unlink()
+                    except OSError:
+                        pass
+                    errors += 1
+                    notes.append(
+                        f"rank {rank} {asin}: placeholder rejected ({validation_err})"
+                    )
+                    continue
                 downloaded += 1
                 got_any = True
                 hashes[fname] = sha1_file(out_path)
@@ -539,6 +621,30 @@ def run_product_fetch(
         else:
             episode_tier = "GREEN"
         manifest["products"]["episode_truth_tier"] = episode_tier
+
+        # Affiliate resolution (link = auditable asset)
+        affiliates_path = (library_dir or run_dir.parent.parent) / "affiliates.json"
+        try:
+            from rayvault.affiliate_resolver import AffiliateResolver
+            aff = AffiliateResolver(affiliates_path)
+            links_enabled = episode_tier != "RED"
+            for p in products_summary:
+                aff_info = aff.resolve(p.get("asin", ""))
+                p["affiliate"] = {
+                    "eligible": links_enabled,
+                    "short_link": aff_info["short_link"] if aff_info and links_enabled else None,
+                    "source": aff_info["source"] if aff_info else None,
+                }
+                if not links_enabled:
+                    p["affiliate"]["blocked_reason"] = "EPISODE_TIER_RED"
+            manifest["affiliate_policy"] = {
+                "episode_truth_tier": episode_tier,
+                "links_enabled": links_enabled,
+                "affiliates_file_hash": aff.file_hash,
+                "total_mappings": len(aff.data.get("items", {})),
+            }
+        except ImportError:
+            pass
 
         # Stability flags
         stability_notes = []
