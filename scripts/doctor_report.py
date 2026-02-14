@@ -442,6 +442,50 @@ def save_timeline_csv(
 
 
 # ---------------------------------------------------------------------------
+# QC Banner — quick drift summary without opening the CSV
+# ---------------------------------------------------------------------------
+
+_QC_WARN_DRIFT_SEC = 0.5
+_QC_CRITICAL_DRIFT_SEC = 1.0
+
+
+def build_qc_banner(rows: List[TimelineRow]) -> str:
+    """Build a QC banner summarizing drift health.
+
+    Thresholds:
+      > 0.5s drift: WARNING
+      > 1.0s drift: CRITICAL
+    """
+    if not rows:
+        return "QC: No timeline rows to evaluate."
+
+    probed = [r for r in rows if r.probe_duration_sec > 0]
+    if not probed:
+        return "QC: No probed segments (run with --include-probe for drift analysis)."
+
+    max_delta_row = max(probed, key=lambda r: abs(r.delta_sec))
+    max_delta_abs = abs(max_delta_row.delta_sec)
+    cum_drift_abs = abs(probed[-1].cum_drift_sec) if probed else 0.0
+    total_ready = sum(1 for r in rows if r.status == "READY")
+    total_missing = sum(1 for r in rows if r.status == "MISSING")
+
+    lines = [
+        f"QC Banner: {len(rows)} segments | {total_ready} READY | {total_missing} MISSING",
+        f"  Max segment drift: {max_delta_row.delta_sec:+.3f}s ({max_delta_row.segment_id})",
+        f"  Cumulative drift:  {probed[-1].cum_drift_sec:+.3f}s",
+    ]
+
+    if max_delta_abs > _QC_CRITICAL_DRIFT_SEC or cum_drift_abs > _QC_CRITICAL_DRIFT_SEC:
+        lines.append("  Status: CRITICAL — drift exceeds 1.0s, timeline will be off")
+    elif max_delta_abs > _QC_WARN_DRIFT_SEC or cum_drift_abs > _QC_WARN_DRIFT_SEC:
+        lines.append("  Status: WARNING — drift exceeds 0.5s, review before Resolve")
+    else:
+        lines.append("  Status: OK — drift within tolerance")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Orphan search (delegates to dzine_handoff if available, else inline)
 # ---------------------------------------------------------------------------
 
@@ -571,6 +615,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Include ffprobe duration + drift in timeline",
     )
 
+    # QC
+    parser.add_argument(
+        "--qc", action="store_true",
+        help="Print QC banner with drift summary (implies --timeline --include-probe)",
+    )
+
     # Preflight
     parser.add_argument(
         "--preflight", action="store_true",
@@ -595,6 +645,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         credit_price_usd,
         usd_brl,
     )
+
+    # --qc implies --timeline --include-probe
+    if args.qc:
+        args.timeline = True
+        args.include_probe = True
 
     print_report(summaries, details, financial)
 
@@ -635,6 +690,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"Timeline latest: {latest_path}")
             print(f"\n--- Timeline CSV ({len(rows)} segments) ---")
             print(csv_str)
+
+        # QC banner (when probe data available)
+        if args.include_probe:
+            banner = build_qc_banner(rows)
+            print(f"\n{banner}")
 
     # Preflight summary
     if args.preflight:

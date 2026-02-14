@@ -211,7 +211,7 @@ class ProbeResult:
 
 def validate_video_file(
     path: Path,
-    target_duration_sec: float,
+    target_duration_sec: Optional[float] = None,
     *,
     duration_tolerance_sec: float = DURATION_TOL_SEC_DEFAULT,
     min_bytes: int = MIN_BYTES_DEFAULT,
@@ -219,7 +219,12 @@ def validate_video_file(
     allowed_audio_codecs: Set[str] = ALLOWED_AUDIO_CODECS_DEFAULT,
     allowed_video_codecs: Set[str] = ALLOWED_VIDEO_CODECS_DEFAULT,
 ) -> ProbeResult:
-    """Validate video: exists + size + duration + bitrate + codecs."""
+    """Validate video: exists + size + duration + bitrate + codecs.
+
+    Args:
+        target_duration_sec: Expected duration. None = skip duration check.
+            Use None for index refresh where target is unknown.
+    """
     if not path.exists():
         return ProbeResult(False, 0.0, 0, None, None, 0, "missing_file")
 
@@ -235,7 +240,7 @@ def validate_video_file(
     br = ffprobe_bitrate_bps(meta)
     vcodec, acodec = ffprobe_codecs(meta)
 
-    if target_duration_sec > 0:
+    if target_duration_sec is not None and target_duration_sec > 0:
         if abs(dur - target_duration_sec) > duration_tolerance_sec:
             return ProbeResult(False, dur, br, vcodec, acodec, file_bytes, "duration_mismatch")
 

@@ -7680,5 +7680,209 @@ class TestDoctorCleanupCLI(unittest.TestCase):
             self.assertEqual(rc, 2)
 
 
+# ---------------------------------------------------------------------------
+# Video Index Refresh tests
+# ---------------------------------------------------------------------------
+
+class TestVideoIndexRefresh(unittest.TestCase):
+    """Tests for video_index_refresh.py."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_empty_dir(self):
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index
+        with tempfile.TemporaryDirectory() as td:
+            stats = refresh_index(
+                final_dir=Path(td) / "final",
+                index_path=Path(td) / "index.json",
+            )
+            self.assertEqual(stats.scanned, 0)
+            self.assertEqual(stats.enriched, 0)
+
+    def test_incremental_skips_unchanged(self):
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index, _atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            idx_path = Path(td) / "index.json"
+            # Create a dummy mp4
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 1000)
+            mtime = v.stat().st_mtime
+            # Pre-seed index with matching mtime
+            _atomic_write_json(idx_path, {
+                "version": "1.0",
+                "items": {
+                    "aabbccdd": {
+                        "path": str(v),
+                        "file_mtime": mtime,
+                        "duration": 5.0,
+                    },
+                },
+            })
+            stats = refresh_index(final_dir=final, index_path=idx_path)
+            self.assertEqual(stats.skipped_mtime, 1)
+            self.assertEqual(stats.probed, 0)
+
+    def test_force_reprobes_all(self):
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            idx_path = Path(td) / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 1000)
+            mtime = v.stat().st_mtime
+            _atomic_write_json(idx_path, {
+                "version": "1.0",
+                "items": {
+                    "aabbccdd": {"path": str(v), "file_mtime": mtime},
+                },
+            })
+            stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
+            # Force means it probes even though mtime matches
+            self.assertEqual(stats.probed, 1)
+            self.assertEqual(stats.skipped_mtime, 0)
+
+    def test_dry_run_no_write(self):
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            idx_path = Path(td) / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 1000)
+            stats = refresh_index(
+                final_dir=final, index_path=idx_path, force=True, dry_run=True,
+            )
+            self.assertGreaterEqual(stats.probed, 1)
+            # Index should not exist (dry-run)
+            self.assertFalse(idx_path.exists())
+
+    def test_sha8_inferred_from_filename(self):
+        self._add_scripts_path()
+        from video_index_refresh import _infer_sha8_from_filename
+        self.assertEqual(
+            _infer_sha8_from_filename(Path("V_R1_s1_aabbccdd.mp4")),
+            "aabbccdd",
+        )
+        self.assertIsNone(_infer_sha8_from_filename(Path("random.mp4")))
+
+    def test_infer_run_and_segment(self):
+        self._add_scripts_path()
+        from video_index_refresh import _infer_run_and_segment
+        run_id, seg_id = _infer_run_and_segment(Path("V_RAY-99_intro_aabb.mp4"))
+        self.assertEqual(run_id, "RAY-99")
+        self.assertEqual(seg_id, "intro")
+
+    def test_cli_empty_state(self):
+        self._add_scripts_path()
+        from video_index_refresh import main
+        with tempfile.TemporaryDirectory() as td:
+            rc = main(["--state-dir", td, "--dry-run"])
+            self.assertEqual(rc, 0)
+
+
+# ---------------------------------------------------------------------------
+# QC Banner tests
+# ---------------------------------------------------------------------------
+
+class TestQCBanner(unittest.TestCase):
+    """Tests for build_qc_banner drift summary."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_no_rows(self):
+        self._add_scripts_path()
+        from doctor_report import build_qc_banner
+        banner = build_qc_banner([])
+        self.assertIn("No timeline rows", banner)
+
+    def test_no_probed_segments(self):
+        self._add_scripts_path()
+        from doctor_report import build_qc_banner, TimelineRow
+        rows = [
+            TimelineRow(0, "s1", "product", 0.0, 5.0, 5.0, "/x.mp4", "MISSING", 0.0, 0.0, 0.0),
+        ]
+        banner = build_qc_banner(rows)
+        self.assertIn("No probed", banner)
+
+    def test_ok_drift(self):
+        self._add_scripts_path()
+        from doctor_report import build_qc_banner, TimelineRow
+        rows = [
+            TimelineRow(0, "s1", "product", 0.0, 5.0, 5.0, "/x.mp4", "READY", 5.05, 0.05, 0.05),
+            TimelineRow(1, "s2", "product", 5.0, 10.0, 5.0, "/y.mp4", "READY", 4.98, -0.02, 0.03),
+        ]
+        banner = build_qc_banner(rows)
+        self.assertIn("OK", banner)
+
+    def test_warning_drift(self):
+        self._add_scripts_path()
+        from doctor_report import build_qc_banner, TimelineRow
+        rows = [
+            TimelineRow(0, "s1", "product", 0.0, 5.0, 5.0, "/x.mp4", "READY", 5.7, 0.7, 0.7),
+        ]
+        banner = build_qc_banner(rows)
+        self.assertIn("WARNING", banner)
+
+    def test_critical_drift(self):
+        self._add_scripts_path()
+        from doctor_report import build_qc_banner, TimelineRow
+        rows = [
+            TimelineRow(0, "s1", "product", 0.0, 5.0, 5.0, "/x.mp4", "READY", 6.5, 1.5, 1.5),
+        ]
+        banner = build_qc_banner(rows)
+        self.assertIn("CRITICAL", banner)
+
+    def test_banner_shows_worst_segment(self):
+        self._add_scripts_path()
+        from doctor_report import build_qc_banner, TimelineRow
+        rows = [
+            TimelineRow(0, "intro", "intro", 0.0, 3.0, 3.0, "/a.mp4", "READY", 3.1, 0.1, 0.1),
+            TimelineRow(1, "p1", "product", 3.0, 15.0, 12.0, "/b.mp4", "READY", 13.2, 1.2, 1.3),
+        ]
+        banner = build_qc_banner(rows)
+        self.assertIn("p1", banner)
+
+
+# ---------------------------------------------------------------------------
+# validate_video_file Optional duration tests
+# ---------------------------------------------------------------------------
+
+class TestValidateVideoFileOptionalDuration(unittest.TestCase):
+    """Tests for validate_video_file with target_duration_sec=None."""
+
+    def test_none_duration_skips_check(self):
+        from lib.dzine_handoff import validate_video_file
+        # With target=None, only size/probe matter, not duration mismatch
+        r = validate_video_file(
+            Path("/tmp/nonexistent_video_opt.mp4"),
+            target_duration_sec=None,
+        )
+        self.assertFalse(r.ok)
+        self.assertEqual(r.reason, "missing_file")
+
+    def test_zero_duration_also_skips(self):
+        from lib.dzine_handoff import validate_video_file
+        # target=0.0 should also skip duration check (backwards compat)
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tiny.mp4"
+            p.write_bytes(b"x" * 100)
+            r = validate_video_file(p, target_duration_sec=0.0, min_bytes=50)
+            # Will fail on ffprobe (not real mp4), but NOT on duration mismatch
+            self.assertIn(r.reason, ("ffprobe_failed", None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

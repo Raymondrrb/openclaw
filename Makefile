@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc maintenance maintenance-apply
 
 # --- Morning routine ---
 doctor:
@@ -111,3 +111,39 @@ clean-zombies:
 
 clean-zombies-delete:
 	python3 scripts/doctor_cleanup.py --delete --older-than-hours 48 --min-size-kb 500 --keep-last-n 2
+
+# --- Index refresh + repair ---
+index-refresh:
+	python3 scripts/video_index_refresh.py --state-dir state
+
+index-refresh-force:
+	python3 scripts/video_index_refresh.py --state-dir state --force
+
+# --- Orphan cleanup (dry-run vs apply) ---
+clean-orphans:
+	python3 scripts/doctor_cleanup.py --dry-run
+
+clean-orphans-apply:
+	python3 scripts/doctor_cleanup.py --quarantine --older-than-hours 6 --keep-last-n 2
+
+# --- QC (timeline + drift banner) ---
+qc:
+	python3 scripts/doctor_report.py --state-dir state --qc
+
+# --- Maintenance (safe + apply) ---
+# SAFE MODE: refresh + dry-run reports. Does not remove or modify anything.
+maintenance: index-refresh clean-orphans report
+	@echo ""
+	@echo "Maintenance (SAFE) complete: refresh + dry-run cleanup + report."
+
+# APPLY MODE: refresh + quarantine orphans. Requires CONFIRM=YES.
+maintenance-apply:
+	@if [ "$(CONFIRM)" != "YES" ]; then \
+		echo "To apply maintenance, use: make maintenance-apply CONFIRM=YES"; \
+		exit 2; \
+	fi
+	$(MAKE) index-refresh
+	$(MAKE) clean-orphans-apply
+	$(MAKE) report
+	@echo ""
+	@echo "Maintenance-apply complete: refresh + orphan quarantine + report."
