@@ -204,6 +204,25 @@ def _infer_run_and_segment(p: Path) -> Tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Environment fingerprint
+# ---------------------------------------------------------------------------
+
+def _env_fingerprint() -> dict:
+    """Minimal environment fingerprint for history entries."""
+    try:
+        from _env_fingerprint import env_fingerprint
+        return env_fingerprint()
+    except ImportError:
+        import platform
+        return {
+            "hostname": platform.node() or "unknown",
+            "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            "platform": sys.platform,
+            "cwd": os.getcwd(),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Stability + root helpers
 # ---------------------------------------------------------------------------
 
@@ -343,6 +362,7 @@ def refresh_index(
                 "did_change": did_change,
                 "force": force,
                 "allow_missing_sha8": allow_missing_sha8,
+                "env": _env_fingerprint(),
             })
             meta_info["refresh_history"] = history[-10:]
             _atomic_write_json(index_path, idx)
@@ -439,6 +459,8 @@ def _process_one_file(
         "segment_id": existing.get("segment_id") or segment_id,
         "file_bytes": current_size,
         "file_mtime_ns": current_mtime_ns,
+        "inode": st.st_ino,
+        "device": st.st_dev,
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
     })
     # Defensive update: only overwrite probe fields if value is not None.

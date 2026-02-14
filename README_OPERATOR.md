@@ -218,6 +218,10 @@ make maintenance
 make index-repair              # dry-run: marks entries
 make index-repair-apply CONFIRM=YES  # apply: moves to bucket
 
+# Resurrect (restore entries from dangling_items bucket)
+make index-resurrect           # dry-run: report eligible
+make index-resurrect-apply CONFIRM=YES  # apply: restore to items
+
 # Telegram notifications
 make notify MSG="hello"        # send arbitrary message
 make status-notify             # run status + send summary

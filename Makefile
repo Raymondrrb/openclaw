@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply
 
 # --- Morning routine ---
 doctor:
@@ -129,6 +129,17 @@ index-repair-apply:
 		exit 2; \
 	fi
 	python3 scripts/doctor_index_repair.py --state-dir state --apply
+
+# --- Dangling index resurrect (restore from bucket) ---
+index-resurrect:
+	python3 scripts/doctor_index_resurrect.py --state-dir state
+
+index-resurrect-apply:
+	@if [ "$(CONFIRM)" != "YES" ]; then \
+		echo "To apply resurrect, use: make index-resurrect-apply CONFIRM=YES"; \
+		exit 2; \
+	fi
+	python3 scripts/doctor_index_resurrect.py --state-dir state --apply
 
 # --- Orphan cleanup (dry-run vs apply) ---
 clean-orphans:

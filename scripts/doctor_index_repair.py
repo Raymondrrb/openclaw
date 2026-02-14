@@ -5,15 +5,20 @@ Definitions:
   - "Dangling" = index entry whose file no longer exists on disk
   - Separate from orphans (file exists but not in index)
 
+Dangling reasons (classified for operator action):
+  - missing_path:     entry has no "path" field at all
+  - missing_file:     path resolves but file doesn't exist (double-checked)
+  - permission_denied: file exists but stat() fails (env problem, don't touch)
+  - outside_root:     path resolves outside state_root (suspicious/stale)
+
 Strategy:
   - Default: dry-run — marks entries with dangling=True (no removal)
   - --apply: moves dangling entries to idx["dangling_items"] bucket
   - --apply --delete: removes dangling entries entirely (no bucket)
-  - Uses advisory file lock (same as video_index_refresh) to prevent
-    concurrent read-modify-write races
-  - Resolves relative paths via state_root before declaring "dangling"
-    (reduces false positives when CWD differs from original run)
-  - repair_history ring buffer in meta_info
+  - Uses advisory file lock (same as video_index_refresh)
+  - Resolves relative paths via state_root (reduces false positives)
+  - Double-checks missing_file with 0.5s sleep (filesystem flicker guard)
+  - repair_history ring buffer with env fingerprint in meta_info
 
 Usage:
     python3 scripts/doctor_index_repair.py --state-dir state
@@ -48,7 +53,7 @@ DEFAULT_INDEX_PATH = DEFAULT_STATE_DIR / "video" / "index.json"
 
 
 # ---------------------------------------------------------------------------
-# Atomic JSON I/O (same as video_index_refresh)
+# Atomic JSON I/O
 # ---------------------------------------------------------------------------
 
 def _atomic_write_json(path: Path, data: dict) -> None:
@@ -111,6 +116,38 @@ def _index_lock(index_path: Path, timeout: float = 10.0):
 
 
 # ---------------------------------------------------------------------------
+# Root guard
+# ---------------------------------------------------------------------------
+
+def _is_under_root(p: Path, root: Path) -> bool:
+    """Check if resolved path is under root directory."""
+    try:
+        p.expanduser().resolve().relative_to(root.expanduser().resolve())
+        return True
+    except ValueError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Environment fingerprint
+# ---------------------------------------------------------------------------
+
+def _env_fingerprint() -> Dict[str, str]:
+    """Minimal environment fingerprint for history entries."""
+    try:
+        from _env_fingerprint import env_fingerprint
+        return env_fingerprint()
+    except ImportError:
+        import platform
+        return {
+            "hostname": platform.node() or "unknown",
+            "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            "platform": sys.platform,
+            "cwd": os.getcwd(),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Repair logic
 # ---------------------------------------------------------------------------
 
@@ -118,14 +155,21 @@ def repair_dangling(
     index_path: Path = DEFAULT_INDEX_PATH,
     apply: bool = False,
     move_to_bucket: bool = True,
+    double_check_sleep: float = 0.5,
 ) -> Dict[str, Any]:
     """Detect and handle dangling index entries.
+
+    Classification of dangling reasons:
+      - missing_path:      entry has no "path" field
+      - missing_file:      path resolves but file doesn't exist (double-checked)
+      - permission_denied:  file may exist but stat() fails (don't touch)
+      - outside_root:      path resolves outside state_root (suspicious)
 
     Args:
         index_path: Path to index.json.
         apply: If True, remove dangling entries from items.
         move_to_bucket: If True (and apply), move to dangling_items bucket.
-            If False (and apply), delete entries entirely.
+        double_check_sleep: Seconds to wait before second existence check.
 
     Returns:
         Dict with repair stats.
@@ -136,6 +180,8 @@ def repair_dangling(
         "dangling_found": 0,
         "dangling_missing_path": 0,
         "dangling_missing_file": 0,
+        "dangling_permission_denied": 0,
+        "dangling_outside_root": 0,
         "apply": apply,
         "entries": [],
     }
@@ -172,11 +218,41 @@ def repair_dangling(
                 if not p.is_absolute():
                     p = state_root / p
                 path = p.resolve()
-                if not path.exists():
-                    reason = "missing_file"
-                    stats["dangling_missing_file"] += 1
+
+                # Guard: reject paths that escape root after resolve
+                if not _is_under_root(path, state_root):
+                    reason = "outside_root"
+                    stats["dangling_outside_root"] += 1
+                else:
+                    # Check existence with permission awareness
+                    try:
+                        exists = path.exists()
+                    except PermissionError:
+                        reason = "permission_denied"
+                        stats["dangling_permission_denied"] += 1
+
+                    if reason is None and not exists:
+                        # Double-check: filesystem may flicker (mount, sync, sleep)
+                        time.sleep(double_check_sleep)
+                        try:
+                            exists = path.exists()
+                        except PermissionError:
+                            reason = "permission_denied"
+                            stats["dangling_permission_denied"] += 1
+                        if reason is None and not exists:
+                            reason = "missing_file"
+                            stats["dangling_missing_file"] += 1
 
             if reason is None:
+                continue
+
+            # permission_denied is informational — never remove these
+            if reason == "permission_denied":
+                meta["dangling"] = True
+                meta["dangling_reason"] = reason
+                meta["dangling_at"] = now
+                stats["dangling_found"] += 1
+                stats["entries"].append((sha8, reason))
                 continue
 
             stats["dangling_found"] += 1
@@ -200,7 +276,7 @@ def repair_dangling(
         for k in keys_to_remove:
             items.pop(k, None)
 
-        # Persist repair_history
+        # Persist repair_history with env fingerprint
         history = meta_info.get("repair_history", [])
         history.append({
             "at": now,
@@ -208,8 +284,11 @@ def repair_dangling(
             "dangling_found": stats["dangling_found"],
             "dangling_missing_path": stats["dangling_missing_path"],
             "dangling_missing_file": stats["dangling_missing_file"],
+            "dangling_permission_denied": stats["dangling_permission_denied"],
+            "dangling_outside_root": stats["dangling_outside_root"],
             "apply": apply,
             "mode": "move_to_bucket" if move_to_bucket else "delete",
+            "env": _env_fingerprint(),
         })
         meta_info["repair_history"] = history[-10:]
 
@@ -257,6 +336,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"    missing_path: {stats['dangling_missing_path']}")
     if stats["dangling_missing_file"] > 0:
         print(f"    missing_file: {stats['dangling_missing_file']}")
+    if stats["dangling_permission_denied"] > 0:
+        print(f"    permission_denied: {stats['dangling_permission_denied']} (not removed)")
+    if stats["dangling_outside_root"] > 0:
+        print(f"    outside_root: {stats['dangling_outside_root']}")
 
     if stats["entries"]:
         print("\n  Dangling entries:")
