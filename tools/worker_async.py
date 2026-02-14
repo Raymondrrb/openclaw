@@ -563,6 +563,20 @@ async def worker_main(
                 return ExitCode.ERROR
             continue
 
+        # 2b. Detect recovery (checkpoint exists = previously owned this run)
+        ckpt = load_checkpoint(cfg, run_id)
+        is_recovery = bool(ckpt["completed_steps"])
+        if is_recovery:
+            print(
+                f"[worker] RECOVERY: run=...{run_id[-8:]} "
+                f"resuming from {ckpt['completed_steps']}",
+            )
+            await log_event(rpc_client, run_id, "worker_recovered", {
+                "worker_id": cfg.worker_id,
+                "resumed_from_stage": ckpt.get("stage", "unknown"),
+                "completed_steps": ckpt["completed_steps"],
+            })
+
         # 3. Start heartbeat
         stop_signal = asyncio.Event()
         hb_task = asyncio.create_task(

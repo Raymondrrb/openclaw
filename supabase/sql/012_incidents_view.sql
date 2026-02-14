@@ -1,11 +1,13 @@
--- 012 — incidents_last_24h view + worker_state constraint + health indexes.
+-- 012 — incidents views + worker_state constraint + health indexes.
 -- Run in Supabase SQL Editor after 011_run_events_sre_hardening.sql.
 --
 -- Adds:
 --   - incidents_last_24h VIEW: actionable dashboard in one SELECT
+--   - incidents_critical_open VIEW: only CRITICAL/ERROR/stale/panic (Doctor source of truth)
 --   - worker_state CHECK constraint (prevents typos: idle/active/waiting/panic)
 --   - idx_runs_health_focus: partial index for active/waiting/panic workers
 --   - idx_run_events_recent: general recent-events index
+--   - idx_run_events_severity_priority: functional index for severity-first ordering
 --
 -- Idempotent: safe to run multiple times.
 
@@ -171,3 +173,49 @@ ORDER BY
   END,
   le.last_event_at DESC NULLS LAST,
   r.updated_at DESC;
+
+-- ==========================================================================
+-- 5. incidents_critical_open VIEW (Doctor source of truth for exit code)
+-- ==========================================================================
+--
+-- Only actionable items: CRITICAL, ERROR, stale, or panic.
+-- Excludes terminal runs (done/failed/aborted/cancelled).
+-- Perfect for: Doctor exit code, Telegram daily summary, mobile triage.
+
+CREATE OR REPLACE VIEW incidents_critical_open AS
+SELECT
+    run_id,
+    worker_id,
+    worker_state,
+    status,
+    top_severity,
+    last_reason_key,
+    is_stale,
+    last_heartbeat_at,
+    last_heartbeat_latency_ms,
+    lock_expires_at
+FROM incidents_last_24h
+WHERE (
+        top_severity IN ('CRITICAL', 'ERROR')
+        OR is_stale = true
+        OR worker_state = 'panic'
+      )
+  AND status NOT IN ('done', 'failed', 'aborted', 'cancelled');
+
+-- ==========================================================================
+-- 6. Functional index: severity priority ordering
+-- ==========================================================================
+--
+-- Speeds up ORDER BY severity-rank queries (dashboard, Doctor).
+-- COALESCE handles NULL severity gracefully.
+
+CREATE INDEX IF NOT EXISTS idx_run_events_severity_priority
+ON run_events (
+  CASE upper(COALESCE(severity, 'INFO'))
+    WHEN 'CRITICAL' THEN 4
+    WHEN 'ERROR'    THEN 3
+    WHEN 'WARN'     THEN 2
+    ELSE 1
+  END DESC,
+  occurred_at DESC
+);
