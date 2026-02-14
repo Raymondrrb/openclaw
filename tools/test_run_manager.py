@@ -11290,6 +11290,198 @@ class TestProductBrollContract(unittest.TestCase):
         self.assertEqual(stb["cta"], "Link in description")
 
 
+# ── product asset fetch + truth cache integration tests ──────────────────────
+
+class TestProductAssetFetchCache(unittest.TestCase):
+    """Tests for TruthCache integration in product_asset_fetch.py."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "run"
+        self.run_dir.mkdir()
+        self.products_dir = self.run_dir / "products"
+        self.products_dir.mkdir()
+        self.library_dir = Path(self.td) / "library"
+        self.library_dir.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _write_products_json(self, items):
+        from rayvault.product_asset_fetch import atomic_write_json
+        atomic_write_json(
+            self.products_dir / "products.json",
+            {"items": items},
+        )
+
+    def _seed_cache(self, asin, with_image=True, with_meta=True):
+        """Pre-populate truth cache for an ASIN."""
+        from rayvault.truth_cache import TruthCache
+        cache = TruthCache(self.library_dir)
+        meta = {"title": f"Cached {asin}", "asin": asin} if with_meta else None
+        imgs = []
+        if with_image:
+            img = Path(self.td) / f"cached_{asin}.jpg"
+            img.write_bytes(b"\xff\xd8\xff" + b"\x00" * 3000)
+            # Rename to 01_main.jpg for the cache
+            dest = Path(self.td) / "01_main.jpg"
+            import shutil
+            shutil.copy2(str(img), str(dest))
+            imgs = [dest]
+        cache.put_from_fetch(asin, meta, imgs)
+
+    def test_cache_hit_skips_download(self):
+        """When cache has fresh images, no download needed."""
+        self._seed_cache("B0CACHED")
+        self._write_products_json([
+            {"rank": 1, "asin": "B0CACHED", "title": "Cached Product",
+             "image_urls": ["https://example.com/img.jpg"]},
+        ])
+        from rayvault.product_asset_fetch import run_product_fetch
+        result = run_product_fetch(self.run_dir, library_dir=self.library_dir)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.cache_hits, 1)
+        self.assertEqual(result.downloaded, 0)
+        # Image should be materialized from cache
+        src = self.products_dir / "p01" / "source_images"
+        self.assertTrue(any(f.name.startswith("01_main") for f in src.iterdir()))
+
+    def test_no_cache_flag_skips_cache(self):
+        """library_dir=None disables cache entirely."""
+        self._seed_cache("B0SKIP")
+        self._write_products_json([
+            {"rank": 1, "asin": "B0SKIP", "title": "Uncached Product",
+             "image_urls": ["https://example.com/img.jpg"]},
+        ])
+        # Pre-create image to avoid network
+        src = self.products_dir / "p01" / "source_images"
+        src.mkdir(parents=True)
+        (src / "01_main.jpg").write_bytes(b"\xff\xd8" * 2000)
+        from rayvault.product_asset_fetch import run_product_fetch
+        result = run_product_fetch(self.run_dir, library_dir=None)
+        self.assertEqual(result.cache_hits, 0)
+        self.assertEqual(result.skipped, 1)
+
+    def test_cache_miss_falls_through_to_download(self):
+        """Cache miss with pre-existing images still works."""
+        self._write_products_json([
+            {"rank": 1, "asin": "B0MISS", "title": "Miss Product",
+             "image_urls": ["https://example.com/img.jpg"]},
+        ])
+        # Pre-create image to simulate previous download
+        src = self.products_dir / "p01" / "source_images"
+        src.mkdir(parents=True)
+        (src / "01_main.jpg").write_bytes(b"\xff\xd8" * 2000)
+        from rayvault.product_asset_fetch import run_product_fetch
+        result = run_product_fetch(self.run_dir, library_dir=self.library_dir)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.cache_hits, 0)
+        self.assertEqual(result.skipped, 1)  # image already existed in run dir
+
+    def test_cache_stores_after_download(self):
+        """After downloading, images are stored in cache for next run."""
+        self._write_products_json([
+            {"rank": 1, "asin": "B0STORE", "title": "Store Product",
+             "image_urls": ["https://example.com/img.jpg"]},
+        ])
+        # Pre-create image to simulate successful download
+        src = self.products_dir / "p01" / "source_images"
+        src.mkdir(parents=True)
+        (src / "01_main.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 3000)
+        from rayvault.product_asset_fetch import run_product_fetch
+        run_product_fetch(self.run_dir, library_dir=self.library_dir)
+        # Verify cache now has this ASIN
+        from rayvault.truth_cache import TruthCache
+        cache = TruthCache(self.library_dir)
+        self.assertTrue(cache.has_main_image("B0STORE"))
+
+    def test_manifest_records_cache_stats(self):
+        """Manifest should include cache_hits and library_dir."""
+        self._seed_cache("B0STATS")
+        self._write_products_json([
+            {"rank": 1, "asin": "B0STATS", "title": "Stats Product",
+             "image_urls": ["https://example.com/img.jpg"]},
+        ])
+        from rayvault.product_asset_fetch import run_product_fetch, atomic_write_json
+        atomic_write_json(self.run_dir / "00_manifest.json", {"run_id": "TEST", "status": "INIT"})
+        run_product_fetch(self.run_dir, library_dir=self.library_dir)
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        self.assertEqual(m["products"]["cache_hits"], 1)
+        self.assertIn("library_dir", m["products"])
+
+    def test_cache_hit_product_summary_has_source(self):
+        """Products from cache should be marked with source='cache'."""
+        self._seed_cache("B0SRC")
+        self._write_products_json([
+            {"rank": 1, "asin": "B0SRC", "title": "Src Product",
+             "image_urls": ["https://example.com/img.jpg"]},
+        ])
+        from rayvault.product_asset_fetch import run_product_fetch, atomic_write_json, load_manifest
+        atomic_write_json(self.run_dir / "00_manifest.json", {"run_id": "TEST", "status": "INIT"})
+        run_product_fetch(self.run_dir, library_dir=self.library_dir)
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        summary = m.get("products_summary", [])
+        self.assertGreater(len(summary), 0)
+        self.assertEqual(summary[0]["source"], "cache")
+
+    def test_multiple_products_mixed_cache(self):
+        """Some products from cache, others need download."""
+        self._seed_cache("B0A1")
+        # B0B2 NOT in cache
+        self._write_products_json([
+            {"rank": 1, "asin": "B0A1", "title": "Cached One",
+             "image_urls": ["https://example.com/a.jpg"]},
+            {"rank": 2, "asin": "B0B2", "title": "Fresh Two",
+             "image_urls": ["https://example.com/b.jpg"]},
+        ])
+        # Pre-create image for rank 2 to avoid network
+        src = self.products_dir / "p02" / "source_images"
+        src.mkdir(parents=True)
+        (src / "01_main.jpg").write_bytes(b"\xff\xd8" * 2000)
+        from rayvault.product_asset_fetch import run_product_fetch
+        result = run_product_fetch(self.run_dir, library_dir=self.library_dir)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.cache_hits, 1)
+        self.assertEqual(result.skipped, 1)  # rank 2 image already there
+
+    def test_fetch_result_cache_hits_field(self):
+        from rayvault.product_asset_fetch import FetchResult
+        r = FetchResult(ok=True, downloaded=1, skipped=2, errors=0, cache_hits=3)
+        self.assertEqual(r.cache_hits, 3)
+
+    def test_qc_initialized_on_cache_hit(self):
+        """qc.json should be created even when product comes from cache."""
+        self._seed_cache("B0QC")
+        self._write_products_json([
+            {"rank": 1, "asin": "B0QC", "title": "QC Product",
+             "image_urls": ["https://example.com/img.jpg"]},
+        ])
+        from rayvault.product_asset_fetch import run_product_fetch
+        run_product_fetch(self.run_dir, library_dir=self.library_dir)
+        self.assertTrue((self.products_dir / "p01" / "qc.json").exists())
+
+    def test_metadata_stored_in_cache(self):
+        """Product metadata (including bullets) should be stored in cache."""
+        self._write_products_json([
+            {"rank": 1, "asin": "B0META", "title": "Meta Product",
+             "bullets": ["Waterproof IPX7", "8 hours battery"],
+             "image_urls": ["https://example.com/img.jpg"]},
+        ])
+        # Pre-create image
+        src = self.products_dir / "p01" / "source_images"
+        src.mkdir(parents=True)
+        (src / "01_main.jpg").write_bytes(b"\xff\xd8" * 2000)
+        from rayvault.product_asset_fetch import run_product_fetch
+        run_product_fetch(self.run_dir, library_dir=self.library_dir)
+        from rayvault.truth_cache import TruthCache
+        cache = TruthCache(self.library_dir)
+        cached = cache.get_cached("B0META")
+        self.assertIn("meta", cached)
+        self.assertIn("bullets", cached["meta"])
+        self.assertEqual(len(cached["meta"]["bullets"]), 2)
+
+
 # ── cleanup_run tests ────────────────────────────────────────────────────────
 
 class TestCleanupRun(unittest.TestCase):

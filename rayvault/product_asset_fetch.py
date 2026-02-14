@@ -4,11 +4,17 @@
 Turns `state/runs/{run_id}/products/products.json` into a fully materialized
 product asset bundle with source images, hashes, and QC placeholders.
 
+Uses TruthCache (state/library/) for ASIN-keyed caching:
+  1. Check cache first -- if fresh, materialize from cache (no network)
+  2. On miss/stale -- download from Amazon, store in cache, then materialize
+  3. On download failure -- fall back to stale cache if available
+
 Golden rule: never invent product visuals. Only cache Amazon truth.
 
 Usage:
     python3 -m rayvault.product_asset_fetch --run-dir state/runs/RUN_2026_02_14_A
     python3 -m rayvault.product_asset_fetch --run-dir state/runs/RUN_2026_02_14_A --dry-run
+    python3 -m rayvault.product_asset_fetch --run-dir state/runs/RUN_2026_02_14_A --no-cache
 
 Output per product rank N:
     products/p0N/
@@ -180,28 +186,88 @@ class FetchResult:
     downloaded: int
     skipped: int
     errors: int
+    cache_hits: int = 0
     notes: List[str] = field(default_factory=list)
+
+
+def _build_product_meta(it: Dict[str, Any], rank: int) -> Dict[str, Any]:
+    """Build normalized product metadata dict for cache and product.json."""
+    return {
+        "rank": rank,
+        "asin": str(it.get("asin", "")).strip(),
+        "title": str(it.get("title", "")).strip(),
+        "brand": it.get("brand"),
+        "category": it.get("category"),
+        "price_text": it.get("price_text"),
+        "affiliate_url": it.get("affiliate_url"),
+        "canonical_url": it.get("canonical_url"),
+        "image_urls": it.get("image_urls", []),
+        "hires_image_urls": it.get("hires_image_urls", []),
+        "bullets": it.get("bullets") or it.get("bullet_points") or [],
+        "description": it.get("description"),
+        "claims_allowed": it.get("claims_allowed", []),
+        "claims_forbidden": it.get("claims_forbidden", []),
+    }
+
+
+def _try_cache_materialize(
+    cache: Any,
+    asin: str,
+    pdir: Path,
+) -> bool:
+    """Try to materialize product from cache. Returns True if successful."""
+    need = cache.needs_refresh(asin)
+    if need["has_images"] and need["images_fresh"]:
+        result = cache.materialize_to_run(asin, pdir)
+        return result.get("ok", False)
+    return False
+
+
+def _try_cache_fallback(
+    cache: Any,
+    asin: str,
+    pdir: Path,
+) -> bool:
+    """Fall back to stale cache on download failure. Returns True if any assets available."""
+    need = cache.needs_refresh(asin)
+    if need["has_images"]:
+        result = cache.materialize_to_run(asin, pdir)
+        return result.get("ok", False)
+    return False
 
 
 def run_product_fetch(
     run_dir: Path,
     max_images_per_product: int = 6,
     dry_run: bool = False,
+    library_dir: Optional[Path] = None,
 ) -> FetchResult:
-    """Fetch product images into run_dir/products/p0N/source_images/."""
+    """Fetch product images into run_dir/products/p0N/source_images/.
+
+    If library_dir is provided, uses TruthCache for ASIN-keyed caching:
+      1. Fresh cache hit → materialize from cache, skip network
+      2. Cache miss/stale → download from Amazon, store in cache, materialize
+      3. Download failure → fall back to stale cache if available
+    """
     products_dir = run_dir / "products"
     products_json = products_dir / "products.json"
 
     if not products_json.exists():
-        return FetchResult(False, 0, 0, 1, [f"missing {products_json}"])
+        return FetchResult(False, 0, 0, 1, 0, [f"missing {products_json}"])
 
-    downloaded = skipped = errors = 0
+    # Initialize cache if library_dir provided
+    cache = None
+    if library_dir is not None:
+        from rayvault.truth_cache import TruthCache, CachePolicy
+        cache = TruthCache(library_dir, CachePolicy())
+
+    downloaded = skipped = errors = cache_hits = 0
     notes: List[str] = []
 
     data = read_json(products_json)
     items = data.get("items") or []
     if not isinstance(items, list) or not items:
-        return FetchResult(False, 0, 0, 1, ["products.json has no items[]"])
+        return FetchResult(False, 0, 0, 1, 0, ["products.json has no items[]"])
 
     # Sort by rank
     def _rank(it: Dict[str, Any]) -> int:
@@ -232,44 +298,56 @@ def run_product_fetch(
         src_dir.mkdir(parents=True, exist_ok=True)
         broll_dir.mkdir(parents=True, exist_ok=True)
 
+        # Build product metadata
+        product_meta = _build_product_meta(it, rank)
+
         # Write product.json (normalized)
         if not dry_run:
-            atomic_write_json(
-                pdir / "product.json",
-                {
-                    "rank": rank,
-                    "asin": asin,
-                    "title": title,
-                    "brand": it.get("brand"),
-                    "category": it.get("category"),
-                    "price_text": it.get("price_text"),
-                    "affiliate_url": it.get("affiliate_url"),
-                    "canonical_url": it.get("canonical_url"),
-                    "image_urls": it.get("image_urls", []),
-                    "hires_image_urls": it.get("hires_image_urls", []),
-                    "claims_allowed": it.get("claims_allowed", []),
-                    "claims_forbidden": it.get("claims_forbidden", []),
-                },
-            )
+            atomic_write_json(pdir / "product.json", product_meta)
 
-        # Fetch images
+        # --- Cache-first path ---
+        if cache and not dry_run:
+            # Store metadata in cache (always, for claims guardrail)
+            cache.put_from_fetch(asin, product_meta, [], note="metadata_update")
+
+            if _try_cache_materialize(cache, asin, pdir):
+                cache_hits += 1
+                notes.append(f"rank {rank} asin {asin}: cache hit")
+                products_summary.append({
+                    "rank": rank, "asin": asin, "title": title,
+                    "fidelity": "UNKNOWN", "broll": "PENDING",
+                    "source": "cache",
+                })
+                # Initialize qc.json if missing
+                _init_qc(pdir, asin, dry_run)
+                continue
+
+        # --- Network fetch path ---
         urls = pick_urls(it)
         if not urls:
+            # No URLs — try stale cache fallback
+            if cache and not dry_run and _try_cache_fallback(cache, asin, pdir):
+                cache_hits += 1
+                notes.append(f"rank {rank} asin {asin}: no urls, stale cache used")
+                products_summary.append({
+                    "rank": rank, "asin": asin, "title": title,
+                    "fidelity": "UNKNOWN", "broll": "PENDING",
+                    "source": "stale_cache",
+                })
+                _init_qc(pdir, asin, dry_run)
+                continue
+
             errors += 1
             notes.append(f"rank {rank} asin {asin}: no image urls")
-            products_summary.append(
-                {
-                    "rank": rank,
-                    "asin": asin,
-                    "title": title,
-                    "fidelity": "UNKNOWN",
-                    "broll": "NONE",
-                }
-            )
+            products_summary.append({
+                "rank": rank, "asin": asin, "title": title,
+                "fidelity": "UNKNOWN", "broll": "NONE",
+            })
             continue
 
         hashes: Dict[str, str] = {}
         got_any = False
+        downloaded_paths: List[Path] = []
         for idx, url in enumerate(
             urls[:max_images_per_product], start=1
         ):
@@ -281,6 +359,7 @@ def run_product_fetch(
                 skipped += 1
                 hashes[fname] = sha1_file(out_path)
                 got_any = True
+                downloaded_paths.append(out_path)
                 continue
 
             if dry_run:
@@ -294,41 +373,41 @@ def run_product_fetch(
                 downloaded += 1
                 got_any = True
                 hashes[fname] = sha1_file(out_path)
+                downloaded_paths.append(out_path)
             else:
                 errors += 1
                 notes.append(
                     f"rank {rank} {asin}: failed {url} ({reason})"
                 )
 
-        # Store hashes
-        if not dry_run:
+        # If download failed entirely, try stale cache
+        if not got_any and cache and not dry_run:
+            if _try_cache_fallback(cache, asin, pdir):
+                cache_hits += 1
+                got_any = True
+                notes.append(f"rank {rank} asin {asin}: download failed, stale cache used")
+
+        # Store successful downloads into cache
+        if cache and not dry_run and downloaded_paths:
+            cache.put_from_fetch(
+                asin, product_meta, downloaded_paths,
+                note="fetch", http_status=200,
+            )
+
+        # Store hashes in run dir
+        if not dry_run and hashes:
             atomic_write_json(src_dir / "hashes.json", hashes)
 
         # Initialize qc.json if missing
-        qc_path = pdir / "qc.json"
-        if not qc_path.exists() and not dry_run:
-            atomic_write_json(
-                qc_path,
-                {
-                    "asin": asin,
-                    "product_fidelity_result": "UNKNOWN",
-                    "method": "unreviewed",
-                    "checked_images": ["source_images/01_main.*"],
-                    "broll_method": "UNDECIDED",
-                    "fail_reason": None,
-                    "checked_at_utc": None,
-                },
-            )
+        _init_qc(pdir, asin, dry_run)
 
-        products_summary.append(
-            {
-                "rank": rank,
-                "asin": asin,
-                "title": title,
-                "fidelity": "UNKNOWN" if got_any else "MISSING_IMAGES",
-                "broll": "PENDING",
-            }
-        )
+        products_summary.append({
+            "rank": rank,
+            "asin": asin,
+            "title": title,
+            "fidelity": "UNKNOWN" if got_any else "MISSING_IMAGES",
+            "broll": "PENDING",
+        })
 
     # Update manifest (non-destructive)
     manifest = load_manifest(run_dir)
@@ -337,11 +416,33 @@ def run_product_fetch(
         products_summary=products_summary,
         list_path="products/products.json",
     )
+    if cache:
+        manifest.setdefault("products", {})
+        manifest["products"]["cache_hits"] = cache_hits
+        manifest["products"]["library_dir"] = str(library_dir)
     if not dry_run:
         atomic_write_json(run_dir / "00_manifest.json", manifest)
 
-    result_ok = errors == 0 or downloaded > 0
-    return FetchResult(result_ok, downloaded, skipped, errors, notes)
+    result_ok = errors == 0 or downloaded > 0 or cache_hits > 0
+    return FetchResult(result_ok, downloaded, skipped, errors, cache_hits, notes)
+
+
+def _init_qc(pdir: Path, asin: str, dry_run: bool) -> None:
+    """Initialize qc.json if missing."""
+    qc_path = pdir / "qc.json"
+    if not qc_path.exists() and not dry_run:
+        atomic_write_json(
+            qc_path,
+            {
+                "asin": asin,
+                "product_fidelity_result": "UNKNOWN",
+                "method": "unreviewed",
+                "checked_images": ["source_images/01_main.*"],
+                "broll_method": "UNDECIDED",
+                "fail_reason": None,
+                "checked_at_utc": None,
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +457,16 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--run-dir", required=True, help="state/runs/{run_id}")
     ap.add_argument("--max-images-per-product", type=int, default=6)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--library-dir",
+        default="state/library",
+        help="Truth cache library root (default: state/library)",
+    )
+    ap.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable truth cache, always download from network",
+    )
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir).expanduser().resolve()
@@ -363,14 +474,18 @@ def main(argv: Optional[list] = None) -> int:
         print(f"Run dir not found: {run_dir}", file=sys.stderr)
         return 2
 
+    library_dir = None if args.no_cache else Path(args.library_dir).expanduser().resolve()
+
     res = run_product_fetch(
         run_dir,
         max_images_per_product=args.max_images_per_product,
         dry_run=args.dry_run,
+        library_dir=library_dir,
     )
+    cache_info = f" cache_hits={res.cache_hits}" if res.cache_hits > 0 else ""
     print(
         f"product_asset_fetch: ok={res.ok} downloaded={res.downloaded} "
-        f"skipped={res.skipped} errors={res.errors}"
+        f"skipped={res.skipped} errors={res.errors}{cache_info}"
     )
     if res.notes:
         for n in res.notes[:10]:
