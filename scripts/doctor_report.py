@@ -498,6 +498,49 @@ def build_qc_banner(rows: List[TimelineRow]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Refresh history banner — last N refresh events from meta_info
+# ---------------------------------------------------------------------------
+
+def build_refresh_banner(state_dir: Path, last_n: int = 3) -> str:
+    """Build a refresh history banner from index meta_info."""
+    index_path = state_dir / "video" / "index.json"
+    idx = _read_json(index_path, default={})
+    meta = idx.get("meta_info", {})
+    history = meta.get("refresh_history", [])
+
+    if not history:
+        return "Refresh History: (no history yet — run `make index-refresh`)"
+
+    # Show last N entries (most recent last in ring buffer)
+    recent = history[-last_n:]
+    lines = ["Refresh History (last events):"]
+
+    for i, h in enumerate(recent, 1):
+        at = h.get("at", "?")[:19]  # trim to readable timestamp
+        enriched = h.get("enriched", 0)
+        probed = h.get("probed", 0)
+        failed = h.get("failed_probe", 0)
+        errors = h.get("item_error", 0)
+        unstable = h.get("skipped_unstable", 0)
+        did_change = h.get("did_change", False)
+
+        status = "OK"
+        if errors > 0 or failed > 0 or unstable > 0:
+            status = "WARN"
+        if errors > 3 or failed > 10:
+            status = "CRIT"
+
+        change_flag = "changed" if did_change else "no-change"
+        lines.append(
+            f"  {i}. {at} | {status} | "
+            f"enriched={enriched} probed={probed} failed={failed} "
+            f"err={errors} unstable={unstable} [{change_flag}]"
+        )
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Orphan search (delegates to dzine_handoff if available, else inline)
 # ---------------------------------------------------------------------------
 
@@ -723,6 +766,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("Status: ALL READY — no Dzine credits needed")
         else:
             print(f"Status: {missing} segments need rendering")
+
+        # Refresh history banner (last 3 events)
+        refresh_banner = build_refresh_banner(state_dir)
+        print(f"\n{refresh_banner}")
 
     if args.fail_if_needed_gt >= 0 and details["total_credits_needed"] > args.fail_if_needed_gt:
         return 2

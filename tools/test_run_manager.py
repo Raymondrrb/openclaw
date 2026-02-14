@@ -8589,5 +8589,191 @@ class TestDefensiveProbeUpdate(unittest.TestCase):
             self.assertEqual(entry["audio_codec"], "aac")
 
 
+# ---------------------------------------------------------------------------
+# File lock, stability gate, per-item error, state_root persistence
+# ---------------------------------------------------------------------------
+
+class TestIndexLock(unittest.TestCase):
+    """Tests for advisory file lock."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_lock_creates_lockfile(self):
+        self._add_scripts_path()
+        from video_index_refresh import _index_lock
+        with tempfile.TemporaryDirectory() as td:
+            idx_path = Path(td) / "index.json"
+            lock_path = idx_path.with_suffix(".json.lock")
+            with _index_lock(idx_path):
+                self.assertTrue(lock_path.exists())
+
+    def test_lock_is_reentrant_sequentially(self):
+        """Lock can be acquired again after release."""
+        self._add_scripts_path()
+        from video_index_refresh import _index_lock
+        with tempfile.TemporaryDirectory() as td:
+            idx_path = Path(td) / "index.json"
+            with _index_lock(idx_path):
+                pass
+            with _index_lock(idx_path):
+                pass  # Should not deadlock
+
+
+class TestFileStable(unittest.TestCase):
+    """Tests for _is_file_stable quick check."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_stable_file(self):
+        self._add_scripts_path()
+        from video_index_refresh import _is_file_stable
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "test.mp4"
+            f.write_bytes(b"x" * 100)
+            self.assertTrue(_is_file_stable(f, sleep_s=0.05))
+
+    def test_empty_file_unstable(self):
+        self._add_scripts_path()
+        from video_index_refresh import _is_file_stable
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "empty.mp4"
+            f.write_bytes(b"")
+            self.assertFalse(_is_file_stable(f, sleep_s=0.05))
+
+    def test_missing_file_unstable(self):
+        self._add_scripts_path()
+        from video_index_refresh import _is_file_stable
+        self.assertFalse(_is_file_stable(Path("/nonexistent"), sleep_s=0.05))
+
+
+class TestItemError(unittest.TestCase):
+    """Tests for per-item try/except (one bad file doesn't abort refresh)."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_bad_file_counted_as_item_error(self):
+        """A file that throws an exception is counted, not propagated."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            # Two valid files
+            v1 = final / "V_R1_s1_aabbccdd.mp4"
+            v1.write_bytes(b"x" * 500)
+            v2 = final / "V_R1_s2_11223344.mp4"
+            v2.write_bytes(b"x" * 500)
+
+            call_count = [0]
+            original_stable = None
+
+            def boom_on_second(*args, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 2:
+                    raise PermissionError("simulated permission error")
+                return True
+
+            with mock.patch("video_index_refresh._is_file_stable", side_effect=boom_on_second):
+                with mock.patch("video_index_refresh._ffprobe_json", return_value={
+                    "format": {"duration": "5.0", "bit_rate": "2000000"},
+                    "streams": [{"codec_type": "video", "codec_name": "h264"}],
+                }):
+                    stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
+            # One succeeded, one errored — refresh wasn't aborted
+            self.assertEqual(stats.item_error, 1)
+            self.assertGreaterEqual(stats.enriched, 1)
+
+
+class TestStateRootPersistence(unittest.TestCase):
+    """Tests for state_root persisted in meta_info."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_state_root_written_on_first_refresh(self):
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            with mock.patch("video_index_refresh._ffprobe_json", return_value={
+                "format": {"duration": "5.0", "bit_rate": "2000000"},
+                "streams": [{"codec_type": "video", "codec_name": "h264"}],
+            }):
+                refresh_index(final_dir=final, index_path=idx_path, force=True)
+            idx = _load_index(idx_path)
+            meta = idx.get("meta_info", {})
+            self.assertIn("state_root", meta)
+            # state_root should be td (parent.parent of video/index.json)
+            self.assertEqual(meta["state_root"], str(Path(td).resolve()))
+
+    def test_did_change_in_history(self):
+        """did_change flag reflects whether enriched > 0."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            with mock.patch("video_index_refresh._ffprobe_json", return_value={
+                "format": {"duration": "5.0", "bit_rate": "2000000"},
+                "streams": [{"codec_type": "video", "codec_name": "h264"}],
+            }):
+                refresh_index(final_dir=final, index_path=idx_path, force=True)
+            idx = _load_index(idx_path)
+            history = idx["meta_info"]["refresh_history"]
+            self.assertTrue(history[-1]["did_change"])
+
+    def test_skipped_unstable_in_history(self):
+        """skipped_unstable and item_error counters appear in history."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            with mock.patch("video_index_refresh._ffprobe_json", return_value={
+                "format": {"duration": "5.0", "bit_rate": "2000000"},
+                "streams": [],
+            }):
+                refresh_index(final_dir=final, index_path=idx_path, force=True)
+            idx = _load_index(idx_path)
+            entry = idx["meta_info"]["refresh_history"][-1]
+            self.assertIn("skipped_unstable", entry)
+            self.assertIn("item_error", entry)
+            self.assertIn("did_change", entry)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

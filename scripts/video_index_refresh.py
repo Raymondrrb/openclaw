@@ -6,14 +6,20 @@ and upserts enriched metadata into the video index. Incremental by default:
 only re-probes files whose (mtime_ns, file_size) pair changed since last refresh.
 
 Features:
+  - File lock: advisory flock prevents concurrent read-modify-write races
   - Incremental refresh via (mtime_ns, file_size) dual key (deterministic)
+  - Stability gate: skips files still being written (size changing)
   - --force: re-probe everything regardless of cache
   - --allow-missing-sha8: index legacy files without sha8 in filename
   - SHA8 validation: checks filename contains the indexed sha8
+  - Root guardrail: rejects files outside state root via relative_to()
   - Dedup: resolved-path dedup prevents double-indexing
   - Enriches: duration, bitrate, video_codec, audio_codec, file_bytes
+  - Defensive update: probe fields only overwrite if value is not None
+  - Per-item try/except: one bad file never aborts the entire refresh
   - Correct refreshed_at: UTC ISO timestamp (not file mtime)
   - refresh_history: ring buffer of last 10 refreshes in meta_info
+  - state_root persisted in meta_info (layout-agnostic)
 
 Usage:
     python3 scripts/video_index_refresh.py
@@ -34,6 +40,7 @@ import os
 import re
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +79,47 @@ def _load_index(index_path: Path) -> dict:
         return json.loads(index_path.read_text(encoding="utf-8"))
     except Exception:
         return {"version": "1.0", "items": {}}
+
+
+# ---------------------------------------------------------------------------
+# File lock — advisory flock for read-modify-write cycle
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _index_lock(index_path: Path, timeout: float = 10.0):
+    """Advisory file lock to prevent concurrent index corruption.
+
+    Uses fcntl.flock (Unix). Falls back to no-op on platforms without fcntl.
+    """
+    lock_path = index_path.with_suffix(".json.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+
+    fd = open(lock_path, "w")
+    try:
+        start = time.monotonic()
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() - start >= timeout:
+                    fd.close()
+                    raise TimeoutError(
+                        f"Could not acquire index lock within {timeout}s"
+                    )
+                time.sleep(0.5)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        fd.close()
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +204,7 @@ def _infer_run_and_segment(p: Path) -> Tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Core refresh logic
+# Stability + root helpers
 # ---------------------------------------------------------------------------
 
 def _is_under_root(p: Path, root: Path) -> bool:
@@ -168,6 +216,28 @@ def _is_under_root(p: Path, root: Path) -> bool:
         return False
 
 
+def _is_file_stable(path: Path, sleep_s: float = 0.3) -> bool:
+    """Quick stability check: verify file size hasn't changed.
+
+    Catches phantom files still being written (e.g. mid-download).
+    Single poll with short sleep — adds 0.3s only for files that
+    actually need probing (cached files are skipped before this).
+    """
+    try:
+        s1 = path.stat().st_size
+        if s1 == 0:
+            return False
+        time.sleep(sleep_s)
+        s2 = path.stat().st_size
+        return s1 == s2
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Core refresh logic
+# ---------------------------------------------------------------------------
+
 @dataclass
 class RefreshStats:
     """Statistics from an index refresh run."""
@@ -178,8 +248,10 @@ class RefreshStats:
     skipped_dedup: int = 0
     skipped_no_sha8: int = 0
     skipped_outside_root: int = 0
+    skipped_unstable: int = 0
     enriched: int = 0
     failed_probe: int = 0
+    item_error: int = 0
     sha8_mismatch: int = 0
 
 
@@ -195,6 +267,9 @@ def refresh_index(
     Incremental by default: only re-probes files whose (mtime_ns, file_size)
     pair changed since the last recorded values in the index entry.
 
+    Uses advisory file lock to prevent concurrent corruption.
+    Per-item try/except ensures one bad file never aborts the refresh.
+
     Args:
         final_dir: Directory containing final .mp4 files.
         index_path: Path to index.json.
@@ -205,133 +280,167 @@ def refresh_index(
     Returns:
         RefreshStats with counts of actions taken.
     """
-    idx = _load_index(index_path)
-    items = idx.setdefault("items", {})
     stats = RefreshStats()
 
     if not final_dir.exists():
         return stats
 
-    # Anchor state root from index_path layout (state/video/index.json → state/)
-    state_root = index_path.parent.parent.resolve()
+    with _index_lock(index_path):
+        idx = _load_index(index_path)
+        items = idx.setdefault("items", {})
 
-    mp4_files = sorted(final_dir.glob("*.mp4"))
-    stats.scanned = len(mp4_files)
+        # Anchor state root from index_path layout (state/video/index.json -> state/)
+        state_root = index_path.parent.parent.resolve()
 
-    seen_paths: set = set()
+        # Persist state_root in meta_info (layout-agnostic on future reads)
+        meta_info = idx.setdefault("meta_info", {})
+        declared_root = meta_info.get("state_root")
+        if declared_root:
+            state_root = Path(declared_root).resolve()
+        else:
+            meta_info["state_root"] = str(state_root)
 
-    for fp in mp4_files:
-        # Guard: skip non-files (symlinks to dirs, broken paths, etc.)
-        if not fp.is_file():
-            continue
+        mp4_files = sorted(final_dir.glob("*.mp4"))
+        stats.scanned = len(mp4_files)
 
-        # Guard: reject files outside state root (path traversal / stale symlink)
-        if not _is_under_root(fp, state_root):
-            stats.skipped_outside_root += 1
-            continue
+        seen_paths: set = set()
 
-        # Dedup: skip if we've already processed this resolved path
-        resolved = str(fp.resolve())
-        if resolved in seen_paths:
-            stats.skipped_dedup += 1
-            continue
-        seen_paths.add(resolved)
+        for fp in mp4_files:
+            try:
+                _process_one_file(
+                    fp, items, stats, seen_paths, state_root,
+                    force=force, allow_missing_sha8=allow_missing_sha8,
+                )
+            except Exception:
+                stats.item_error += 1
 
-        sha8 = _infer_sha8_from_filename(fp)
+        # Persist when any work was done (not just enriched > 0).
+        did_work = stats.probed > 0 or stats.enriched > 0 or force
+        did_change = stats.enriched > 0
 
-        # Gate: reject files without sha8 unless --allow-missing-sha8
-        if not sha8 and not allow_missing_sha8:
-            stats.skipped_no_sha8 += 1
-            continue
-
-        stats.checked += 1
-
-        # SHA8 validation: if file has sha8 in name and it's already indexed
-        # under a different sha8, flag mismatch
-        if sha8 and sha8 in items:
-            existing_path = items[sha8].get("path", "")
-            if existing_path and Path(existing_path).name != fp.name:
-                stats.sha8_mismatch += 1
-
-        # Determine the index key
-        key = sha8 if sha8 else fp.stem
-
-        # Incremental check: (mtime_ns, file_size) dual key
-        # Using mtime_ns avoids float precision thrash on macOS/APFS
-        existing = items.get(key, {})
-        st = fp.stat()
-        current_mtime_ns = st.st_mtime_ns
-        current_size = st.st_size
-
-        if not force:
-            if (existing.get("file_mtime_ns") == current_mtime_ns
-                    and existing.get("file_bytes") == current_size):
-                stats.skipped_mtime += 1
-                continue
-
-        # Probe
-        stats.probed += 1
-        meta = _ffprobe_json(fp)
-        if not meta:
-            stats.failed_probe += 1
-            continue
-
-        probe_data = _extract_probe_data(meta)
-        run_id, segment_id = _infer_run_and_segment(fp)
-
-        # Build enriched entry (merge with existing, don't overwrite user fields)
-        entry = {**existing}
-        entry.pop("file_mtime", None)  # migrate from old float key
-        entry.update({
-            "path": str(fp),
-            "run_id": existing.get("run_id") or run_id,
-            "segment_id": existing.get("segment_id") or segment_id,
-            "file_bytes": current_size,
-            "file_mtime_ns": current_mtime_ns,
-            "refreshed_at": datetime.now(timezone.utc).isoformat(),
-        })
-        # Defensive update: only overwrite probe fields if value is not None.
-        # Using `is not None` instead of truthy check — avoids ignoring
-        # valid 0.0 duration or 0 bitrate from edge-case probes.
-        if probe_data["duration"] is not None:
-            entry["duration"] = probe_data["duration"]
-        if probe_data["bitrate_bps"] is not None:
-            entry["bitrate_bps"] = probe_data["bitrate_bps"]
-        if probe_data["video_codec"] is not None:
-            entry["video_codec"] = probe_data["video_codec"]
-        if probe_data["audio_codec"] is not None:
-            entry["audio_codec"] = probe_data["audio_codec"]
-
-        items[key] = entry
-        stats.enriched += 1
-
-    # Persist when any work was done (not just enriched > 0).
-    # This ensures forensic telemetry is recorded even when all files
-    # were skipped or failed — exactly when you need the "why".
-    did_work = stats.probed > 0 or stats.enriched > 0 or force
-    if not dry_run and did_work:
-        # Append to refresh_history ring buffer (last 10)
-        meta_info = idx.get("meta_info", {})
-        history = meta_info.get("refresh_history", [])
-        history.append({
-            "at": datetime.now(timezone.utc).isoformat(),
-            "scanned": stats.scanned,
-            "checked": stats.checked,
-            "enriched": stats.enriched,
-            "failed_probe": stats.failed_probe,
-            "skipped_unchanged": stats.skipped_mtime,
-            "skipped_dedup": stats.skipped_dedup,
-            "skipped_no_sha8": stats.skipped_no_sha8,
-            "skipped_outside_root": stats.skipped_outside_root,
-            "sha8_mismatch": stats.sha8_mismatch,
-            "force": force,
-            "allow_missing_sha8": allow_missing_sha8,
-        })
-        meta_info["refresh_history"] = history[-10:]
-        idx["meta_info"] = meta_info
-        _atomic_write_json(index_path, idx)
+        if not dry_run and did_work:
+            history = meta_info.get("refresh_history", [])
+            history.append({
+                "at": datetime.now(timezone.utc).isoformat(),
+                "scanned": stats.scanned,
+                "checked": stats.checked,
+                "enriched": stats.enriched,
+                "failed_probe": stats.failed_probe,
+                "skipped_unchanged": stats.skipped_mtime,
+                "skipped_dedup": stats.skipped_dedup,
+                "skipped_no_sha8": stats.skipped_no_sha8,
+                "skipped_outside_root": stats.skipped_outside_root,
+                "skipped_unstable": stats.skipped_unstable,
+                "item_error": stats.item_error,
+                "sha8_mismatch": stats.sha8_mismatch,
+                "did_change": did_change,
+                "force": force,
+                "allow_missing_sha8": allow_missing_sha8,
+            })
+            meta_info["refresh_history"] = history[-10:]
+            _atomic_write_json(index_path, idx)
 
     return stats
+
+
+def _process_one_file(
+    fp: Path,
+    items: dict,
+    stats: RefreshStats,
+    seen_paths: set,
+    state_root: Path,
+    *,
+    force: bool,
+    allow_missing_sha8: bool,
+) -> None:
+    """Process a single mp4 file for index refresh.
+
+    Extracted to keep the main loop clean and enable per-item try/except.
+    """
+    # Guard: skip non-files
+    if not fp.is_file():
+        return
+
+    # Guard: reject files outside state root
+    if not _is_under_root(fp, state_root):
+        stats.skipped_outside_root += 1
+        return
+
+    # Dedup: skip if we've already processed this resolved path
+    resolved = str(fp.resolve())
+    if resolved in seen_paths:
+        stats.skipped_dedup += 1
+        return
+    seen_paths.add(resolved)
+
+    sha8 = _infer_sha8_from_filename(fp)
+
+    # Gate: reject files without sha8 unless --allow-missing-sha8
+    if not sha8 and not allow_missing_sha8:
+        stats.skipped_no_sha8 += 1
+        return
+
+    stats.checked += 1
+
+    # SHA8 validation: flag mismatch if indexed under different filename
+    if sha8 and sha8 in items:
+        existing_path = items[sha8].get("path", "")
+        if existing_path and Path(existing_path).name != fp.name:
+            stats.sha8_mismatch += 1
+
+    # Determine the index key
+    key = sha8 if sha8 else fp.stem
+
+    # Incremental check: (mtime_ns, file_size) dual key
+    existing = items.get(key, {})
+    st = fp.stat()
+    current_mtime_ns = st.st_mtime_ns
+    current_size = st.st_size
+
+    if not force:
+        if (existing.get("file_mtime_ns") == current_mtime_ns
+                and existing.get("file_bytes") == current_size):
+            stats.skipped_mtime += 1
+            return
+
+    # Stability gate: skip files still being written
+    if not _is_file_stable(fp):
+        stats.skipped_unstable += 1
+        return
+
+    # Probe
+    stats.probed += 1
+    meta = _ffprobe_json(fp)
+    if not meta:
+        stats.failed_probe += 1
+        return
+
+    probe_data = _extract_probe_data(meta)
+    run_id, segment_id = _infer_run_and_segment(fp)
+
+    # Build enriched entry (merge with existing, don't overwrite user fields)
+    entry = {**existing}
+    entry.pop("file_mtime", None)  # migrate from old float key
+    entry.update({
+        "path": str(fp),
+        "run_id": existing.get("run_id") or run_id,
+        "segment_id": existing.get("segment_id") or segment_id,
+        "file_bytes": current_size,
+        "file_mtime_ns": current_mtime_ns,
+        "refreshed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    # Defensive update: only overwrite probe fields if value is not None.
+    if probe_data["duration"] is not None:
+        entry["duration"] = probe_data["duration"]
+    if probe_data["bitrate_bps"] is not None:
+        entry["bitrate_bps"] = probe_data["bitrate_bps"]
+    if probe_data["video_codec"] is not None:
+        entry["video_codec"] = probe_data["video_codec"]
+    if probe_data["audio_codec"] is not None:
+        entry["audio_codec"] = probe_data["audio_codec"]
+
+    items[key] = entry
+    stats.enriched += 1
 
 
 # ---------------------------------------------------------------------------
@@ -386,14 +495,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  Skipped (no sha8): {stats.skipped_no_sha8}")
     if stats.skipped_outside_root > 0:
         print(f"  Skipped (outside root): {stats.skipped_outside_root}")
+    if stats.skipped_unstable > 0:
+        print(f"  Skipped (unstable): {stats.skipped_unstable}")
     print(f"  Enriched: {stats.enriched}")
+    if stats.item_error > 0:
+        print(f"  Item errors: {stats.item_error}")
     if stats.failed_probe > 0:
         print(f"  Failed probe: {stats.failed_probe}")
     if stats.sha8_mismatch > 0:
         print(f"  SHA8 mismatch warnings: {stats.sha8_mismatch}")
 
+    did_change = stats.enriched > 0
+    print(f"\n  did_work: True | did_change: {did_change}")
+
     if args.dry_run:
-        print("\nDRY-RUN: index not written.")
+        print("  DRY-RUN: index not written.")
 
     return 1 if stats.failed_probe > 0 else 0
 
