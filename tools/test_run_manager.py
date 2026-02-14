@@ -2514,5 +2514,86 @@ class TestAsyncWorkerHelpers(unittest.TestCase):
             self.assertEqual(ckpt["completed_steps"].count("research"), 1)
 
 
+# ==========================================================================
+# Config env prefix tests
+# ==========================================================================
+
+class TestConfigEnvPrefix(unittest.TestCase):
+    """Tests for RAYVAULT_* env var prefix support."""
+
+    def test_rayvault_prefix_takes_priority(self):
+        """RAYVAULT_WORKER_ID overrides WORKER_ID."""
+        from lib.config import _env
+        with patch.dict(os.environ, {
+            "RAYVAULT_WORKER_ID": "prefixed",
+            "WORKER_ID": "unprefixed",
+        }):
+            val = _env("RAYVAULT_WORKER_ID", "WORKER_ID")
+        self.assertEqual(val, "prefixed")
+
+    def test_fallback_to_unprefixed(self):
+        """Falls back to unprefixed when RAYVAULT_* not set."""
+        from lib.config import _env
+        env = {"WORKER_ID": "fallback"}
+        with patch.dict(os.environ, env, clear=False):
+            # Remove prefixed if present
+            os.environ.pop("RAYVAULT_WORKER_ID", None)
+            val = _env("RAYVAULT_WORKER_ID", "WORKER_ID")
+        self.assertEqual(val, "fallback")
+
+    def test_default_when_neither_set(self):
+        """Returns default when neither prefix nor fallback is set."""
+        from lib.config import _env
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RAYVAULT_WORKER_ID", None)
+            os.environ.pop("WORKER_ID", None)
+            val = _env("RAYVAULT_WORKER_ID", "WORKER_ID", "default-val")
+        self.assertEqual(val, "default-val")
+
+    def test_env_int_parses(self):
+        """_env_int returns int from env var."""
+        from lib.config import _env_int
+        with patch.dict(os.environ, {"RAYVAULT_LEASE_MINUTES": "20"}):
+            val = _env_int("RAYVAULT_LEASE_MINUTES", "LEASE_MINUTES", "15")
+        self.assertEqual(val, 20)
+
+
+# ==========================================================================
+# BrowserContextManager env config tests
+# ==========================================================================
+
+class TestBrowserEnvConfig(unittest.TestCase):
+    """Tests for load_browser_config from env vars."""
+
+    def test_default_headless_true(self):
+        """load_browser_config defaults to headless=True."""
+        from lib.browser import load_browser_config
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BROWSER_HEADLESS", None)
+            opts = load_browser_config()
+        self.assertTrue(opts["headless"])
+
+    def test_headless_false(self):
+        """BROWSER_HEADLESS=false sets headless=False."""
+        from lib.browser import load_browser_config
+        with patch.dict(os.environ, {"BROWSER_HEADLESS": "false"}):
+            opts = load_browser_config()
+        self.assertFalse(opts["headless"])
+
+    def test_proxy_from_env(self):
+        """BROWSER_PROXY_SERVER sets proxy dict."""
+        from lib.browser import load_browser_config
+        with patch.dict(os.environ, {"BROWSER_PROXY_SERVER": "http://localhost:8080"}):
+            opts = load_browser_config()
+        self.assertEqual(opts["proxy"], {"server": "http://localhost:8080"})
+
+    def test_no_proxy_when_empty(self):
+        """Empty BROWSER_PROXY_SERVER does not set proxy."""
+        from lib.browser import load_browser_config
+        with patch.dict(os.environ, {"BROWSER_PROXY_SERVER": ""}):
+            opts = load_browser_config()
+        self.assertNotIn("proxy", opts)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

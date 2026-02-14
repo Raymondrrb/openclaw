@@ -235,6 +235,16 @@ def validate_secrets(secrets: SecretsConfig) -> None:
 # Factory
 # ---------------------------------------------------------------------------
 
+def _env(prefixed: str, fallback: str, default: str = "") -> str:
+    """Read env var: try RAYVAULT_* prefix first, then unprefixed fallback."""
+    return os.environ.get(prefixed, os.environ.get(fallback, default))
+
+
+def _env_int(prefixed: str, fallback: str, default: str) -> int:
+    """Read integer env var with RAYVAULT_* prefix + fallback."""
+    return int(_env(prefixed, fallback, default))
+
+
 def load_worker_config(
     *,
     env_file: str | Path | None = None,
@@ -243,27 +253,28 @@ def load_worker_config(
     """Load config from environment variables.
 
     Reads .env file if present (does not override existing env vars).
+    Supports RAYVAULT_* prefix with unprefixed fallback for compat.
     Returns (WorkerConfig, SecretsConfig).
     """
     load_env_file(env_file)
 
     cfg = WorkerConfig(
-        worker_id=worker_id or os.environ.get("WORKER_ID", ""),
-        task_type=os.environ.get("TASK_TYPE", ""),
-        lease_minutes=int(os.environ.get("LEASE_MINUTES", "15")),
-        heartbeat_interval_sec=int(os.environ.get("HEARTBEAT_INTERVAL_SEC", "120")),
-        heartbeat_jitter_sec=int(os.environ.get("HEARTBEAT_JITTER_SEC", "15")),
-        heartbeat_max_retries=int(os.environ.get("HEARTBEAT_MAX_RETRIES", "3")),
-        heartbeat_timeout_sec=int(os.environ.get("HEARTBEAT_TIMEOUT_SEC", "10")),
-        heartbeat_uncertain_threshold=int(os.environ.get("HEARTBEAT_UNCERTAIN_THRESHOLD", "3")),
-        poll_interval_sec=int(os.environ.get("POLL_INTERVAL_SEC", "30")),
-        poll_jitter_sec=int(os.environ.get("POLL_JITTER_SEC", "15")),
-        quarantine_sec=int(os.environ.get("QUARANTINE_SEC", "45")),
-        post_run_backoff_sec=int(os.environ.get("POST_RUN_BACKOFF_SEC", "5")),
-        rpc_timeout_sec=int(os.environ.get("RPC_TIMEOUT_SEC", "10")),
-        claim_timeout_sec=int(os.environ.get("CLAIM_TIMEOUT_SEC", "15")),
-        max_worker_error_len=int(os.environ.get("MAX_WORKER_ERROR_LEN", "500")),
-        telegram_max_len=int(os.environ.get("TELEGRAM_MAX_LEN", "4000")),
+        worker_id=worker_id or _env("RAYVAULT_WORKER_ID", "WORKER_ID"),
+        task_type=_env("RAYVAULT_TASK_TYPE", "TASK_TYPE"),
+        lease_minutes=_env_int("RAYVAULT_LEASE_MINUTES", "LEASE_MINUTES", "15"),
+        heartbeat_interval_sec=_env_int("RAYVAULT_HEARTBEAT_INTERVAL_SEC", "HEARTBEAT_INTERVAL_SEC", "120"),
+        heartbeat_jitter_sec=_env_int("RAYVAULT_HEARTBEAT_JITTER_SEC", "HEARTBEAT_JITTER_SEC", "15"),
+        heartbeat_max_retries=_env_int("RAYVAULT_HEARTBEAT_MAX_RETRIES", "HEARTBEAT_MAX_RETRIES", "3"),
+        heartbeat_timeout_sec=_env_int("RAYVAULT_HEARTBEAT_TIMEOUT_SEC", "HEARTBEAT_TIMEOUT_SEC", "10"),
+        heartbeat_uncertain_threshold=_env_int("RAYVAULT_HEARTBEAT_UNCERTAIN_THRESHOLD", "HEARTBEAT_UNCERTAIN_THRESHOLD", "3"),
+        poll_interval_sec=_env_int("RAYVAULT_POLL_INTERVAL_SEC", "POLL_INTERVAL_SEC", "30"),
+        poll_jitter_sec=_env_int("RAYVAULT_POLL_JITTER_SEC", "POLL_JITTER_SEC", "15"),
+        quarantine_sec=_env_int("RAYVAULT_QUARANTINE_SEC", "QUARANTINE_SEC", "45"),
+        post_run_backoff_sec=_env_int("RAYVAULT_POST_RUN_BACKOFF_SEC", "POST_RUN_BACKOFF_SEC", "5"),
+        rpc_timeout_sec=_env_int("RAYVAULT_RPC_TIMEOUT_SEC", "RPC_TIMEOUT_SEC", "10"),
+        claim_timeout_sec=_env_int("RAYVAULT_CLAIM_TIMEOUT_SEC", "CLAIM_TIMEOUT_SEC", "15"),
+        max_worker_error_len=_env_int("RAYVAULT_MAX_WORKER_ERROR_LEN", "MAX_WORKER_ERROR_LEN", "500"),
+        telegram_max_len=_env_int("RAYVAULT_TELEGRAM_MAX_LEN", "TELEGRAM_MAX_LEN", "4000"),
     )
 
     # Populate worker_id from hostname if still empty

@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker stop stop_force test stress clean logs quarantine purge_spool
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress clean logs quarantine purge_spool cockpit
 
 # --- Morning routine ---
 doctor:
@@ -17,6 +17,11 @@ check-contract:
 worker:
 	caffeinate -dimsu python3 rayvault_cli.py worker
 
+# Short lease for kill-test: stale appears in ~4min instead of ~30min
+worker-test:
+	RAYVAULT_LEASE_MINUTES=2 RAYVAULT_HEARTBEAT_INTERVAL_SEC=30 RAYVAULT_HEARTBEAT_TIMEOUT_SEC=10 \
+		caffeinate -dimsu python3 rayvault_cli.py worker
+
 # --- Stop worker safely (PID file, SIGTERM) ---
 stop:
 	python3 rayvault_cli.py stop
@@ -30,6 +35,24 @@ test:
 
 stress:
 	python3 tools/stress_test_claim.py
+
+# --- Observability ---
+# Quick Cockpit: fleet status from pipeline_runs (no incidents view needed)
+cockpit:
+	@echo "=== Fleet Cockpit ==="
+	@echo "Run in Supabase SQL Editor:"
+	@echo ""
+	@echo "SELECT worker_state, status, count(*) AS total,"
+	@echo "  sum(CASE WHEN last_heartbeat_at IS NULL THEN 1 ELSE 0 END) AS no_hb,"
+	@echo "  round(avg(CASE WHEN worker_state='active' THEN last_heartbeat_latency_ms END)) AS avg_lat_ms,"
+	@echo "  max(last_heartbeat_at) AS last_hb_max"
+	@echo "FROM pipeline_runs"
+	@echo "WHERE status IN ('running','approved','waiting_approval')"
+	@echo "GROUP BY worker_state, status"
+	@echo "ORDER BY worker_state, status;"
+	@echo ""
+	@echo "=== Open Incidents ==="
+	@echo "SELECT * FROM incidents_critical_open ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 50;"
 
 # --- Maintenance ---
 # Safe: only cleans temp files and old logs (never touches spool)

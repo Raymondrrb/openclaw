@@ -219,3 +219,23 @@ ON run_events (
   END DESC,
   occurred_at DESC
 );
+
+-- ==========================================================================
+-- 7. Quick Cockpit query (REFERENCE — not a view, run ad-hoc)
+-- ==========================================================================
+--
+-- Fleet status in one query. Use after `make worker` to confirm health.
+-- Does NOT depend on incidents views — works directly on pipeline_runs.
+--
+-- SELECT
+--   worker_state,
+--   status,
+--   count(*) AS total,
+--   sum(CASE WHEN last_heartbeat_at IS NULL THEN 1 ELSE 0 END) AS no_hb,
+--   round(avg(CASE WHEN worker_state='active'
+--     THEN last_heartbeat_latency_ms END)) AS avg_lat_active_ms,
+--   max(last_heartbeat_at) AS last_hb_max
+-- FROM pipeline_runs
+-- WHERE status IN ('running','approved','waiting_approval')
+-- GROUP BY worker_state, status
+-- ORDER BY worker_state, status;

@@ -9,9 +9,10 @@ Provides:
 Dependencies: playwright (pip install playwright && playwright install chromium)
 
 Usage:
-    from tools.lib.browser import BrowserContextManager
+    from tools.lib.browser import BrowserContextManager, load_browser_config
 
-    async with BrowserContextManager(cfg) as bcm:
+    browser_opts = load_browser_config()  # reads BROWSER_* env vars
+    async with BrowserContextManager(cfg, **browser_opts) as bcm:
         page = await bcm.new_page(run_id="abc-123")
         await page.goto("https://example.com")
         # ... do work ...
@@ -42,11 +43,34 @@ DEFAULT_USER_AGENT = (
 # BrowserContextManager
 # ---------------------------------------------------------------------------
 
+def load_browser_config() -> dict[str, Any]:
+    """Load browser settings from env vars. Returns kwargs for BrowserContextManager."""
+    opts: dict[str, Any] = {}
+
+    headless = os.environ.get("BROWSER_HEADLESS", "true").lower()
+    opts["headless"] = headless not in ("false", "0", "no")
+
+    ua = os.environ.get("BROWSER_USER_AGENT", "").strip()
+    if ua:
+        opts["user_agent"] = ua
+
+    proxy = os.environ.get("BROWSER_PROXY_SERVER", "").strip()
+    if proxy:
+        opts["proxy"] = {"server": proxy}
+
+    return opts
+
+
 class BrowserContextManager:
     """Async context manager for Playwright browser lifecycle.
 
     Manages: browser launch → context (with storage_state) → page creation.
     Supports tracing per run for forensic replay.
+
+    Browser settings can come from:
+    1. Constructor kwargs (highest priority)
+    2. Environment variables (BROWSER_*)
+    3. Defaults
     """
 
     def __init__(
@@ -57,17 +81,30 @@ class BrowserContextManager:
         viewport: dict[str, int] | None = None,
         user_agent: str = DEFAULT_USER_AGENT,
         proxy: dict[str, str] | None = None,
+        enable_tracing: bool | None = None,
     ):
         self.cfg = cfg
         self.headless = headless
         self.viewport = viewport or DEFAULT_VIEWPORT
         self.user_agent = user_agent
         self.proxy = proxy
+        self.enable_tracing = enable_tracing if enable_tracing is not None else (
+            os.environ.get("BROWSER_ENABLE_TRACING", "false").lower()
+            in ("true", "1", "yes")
+        )
 
-        # Paths
+        # Paths (env overrides, then defaults under state_dir)
         self._state_dir = Path(cfg.state_dir)
-        self._storage_path = self._state_dir / "browser" / "storage_state.json"
-        self._traces_dir = self._state_dir / "browser" / "traces"
+        storage = os.environ.get("BROWSER_STORAGE_STATE_PATH", "").strip()
+        self._storage_path = (
+            Path(storage) if storage
+            else self._state_dir / "browser" / "storage_state.json"
+        )
+        traces = os.environ.get("BROWSER_TRACES_DIR", "").strip()
+        self._traces_dir = (
+            Path(traces) if traces
+            else self._state_dir / "browser" / "traces"
+        )
 
         # Playwright objects (set in __aenter__)
         self._playwright: Any = None
@@ -113,11 +150,11 @@ class BrowserContextManager:
         await self.close()
 
     async def new_page(self, *, run_id: str = "") -> Any:
-        """Create a new page. Optionally starts tracing for the given run_id."""
+        """Create a new page. Starts tracing if enabled and run_id is provided."""
         if not self._context:
             raise RuntimeError("BrowserContextManager not entered (use async with)")
 
-        if run_id:
+        if run_id and self.enable_tracing:
             await self._context.tracing.start(
                 screenshots=True,
                 snapshots=True,
