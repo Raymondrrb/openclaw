@@ -406,6 +406,41 @@ def timeline_to_csv(rows: List[TimelineRow]) -> str:
     return buf.getvalue()
 
 
+def save_timeline_csv(
+    csv_str: str,
+    run_id: str,
+    timeline_dir: Path,
+) -> Tuple[Path, Path]:
+    """Save timeline CSV with automatic timestamp + _latest symlink.
+
+    Creates:
+      timeline_{run_id}_{YYYYMMDD_HHMM}.csv  — timestamped snapshot
+      timeline_{run_id}_latest.csv            — symlink to latest
+
+    Returns (timestamped_path, latest_path).
+    """
+    from datetime import datetime, timezone
+
+    timeline_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+    timestamped = timeline_dir / f"timeline_{run_id}_{stamp}.csv"
+    latest = timeline_dir / f"timeline_{run_id}_latest.csv"
+
+    timestamped.write_text(csv_str, encoding="utf-8")
+
+    # Update _latest symlink (atomic: write tmp symlink then replace)
+    tmp_link = latest.with_suffix(".csv.tmp")
+    try:
+        tmp_link.unlink(missing_ok=True)
+        tmp_link.symlink_to(timestamped.name)
+        tmp_link.replace(latest)
+    except OSError:
+        # Fallback for filesystems without symlink support: copy
+        latest.write_text(csv_str, encoding="utf-8")
+
+    return timestamped, latest
+
+
 # ---------------------------------------------------------------------------
 # Orphan search (delegates to dzine_handoff if available, else inline)
 # ---------------------------------------------------------------------------
@@ -526,7 +561,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--timeline", action="store_true",
         help="Generate timeline CSV with segment start/end and status",
     )
-    parser.add_argument("--timeline-out", default="", help="Output CSV path (default: stdout)")
+    parser.add_argument("--timeline-out", default="", help="Output CSV path (overrides auto-save)")
+    parser.add_argument(
+        "--timeline-dir", default="state/timeline",
+        help="Directory for auto-saved timeline CSVs (default: state/timeline/)",
+    )
     parser.add_argument(
         "--include-probe", action="store_true",
         help="Include ffprobe duration + drift in timeline",
@@ -576,13 +615,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Timeline CSV
     if args.timeline:
         all_refs = details.get("all_refs", [])
+        # Infer run_id from refs (use first found, or "unknown")
+        run_ids = {r.run_id for r in all_refs if r.run_id != "UNKNOWN"}
+        timeline_run_id = sorted(run_ids)[0] if run_ids else "unknown"
+
         rows = build_timeline(all_refs, include_probe=args.include_probe)
         csv_str = timeline_to_csv(rows)
+
         if args.timeline_out:
+            # Explicit path overrides auto-save
             Path(args.timeline_out).write_text(csv_str, encoding="utf-8")
             print(f"\nTimeline written to {args.timeline_out}")
         else:
-            print("\n--- Timeline CSV ---")
+            # Auto-save with timestamp + _latest symlink
+            ts_path, latest_path = save_timeline_csv(
+                csv_str, timeline_run_id, Path(args.timeline_dir),
+            )
+            print(f"\nTimeline saved: {ts_path}")
+            print(f"Timeline latest: {latest_path}")
+            print(f"\n--- Timeline CSV ({len(rows)} segments) ---")
             print(csv_str)
 
     # Preflight summary

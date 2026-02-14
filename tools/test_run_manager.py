@@ -7143,6 +7143,64 @@ class TestDoctorTimeline(unittest.TestCase):
         self.assertEqual(_infer_category("p1_product", "product"), "product")
 
 
+class TestSaveTimelineCsv(unittest.TestCase):
+    """Tests for save_timeline_csv with timestamp + _latest symlink."""
+
+    def test_creates_timestamped_file(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import save_timeline_csv
+        with tempfile.TemporaryDirectory() as td:
+            tdir = Path(td) / "timeline"
+            ts_path, latest_path = save_timeline_csv(
+                "Order,Seg\n0,s1\n", "RAY-99", tdir,
+            )
+            self.assertTrue(ts_path.exists())
+            self.assertIn("timeline_RAY-99_", ts_path.name)
+            self.assertTrue(ts_path.name.endswith(".csv"))
+            content = ts_path.read_text(encoding="utf-8")
+            self.assertIn("Order,Seg", content)
+
+    def test_creates_latest_link(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import save_timeline_csv
+        with tempfile.TemporaryDirectory() as td:
+            tdir = Path(td) / "timeline"
+            ts_path, latest_path = save_timeline_csv(
+                "header\nrow\n", "R1", tdir,
+            )
+            self.assertTrue(latest_path.exists())
+            self.assertEqual(latest_path.name, "timeline_R1_latest.csv")
+            # Content should match
+            self.assertEqual(
+                latest_path.read_text(encoding="utf-8"),
+                ts_path.read_text(encoding="utf-8"),
+            )
+
+    def test_latest_updates_on_second_call(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import save_timeline_csv
+        import time
+        with tempfile.TemporaryDirectory() as td:
+            tdir = Path(td) / "timeline"
+            save_timeline_csv("v1\n", "R1", tdir)
+            time.sleep(0.05)
+            ts2, latest2 = save_timeline_csv("v2\n", "R1", tdir)
+            latest_content = latest2.read_text(encoding="utf-8")
+            self.assertEqual(latest_content, "v2\n")
+            # Should have 2 timestamped files + 1 latest
+            csvs = list(tdir.glob("timeline_R1_*.csv"))
+            # At least 2 (timestamped) + latest (symlink or copy)
+            self.assertGreaterEqual(len(csvs), 2)
+
+    def test_creates_directory(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from doctor_report import save_timeline_csv
+        with tempfile.TemporaryDirectory() as td:
+            tdir = Path(td) / "deep" / "nested" / "timeline"
+            ts_path, _ = save_timeline_csv("data\n", "X", tdir)
+            self.assertTrue(ts_path.exists())
+
+
 class TestDoctorOrphanSearch(unittest.TestCase):
     """Tests for find_orphan_videos in doctor_report."""
 
