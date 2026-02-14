@@ -1,0 +1,53 @@
+{
+  "_doc": "Ray Model Sheet — compact visual identity spec. Load into any AI as context. Single source of truth for all visual generation.",
+  "version": 1,
+
+  "character": "Ray",
+  "purpose": "Lipsync-ready talking head for YouTube product reviews",
+
+  "invariants": {
+    "face": "same facial structure, same hairline, same beard shape, same nose and jaw proportions, same skin tone, same eye distance",
+    "shot": "medium close-up, chest/shoulders up",
+    "camera": "85mm lens look, eye-level, centered, headroom 8-10%",
+    "lighting_face": "soft key front-left 45deg, gentle fill front-right, subtle rim light",
+    "mouth": "closed, relaxed lips, clear lip line, clean chin contour",
+    "eyes": "aligned, looking into camera lens",
+    "hands": "out of frame"
+  },
+
+  "never": [
+    "open mouth", "teeth showing", "hairstyle change", "beard shape change",
+    "sunglasses", "hat", "hands visible", "wide-angle lens", "cartoon/CGI",
+    "busy background", "patterned clothing", "logos", "text in frame"
+  ],
+
+  "varies_1_axis_per_day": {
+    "background": ["office_daylight_bokeh", "office_citylight_bokeh", "studio_charcoal_gradient"],
+    "outfit": ["black_tee", "navy_tee", "grey_hoodie"],
+    "accent_light": ["warm_ambient", "cool_ambient", "rim_tint"]
+  },
+
+  "qc_fail_instant": [
+    "mouth/lips deformed or teeth visible",
+    "eyes misaligned or double pupil",
+    "identity drift (nose/jaw/hairline changed)",
+    "background sharp or has text/logos",
+    "hands appear in frame"
+  ],
+
+  "qc_pass": [
+    "same Ray as Keyframe Zero",
+    "mouth closed and clean",
+    "jawline clean",
+    "eyes on lens",
+    "background bokeh clean"
+  ],
+
+  "fallback": "If 6 attempts fail: studio_charcoal + black_tee + warm_ambient (safe mode). 3 seeds, pick 1.",
+
+  "keyframe_zero": {
+    "_doc": "The single perfect reference image. All generations must match this.",
+    "path": null,
+    "status": "pending_selection"
+  }
+}

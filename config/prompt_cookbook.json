@@ -1,46 +1,63 @@
 {
-  "_doc": "Parameterized Dzine prompt templates. Variables in {brackets} are replaced at generation time. Paste 'prompt' into Character action & scene.",
-  "_usage": "Pick a template, substitute variables from visual_identity.json variation_limits, paste into Dzine.",
+  "_doc": "Modular Dzine prompt system. Fixed blocks never change. Variable blocks swap 1 axis per day. Paste assembled prompt into 'Character action & scene'.",
+  "version": 2,
 
-  "version": 1,
+  "fixed_blocks": {
+    "core_identity": "Ray (use the existing Ray character identity and the verified face reference). Same exact person, same facial structure, same hairline, same beard shape, same nose and jaw proportions. Medium close-up talking head. Calm neutral expression. Looking directly into the camera lens. Mouth closed, relaxed lips, clean lip line for lip-sync. Clean jawline and chin contour, no shadow artifacts.",
+    "camera": "Eye-level camera, centered framing, stable composition, headroom 8-10%. 85mm lens look (no wide angle), natural perspective, no facial distortion. Shoulders relaxed. Hands out of frame.",
+    "lighting": "Soft key light from front-left 45 degrees, gentle fill from front-right, subtle rim light for separation. Face lighting neutral and clean. No harsh shadows under nose/lips/chin.",
+    "quality": "Photorealistic, natural skin texture, consistent pores, high-end cinematic realism, stable features across generations, clean background bokeh.",
+    "negative": "open mouth, teeth showing, exaggerated smile, distorted lips, double chin artifacts, messy beard noise, hairstyle change, sunglasses, hat, heavy wrinkles, low-res, oversharpen, cartoon, anime, CGI, hands visible, extra fingers, text, logos, busy background, patterned clothing."
+  },
 
-  "common_negative": "open mouth, teeth, exaggerated smile, distorted lips, double chin artifacts, extra fingers, hands in frame, sunglasses, hat, heavy beard noise, strong wrinkles, low-res, oversharp, cartoon, CGI, wide-angle distortion, lens flare",
-
-  "templates": {
-    "office_default": {
-      "_doc": "Safest daily-use prompt. Minimal risk.",
-      "scene_tag": "office",
-      "prompt": "Ray (use the existing Ray character identity), medium close-up talking head. Neutral professional expression, mouth closed, relaxed lips, clean jawline and chin contour. Looking directly into the camera. Shoulders relaxed, hands out of frame.\nScene: modern minimalist tech office, blurred background, soft bokeh, no readable text, no logos.\nLighting: soft key light from front-left at 45 degrees, gentle fill from front-right, subtle rim light. No harsh shadows under nose or chin.\nCamera: {lens_mm}mm lens look, eye-level, perfectly centered framing, headroom 8-10%, stable composition.\nStyle: photorealistic, natural skin texture, consistent facial proportions (same exact face).",
-      "negative": "{common_negative}",
-      "variables": {
-        "lens_mm": {"default": 85, "allowed": [70, 85, 100]},
-        "background": {"default": "office_blur_a", "note": "controlled by Dzine scene, not prompt variable"},
-        "outfit_color": {"default": "charcoal", "allowed": ["black", "charcoal", "white"]}
-      }
+  "variable_blocks": {
+    "environment": {
+      "A_office_a": "Modern minimalist tech office, blurred glass partitions, soft daylight, subtle bokeh, no readable text, no logos, neutral professional vibe.",
+      "B_office_b": "Same office style, but background with blurred window + faint city lights bokeh, still minimal, no readable text, no logos.",
+      "C_studio": "Professional studio backdrop, deep charcoal grey gradient, clean, non-distracting, subtle bokeh."
     },
-
-    "studio_pro": {
-      "_doc": "Premium look. Dark gradient backdrop, more cinematic.",
-      "scene_tag": "studio",
-      "prompt": "Ray (same exact identity), medium close-up, calm confident expression, mouth closed, clear lip outline for lip-sync. Eyes sharp and aligned, looking into camera.\nScene: professional studio backdrop, dark neutral gradient ({backdrop_tone}), subtle bokeh.\nLighting: large softbox key light front-left, soft fill front-right, controlled rim light behind for separation, no chin shadow artifacts.\nCamera: {lens_mm}mm lens look, eye-level, centered, consistent framing.\nColor: clean neutral grading, slightly cinematic contrast, but natural skin tones.",
-      "negative": "dramatic harsh shadows, underlit face, heavy bloom, lens distortion, {common_negative}",
-      "variables": {
-        "lens_mm": {"default": 85, "allowed": [85, 100]},
-        "backdrop_tone": {"default": "charcoal", "allowed": ["charcoal", "deep_grey", "midnight_blue"]}
-      }
+    "outfit": {
+      "1_black_tee": "Solid black crew-neck t-shirt, premium cotton, no logos, no patterns.",
+      "2_navy_tee": "Solid dark navy crew-neck t-shirt, premium cotton, no logos, no patterns.",
+      "3_grey_hoodie": "Solid dark grey hoodie, minimal, no logos, no drawstrings visible."
     },
-
-    "casual_controlled": {
-      "_doc": "Warmer, friendlier. Vary background/outfit only.",
-      "scene_tag": "casual",
-      "prompt": "Ray (same exact identity), medium close-up, friendly neutral expression (small closed-mouth smile only). Looking into camera.\nScene: cozy desk setup, blurred shelves and warm practical light in background, bokeh, no readable text, no brand logos.\nOutfit: plain solid-color {outfit_desc} (no patterns, no logos).\nLighting: soft key light + fill, warm ambient practical light in the background only. Face lighting remains neutral and clean.\nCamera: {lens_mm}mm lens look, eye-level, stable framing.",
-      "negative": "patterned clothes, logos, text, hands visible, weird teeth, {common_negative}, hairstyle changes, beard changing shape",
-      "variables": {
-        "lens_mm": {"default": 85, "allowed": [70, 85]},
-        "outfit_desc": {"default": "t-shirt", "allowed": ["t-shirt", "hoodie", "polo"]},
-        "outfit_color": {"default": "black", "allowed": ["black", "white", "brand_accent"]}
-      }
+    "accent": {
+      "1_warm": "Background ambient slightly warm, face lighting remains neutral.",
+      "2_cool": "Background ambient slightly cool, face lighting remains neutral.",
+      "3_rim": "Very subtle rim light tint only, face lighting neutral."
     }
+  },
+
+  "assembly_order": [
+    "core_identity",
+    "camera",
+    "lighting",
+    "{environment}",
+    "{outfit}",
+    "{accent}",
+    "quality",
+    "NEGATIVE: {negative}"
+  ],
+
+  "daily_rotation": {
+    "_doc": "Change max 1 axis per day. Default safe config: C_studio + 1_black_tee + 1_warm.",
+    "max_axes_per_day": 1,
+    "safe_fallback": {
+      "environment": "C_studio",
+      "outfit": "1_black_tee",
+      "accent": "1_warm"
+    },
+    "fallback_trigger": "6 consecutive FAIL results",
+    "seeds_per_attempt": 3
+  },
+
+  "prebuilt_combos": {
+    "_doc": "Ready-to-use daily combos. Pick one, paste blocks in order.",
+    "monday_office": {"env": "A_office_a", "outfit": "1_black_tee", "accent": "1_warm"},
+    "tuesday_office": {"env": "B_office_b", "outfit": "1_black_tee", "accent": "1_warm"},
+    "wednesday_studio": {"env": "C_studio", "outfit": "2_navy_tee", "accent": "2_cool"},
+    "thursday_office": {"env": "A_office_a", "outfit": "2_navy_tee", "accent": "1_warm"},
+    "friday_casual": {"env": "B_office_b", "outfit": "3_grey_hoodie", "accent": "3_rim"}
   },
 
   "lipsync_mandatory_phrases": [
@@ -48,19 +65,33 @@
     "relaxed lips",
     "clear lip line",
     "clean chin contour",
-    "no facial hair covering lips",
-    "same exact face",
+    "same exact person",
+    "same facial structure",
     "looking into camera",
     "hands out of frame"
   ],
 
   "style_dna_extraction_protocol": {
-    "_doc": "When analyzing a reference video/image, always extract these 4 outputs.",
+    "_doc": "When analyzing a reference video/image, extract these 4 outputs.",
     "outputs": [
-      "style_dna_10_bullets: lente, luz, cor, enquadramento, fundo, pele, etc.",
-      "do_dont_10_items: what MUST NOT change",
-      "replicable_prompt: the prompt that replicates this style",
-      "qc_rubric_specific: what fails QC for this specific style"
+      "style_dna: 10 bullets (lente, luz, cor, enquadramento, fundo, pele)",
+      "do_dont: 10 items (what MUST NOT change)",
+      "replicable_prompt: prompt that replicates this style with travas",
+      "qc_rubric: what fails QC for this specific style"
     ]
+  },
+
+  "naming_convention": {
+    "pattern": "Ray_{scene}_{number:02d}.png",
+    "examples": ["Ray_OfficeA_01.png", "Ray_OfficeB_03.png", "Ray_Studio_07.png"]
+  },
+
+  "keyframe_batch": {
+    "_doc": "One-time batch to build keyframe library. Generate 60, keep 12.",
+    "generate": 60,
+    "distribution": {"A_office_a": 20, "B_office_b": 20, "C_studio": 20},
+    "keep": 12,
+    "keep_distribution": {"office": 8, "studio": 4},
+    "crops_per_keyframe": ["16:9", "9:16", "1:1"]
   }
 }

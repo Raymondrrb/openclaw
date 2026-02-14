@@ -10218,14 +10218,21 @@ class TestVisualConfigFiles(unittest.TestCase):
     def test_prompt_cookbook_loadable(self):
         path = self._config_dir() / "prompt_cookbook.json"
         data = json.loads(path.read_text(encoding="utf-8"))
-        self.assertIn("templates", data)
-        self.assertIn("office_default", data["templates"])
-        self.assertIn("studio_pro", data["templates"])
-        self.assertIn("casual_controlled", data["templates"])
-        # Every template has a prompt and negative
-        for name, tmpl in data["templates"].items():
-            self.assertIn("prompt", tmpl, f"{name} missing prompt")
-            self.assertIn("negative", tmpl, f"{name} missing negative")
+        # v2: modular blocks
+        self.assertIn("fixed_blocks", data)
+        self.assertIn("variable_blocks", data)
+        self.assertIn("core_identity", data["fixed_blocks"])
+        self.assertIn("camera", data["fixed_blocks"])
+        self.assertIn("negative", data["fixed_blocks"])
+        # Variable blocks have environment, outfit, accent
+        vb = data["variable_blocks"]
+        self.assertIn("environment", vb)
+        self.assertIn("outfit", vb)
+        self.assertIn("accent", vb)
+        self.assertGreater(len(vb["environment"]), 0)
+        # Daily rotation config
+        self.assertIn("daily_rotation", data)
+        self.assertIn("safe_fallback", data["daily_rotation"])
 
     def test_visual_qc_loadable(self):
         path = self._config_dir() / "visual_qc.json"
@@ -10244,7 +10251,33 @@ class TestVisualConfigFiles(unittest.TestCase):
         phrases = data.get("lipsync_mandatory_phrases", [])
         self.assertGreater(len(phrases), 0)
         self.assertIn("mouth closed", phrases)
-        self.assertIn("same exact face", phrases)
+        self.assertIn("same exact person", phrases)
+
+    def test_style_guide_loadable(self):
+        path = self._config_dir() / "ray_style_guide.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("invariants", data)
+        self.assertIn("never", data)
+        self.assertIn("varies_1_axis_per_day", data)
+        self.assertIn("qc_fail_instant", data)
+        self.assertIn("qc_pass", data)
+        self.assertIn("fallback", data)
+        self.assertEqual(data["character"], "Ray")
+
+    def test_cookbook_prebuilt_combos_reference_valid_blocks(self):
+        """Prebuilt combos reference blocks that exist in variable_blocks."""
+        path = self._config_dir() / "prompt_cookbook.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        vb = data["variable_blocks"]
+        for combo_name, combo in data.get("prebuilt_combos", {}).items():
+            if combo_name.startswith("_"):
+                continue
+            self.assertIn(combo["env"], vb["environment"],
+                          f"Combo {combo_name}: env {combo['env']} not in variable_blocks")
+            self.assertIn(combo["outfit"], vb["outfit"],
+                          f"Combo {combo_name}: outfit {combo['outfit']} not in variable_blocks")
+            self.assertIn(combo["accent"], vb["accent"],
+                          f"Combo {combo_name}: accent {combo['accent']} not in variable_blocks")
 
 
 if __name__ == "__main__":
