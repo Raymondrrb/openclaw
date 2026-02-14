@@ -9091,5 +9091,184 @@ class TestCleanupHistory(unittest.TestCase):
             self.assertIn("dangling", history[0])
 
 
+# ---------------------------------------------------------------------------
+# Dangling Index Repair tests
+# ---------------------------------------------------------------------------
+
+class TestDanglingIndexRepair(unittest.TestCase):
+    """Tests for doctor_index_repair.py."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_dry_run_marks_dangling(self):
+        """Dry-run marks entries but doesn't remove them."""
+        self._add_scripts_path()
+        from doctor_index_repair import repair_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            # Create index with an entry pointing to non-existent file
+            idx_path.write_text(json.dumps({
+                "items": {
+                    "aabbccdd": {
+                        "path": str(vid / "final" / "V_R1_s1_aabbccdd.mp4"),
+                        "duration": 5.0,
+                    },
+                    "11223344": {
+                        "path": "",  # missing_path
+                        "duration": 3.0,
+                    },
+                },
+                "meta_info": {},
+            }))
+            stats = repair_dangling(index_path=idx_path, apply=False)
+            self.assertEqual(stats["dangling_found"], 2)
+            self.assertEqual(stats["dangling_missing_file"], 1)
+            self.assertEqual(stats["dangling_missing_path"], 1)
+            # Items should still be in place (dry-run)
+            idx = _load_index(idx_path)
+            self.assertIn("aabbccdd", idx["items"])
+            self.assertTrue(idx["items"]["aabbccdd"].get("dangling"))
+
+    def test_apply_moves_to_bucket(self):
+        """--apply moves dangling entries to dangling_items bucket."""
+        self._add_scripts_path()
+        from doctor_index_repair import repair_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({
+                "items": {
+                    "aabbccdd": {
+                        "path": str(vid / "final" / "gone.mp4"),
+                        "duration": 5.0,
+                    },
+                    "eeff0011": {
+                        "path": str(vid / "final" / "exists.mp4"),
+                        "duration": 3.0,
+                    },
+                },
+                "meta_info": {},
+            }))
+            # Create the file that eeff0011 points to
+            final = vid / "final"
+            final.mkdir()
+            (final / "exists.mp4").write_bytes(b"x" * 100)
+
+            stats = repair_dangling(index_path=idx_path, apply=True, move_to_bucket=True)
+            self.assertEqual(stats["dangling_found"], 1)
+            idx = _load_index(idx_path)
+            # aabbccdd should be moved to bucket
+            self.assertNotIn("aabbccdd", idx["items"])
+            self.assertIn("aabbccdd", idx.get("dangling_items", {}))
+            self.assertEqual(idx["dangling_items"]["aabbccdd"]["dangling_reason"], "missing_file")
+            # eeff0011 should still be in items
+            self.assertIn("eeff0011", idx["items"])
+
+    def test_apply_delete_removes_entirely(self):
+        """--apply --delete removes entries with no bucket."""
+        self._add_scripts_path()
+        from doctor_index_repair import repair_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({
+                "items": {
+                    "aabbccdd": {
+                        "path": str(vid / "final" / "gone.mp4"),
+                    },
+                },
+                "meta_info": {},
+            }))
+            stats = repair_dangling(index_path=idx_path, apply=True, move_to_bucket=False)
+            self.assertEqual(stats["dangling_found"], 1)
+            idx = _load_index(idx_path)
+            self.assertNotIn("aabbccdd", idx["items"])
+            self.assertNotIn("dangling_items", idx)
+
+    def test_repair_history_persisted(self):
+        """repair_history ring buffer appears in meta_info."""
+        self._add_scripts_path()
+        from doctor_index_repair import repair_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({"items": {}, "meta_info": {}}))
+            repair_dangling(index_path=idx_path)
+            idx = _load_index(idx_path)
+            history = idx["meta_info"].get("repair_history", [])
+            self.assertEqual(len(history), 1)
+            self.assertIn("checked", history[0])
+            self.assertIn("dangling_found", history[0])
+
+    def test_relative_path_resolved_via_state_root(self):
+        """Relative paths are resolved via state_root before declaring dangling."""
+        self._add_scripts_path()
+        from doctor_index_repair import repair_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            final = vid / "final"
+            final.mkdir(parents=True)
+            idx_path = vid / "index.json"
+            # Create a file and reference it with a relative path
+            f = final / "V_R1_s1_aabbccdd.mp4"
+            f.write_bytes(b"x" * 100)
+            idx_path.write_text(json.dumps({
+                "items": {
+                    "aabbccdd": {
+                        "path": "video/final/V_R1_s1_aabbccdd.mp4",
+                    },
+                },
+                "meta_info": {"state_root": str(Path(td).resolve())},
+            }))
+            stats = repair_dangling(index_path=idx_path)
+            # Should NOT be dangling — resolved via state_root
+            self.assertEqual(stats["dangling_found"], 0)
+
+    def test_cli_dry_run(self):
+        """CLI dry-run returns 1 if dangling found, 0 if clean."""
+        self._add_scripts_path()
+        from doctor_index_repair import main as repair_main
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({
+                "items": {
+                    "aabbccdd": {"path": "/nonexistent/file.mp4"},
+                },
+                "meta_info": {},
+            }))
+            rc = repair_main(["--state-dir", str(td)])
+            self.assertEqual(rc, 1)
+
+    def test_cli_clean_returns_0(self):
+        """CLI returns 0 when no dangling entries."""
+        self._add_scripts_path()
+        from doctor_index_repair import main as repair_main
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            final = vid / "final"
+            final.mkdir(parents=True)
+            idx_path = vid / "index.json"
+            f = final / "V_R1_s1_aabbccdd.mp4"
+            f.write_bytes(b"x" * 100)
+            idx_path.write_text(json.dumps({
+                "items": {
+                    "aabbccdd": {"path": str(f)},
+                },
+                "meta_info": {},
+            }))
+            rc = repair_main(["--state-dir", str(td)])
+            self.assertEqual(rc, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

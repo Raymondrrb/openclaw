@@ -214,6 +214,15 @@ make baptism-full CONFIRM=YES
 # Maintenance (safe: refresh + dry-run cleanup + report)
 make maintenance
 
+# Dangling index repair (stale entries pointing to missing files)
+make index-repair              # dry-run: marks entries
+make index-repair-apply CONFIRM=YES  # apply: moves to bucket
+
+# Telegram notifications
+make notify MSG="hello"        # send arbitrary message
+make status-notify             # run status + send summary
+make notify-summary            # send last status_summary.txt
+
 # Run tests
 make test
 ```

@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply
 
 # --- Morning routine ---
 doctor:
@@ -118,6 +118,17 @@ index-refresh:
 
 index-refresh-force:
 	python3 scripts/video_index_refresh.py --state-dir state --force
+
+# --- Dangling index repair ---
+index-repair:
+	python3 scripts/doctor_index_repair.py --state-dir state
+
+index-repair-apply:
+	@if [ "$(CONFIRM)" != "YES" ]; then \
+		echo "To apply repair, use: make index-repair-apply CONFIRM=YES"; \
+		exit 2; \
+	fi
+	python3 scripts/doctor_index_repair.py --state-dir state --apply
 
 # --- Orphan cleanup (dry-run vs apply) ---
 clean-orphans:
