@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 import unittest
+import wave
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone, timedelta
@@ -11713,7 +11714,7 @@ class TestRenderConfigGenerate(unittest.TestCase):
     def test_config_version(self):
         from rayvault.render_config_generate import generate_render_config
         result = generate_render_config(self.run_dir)
-        self.assertEqual(result["config"]["version"], "1.1")
+        self.assertEqual(result["config"]["version"], "1.3")
 
     def test_config_has_canvas(self):
         from rayvault.render_config_generate import generate_render_config
@@ -14702,6 +14703,399 @@ class TestOverlayAmberWarning(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestRenderConfigV13(unittest.TestCase):
+    """Tests for render_config_generate.py v1.3 contract."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.run_dir = Path(self.tmp) / "RUN_TEST"
+        self.run_dir.mkdir(parents=True)
+        # Write minimal script
+        (self.run_dir / "01_script.txt").write_text("Hello world " * 50)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_version_is_1_3(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        self.assertEqual(result["config"]["version"], "1.3")
+
+    def test_output_section_exists(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        out = result["config"]["output"]
+        self.assertEqual(out["w"], 1920)
+        self.assertEqual(out["h"], 1080)
+        self.assertEqual(out["fps"], 30)
+        self.assertEqual(out["vcodec"], "libx264")
+        self.assertEqual(out["pix_fmt"], "yuv420p")
+
+    def test_segments_have_id_and_frames(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        for seg in result["config"]["segments"]:
+            self.assertIn("id", seg)
+            self.assertIn("frames", seg)
+            self.assertTrue(seg["id"].startswith("seg_"))
+            # frames should match (t1-t0)*fps
+            expected = round((seg["t1"] - seg["t0"]) * 30)
+            self.assertEqual(seg["frames"], expected)
+
+    def test_canvas_still_exists_for_compat(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        self.assertIn("canvas", result["config"])
+
+
+class TestFFmpegRenderGates(unittest.TestCase):
+    """Tests for ffmpeg_render.py validation gates."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.run_dir = Path(self.tmp) / "RUN_TEST"
+        self.run_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def test_gate_essential_files_missing(self):
+        from rayvault.ffmpeg_render import gate_essential_files
+        result = gate_essential_files(self.run_dir)
+        self.assertFalse(result.ok)
+        self.assertTrue(len(result.errors) >= 3)
+
+    def test_gate_essential_files_all_present(self):
+        from rayvault.ffmpeg_render import gate_essential_files
+        self._write_json(self.run_dir / "00_manifest.json", {"run_id": "TEST"})
+        self._write_json(self.run_dir / "05_render_config.json", {"version": "1.3"})
+        self._write_json(self.run_dir / "publish" / "overlays" / "overlays_index.json", {"items": []})
+        # Create a minimal WAV
+        self._create_wav(self.run_dir / "02_audio.wav", 10.0)
+        result = gate_essential_files(self.run_dir)
+        self.assertTrue(result.ok)
+
+    def test_gate_temporal_consistency_ok(self):
+        from rayvault.ffmpeg_render import gate_temporal_consistency
+        config = {"segments": [
+            {"id": "seg_000", "type": "intro", "t0": 0.0, "t1": 2.0},
+            {"id": "seg_001", "type": "product", "t0": 2.0, "t1": 6.0},
+            {"id": "seg_002", "type": "outro", "t0": 6.0, "t1": 7.5},
+        ]}
+        result = gate_temporal_consistency(config, 7.5)
+        self.assertTrue(result.ok)
+
+    def test_gate_temporal_consistency_timeline_exceeds(self):
+        from rayvault.ffmpeg_render import gate_temporal_consistency
+        config = {"segments": [
+            {"id": "seg_000", "type": "intro", "t0": 0.0, "t1": 2.0},
+            {"id": "seg_001", "type": "outro", "t0": 2.0, "t1": 30.0},
+        ]}
+        # Timeline=30s but audio=20s — would cut speech
+        result = gate_temporal_consistency(config, 20.0)
+        self.assertFalse(result.ok)
+        self.assertTrue(any("TIMELINE_EXCEEDS_AUDIO" in e for e in result.errors))
+
+    def test_gate_temporal_audio_tail_warning(self):
+        from rayvault.ffmpeg_render import gate_temporal_consistency
+        config = {"segments": [
+            {"id": "seg_000", "type": "intro", "t0": 0.0, "t1": 2.0},
+            {"id": "seg_001", "type": "outro", "t0": 2.0, "t1": 3.5},
+        ]}
+        # Timeline=3.5s but audio=5.0s — audio extends beyond
+        result = gate_temporal_consistency(config, 5.0)
+        self.assertTrue(result.ok)
+        self.assertTrue(len(result.warnings) > 0)
+
+    def test_gate_frames_consistency_ok(self):
+        from rayvault.ffmpeg_render import gate_frames_consistency
+        config = {
+            "output": {"fps": 30},
+            "segments": [
+                {"id": "seg_000", "t0": 0.0, "t1": 2.0, "frames": 60},
+                {"id": "seg_001", "t0": 2.0, "t1": 6.0, "frames": 120},
+            ],
+        }
+        result = gate_frames_consistency(config)
+        self.assertTrue(result.ok)
+
+    def test_gate_frames_consistency_mismatch(self):
+        from rayvault.ffmpeg_render import gate_frames_consistency
+        config = {
+            "output": {"fps": 30},
+            "segments": [
+                {"id": "seg_000", "t0": 0.0, "t1": 2.0, "frames": 999},
+            ],
+        }
+        result = gate_frames_consistency(config)
+        self.assertFalse(result.ok)
+        self.assertTrue(any("FRAME_MISMATCH" in e for e in result.errors))
+
+    def test_gate_segment_sources_skip_ok(self):
+        from rayvault.ffmpeg_render import gate_segment_sources
+        config = {"segments": [
+            {"id": "seg_001", "type": "product", "visual": {"mode": "SKIP", "source": None}},
+        ]}
+        result = gate_segment_sources(self.run_dir, config)
+        self.assertTrue(result.ok)
+
+    def _create_wav(self, path, duration_sec):
+        """Create a minimal WAV file."""
+        import struct
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rate = 44100
+        nframes = int(duration_sec * rate)
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(b"\x00\x00" * nframes)
+
+
+class TestFFmpegRenderHashes(unittest.TestCase):
+    """Tests for render hash computation."""
+
+    def test_segment_hash_deterministic(self):
+        from rayvault.ffmpeg_render import compute_segment_inputs_hash
+        seg = {"id": "seg_000", "type": "intro", "t0": 0.0, "t1": 2.0}
+        output = {"w": 1920, "h": 1080, "fps": 30}
+        h1 = compute_segment_inputs_hash(seg, Path("/tmp"), {"items": []}, output)
+        h2 = compute_segment_inputs_hash(seg, Path("/tmp"), {"items": []}, output)
+        self.assertEqual(h1, h2)
+
+    def test_segment_hash_changes_with_output(self):
+        from rayvault.ffmpeg_render import compute_segment_inputs_hash
+        seg = {"id": "seg_000", "type": "intro", "t0": 0.0, "t1": 2.0}
+        o1 = {"w": 1920, "h": 1080, "fps": 30}
+        o2 = {"w": 1280, "h": 720, "fps": 30}
+        h1 = compute_segment_inputs_hash(seg, Path("/tmp"), {"items": []}, o1)
+        h2 = compute_segment_inputs_hash(seg, Path("/tmp"), {"items": []}, o2)
+        self.assertNotEqual(h1, h2)
+
+    def test_segment_hash_changes_with_timing(self):
+        from rayvault.ffmpeg_render import compute_segment_inputs_hash
+        seg1 = {"id": "seg_000", "type": "intro", "t0": 0.0, "t1": 2.0}
+        seg2 = {"id": "seg_000", "type": "intro", "t0": 0.0, "t1": 3.0}
+        output = {"w": 1920, "h": 1080, "fps": 30}
+        h1 = compute_segment_inputs_hash(seg1, Path("/tmp"), {"items": []}, output)
+        h2 = compute_segment_inputs_hash(seg2, Path("/tmp"), {"items": []}, output)
+        self.assertNotEqual(h1, h2)
+
+
+class TestFFmpegRenderCommands(unittest.TestCase):
+    """Tests for FFmpeg command building."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.run_dir = Path(self.tmp) / "RUN_TEST"
+        self.run_dir.mkdir(parents=True)
+        self.output = {"w": 1920, "h": 1080, "fps": 30, "vcodec": "libx264",
+                       "crf": 18, "preset": "slow", "pix_fmt": "yuv420p"}
+        self.overlays = {"items": []}
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_intro_cmd_has_loop_and_duration(self):
+        from rayvault.ffmpeg_render import build_segment_cmd
+        seg = {"id": "seg_000", "type": "intro", "t0": 0.0, "t1": 2.0, "frames": 60}
+        # Create frame
+        frame = self.run_dir / "03_frame.png"
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_bytes(b"PNG_STUB")
+        cmd = build_segment_cmd(seg, self.run_dir, self.output, self.overlays, Path("/tmp/seg.mp4"))
+        self.assertIn("-loop", cmd)
+        self.assertIn("1", cmd)
+        self.assertIn("-t", cmd)
+        self.assertIn("2.0", cmd)
+
+    def test_skip_cmd_uses_color_source(self):
+        from rayvault.ffmpeg_render import build_segment_cmd
+        seg = {"id": "seg_001", "type": "product", "rank": 1,
+               "t0": 2.0, "t1": 6.0, "frames": 120,
+               "visual": {"mode": "SKIP", "source": None}}
+        cmd = build_segment_cmd(seg, self.run_dir, self.output, self.overlays, Path("/tmp/seg.mp4"))
+        cmd_str = " ".join(cmd)
+        self.assertIn("color=c=black", cmd_str)
+
+    def test_broll_cmd_uses_stream_loop(self):
+        from rayvault.ffmpeg_render import build_segment_cmd
+        # Create a fake broll file
+        broll = self.run_dir / "products" / "p01" / "broll" / "approved.mp4"
+        broll.parent.mkdir(parents=True, exist_ok=True)
+        broll.write_bytes(b"MP4_STUB")
+        seg = {"id": "seg_001", "type": "product", "rank": 1,
+               "t0": 2.0, "t1": 6.0, "frames": 120,
+               "visual": {"mode": "BROLL_VIDEO",
+                          "source": "products/p01/broll/approved.mp4"}}
+        cmd = build_segment_cmd(seg, self.run_dir, self.output, self.overlays, Path("/tmp/seg.mp4"))
+        self.assertIn("-stream_loop", cmd)
+
+    def test_kenburns_cmd_has_zoompan(self):
+        from rayvault.ffmpeg_render import build_segment_cmd
+        img = self.run_dir / "products" / "p01" / "source_images" / "01_main.jpg"
+        img.parent.mkdir(parents=True, exist_ok=True)
+        img.write_bytes(b"JPG_STUB")
+        seg = {"id": "seg_001", "type": "product", "rank": 1,
+               "t0": 2.0, "t1": 6.0, "frames": 120,
+               "visual": {"mode": "KEN_BURNS",
+                          "source": "products/p01/source_images/01_main.jpg"}}
+        cmd = build_segment_cmd(seg, self.run_dir, self.output, self.overlays, Path("/tmp/seg.mp4"))
+        cmd_str = " ".join(cmd)
+        self.assertIn("zoompan", cmd_str)
+        self.assertIn("-loop", cmd)
+
+    def test_overlay_filter_chain(self):
+        from rayvault.ffmpeg_render import build_segment_cmd
+        img = self.run_dir / "products" / "p01" / "source_images" / "01_main.jpg"
+        img.parent.mkdir(parents=True, exist_ok=True)
+        img.write_bytes(b"JPG_STUB")
+        lt = self.run_dir / "publish" / "overlays" / "p01_lowerthird.png"
+        lt.parent.mkdir(parents=True, exist_ok=True)
+        lt.write_bytes(b"PNG_STUB")
+        overlays = {"items": [{
+            "rank": 1, "display_mode": "LINK_ONLY",
+            "lowerthird_path": "publish/overlays/p01_lowerthird.png",
+            "qr_path": None,
+            "coords": {
+                "lowerthird": {"x": 0, "y": 0, "w": 1920, "h": 1080},
+                "qr": None,
+            },
+        }]}
+        seg = {"id": "seg_001", "type": "product", "rank": 1,
+               "t0": 2.0, "t1": 6.0, "frames": 120,
+               "visual": {"mode": "KEN_BURNS",
+                          "source": "products/p01/source_images/01_main.jpg"}}
+        cmd = build_segment_cmd(seg, self.run_dir, self.output, overlays, Path("/tmp/seg.mp4"))
+        cmd_str = " ".join(cmd)
+        self.assertIn("overlay=0:0", cmd_str)
+        self.assertIn("filter_complex", cmd_str)
+
+
+class TestFFmpegErrorClassification(unittest.TestCase):
+    """Tests for FFmpeg error classification."""
+
+    def test_missing_input(self):
+        from rayvault.ffmpeg_render import classify_ffmpeg_error
+        self.assertEqual(
+            classify_ffmpeg_error("No such file or directory"),
+            "MISSING_INPUT",
+        )
+
+    def test_corrupt_media(self):
+        from rayvault.ffmpeg_render import classify_ffmpeg_error
+        self.assertEqual(
+            classify_ffmpeg_error("Invalid data found when processing input"),
+            "CORRUPT_MEDIA",
+        )
+
+    def test_unknown_error(self):
+        from rayvault.ffmpeg_render import classify_ffmpeg_error
+        self.assertEqual(
+            classify_ffmpeg_error("Something unusual happened"),
+            "FFMPEG_UNKNOWN",
+        )
+
+
+class TestFFmpegRenderDryRun(unittest.TestCase):
+    """Tests for ffmpeg_render.py dry-run mode (no actual FFmpeg calls)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.run_dir = Path(self.tmp) / "RUN_TEST"
+        self.run_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def _create_wav(self, path, duration_sec):
+        import struct
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rate = 44100
+        nframes = int(duration_sec * rate)
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(b"\x00\x00" * nframes)
+
+    def test_dry_run_passes_validation(self):
+        from rayvault.ffmpeg_render import render
+        # Create all required files
+        self._write_json(self.run_dir / "00_manifest.json", {"run_id": "TEST"})
+        self._write_json(self.run_dir / "05_render_config.json", {
+            "version": "1.3",
+            "output": {"w": 1920, "h": 1080, "fps": 30},
+            "ray": {"frame_path": "03_frame.png"},
+            "audio": {"path": "02_audio.wav", "duration_sec": 7.5},
+            "segments": [
+                {"id": "seg_000", "type": "intro", "t0": 0.0, "t1": 2.0, "frames": 60},
+                {"id": "seg_001", "type": "product", "rank": 1, "t0": 2.0, "t1": 6.0,
+                 "frames": 120, "visual": {"mode": "SKIP", "source": None}},
+                {"id": "seg_002", "type": "outro", "t0": 6.0, "t1": 7.5, "frames": 45},
+            ],
+        })
+        self._write_json(
+            self.run_dir / "publish" / "overlays" / "overlays_index.json",
+            {"episode_truth_tier": "GREEN", "items": []},
+        )
+        self._create_wav(self.run_dir / "02_audio.wav", 7.5)
+        # Create frame
+        (self.run_dir / "03_frame.png").write_bytes(b"PNG_STUB")
+
+        result = render(self.run_dir, apply=False)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "DRY_RUN")
+        self.assertEqual(result.segments_total, 3)
+        self.assertTrue(len(result.inputs_hash) > 0)
+
+    def test_dry_run_fails_without_overlays_index(self):
+        from rayvault.ffmpeg_render import render
+        self._write_json(self.run_dir / "00_manifest.json", {"run_id": "TEST"})
+        self._write_json(self.run_dir / "05_render_config.json", {"segments": []})
+        self._create_wav(self.run_dir / "02_audio.wav", 5.0)
+        result = render(self.run_dir, apply=False)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "BLOCKED")
+
+    def test_dry_run_global_hash_deterministic(self):
+        from rayvault.ffmpeg_render import render
+        self._write_json(self.run_dir / "00_manifest.json", {"run_id": "TEST"})
+        self._write_json(self.run_dir / "05_render_config.json", {
+            "version": "1.3",
+            "output": {"w": 1920, "h": 1080, "fps": 30},
+            "ray": {"frame_path": "03_frame.png"},
+            "segments": [
+                {"id": "seg_000", "type": "intro", "t0": 0.0, "t1": 2.0, "frames": 60},
+                {"id": "seg_001", "type": "outro", "t0": 2.0, "t1": 3.5, "frames": 45},
+            ],
+        })
+        self._write_json(
+            self.run_dir / "publish" / "overlays" / "overlays_index.json",
+            {"items": []},
+        )
+        self._create_wav(self.run_dir / "02_audio.wav", 3.5)
+        (self.run_dir / "03_frame.png").write_bytes(b"PNG_STUB")
+
+        r1 = render(self.run_dir, apply=False)
+        r2 = render(self.run_dir, apply=False)
+        self.assertEqual(r1.inputs_hash, r2.inputs_hash)
 
 
 if __name__ == "__main__":

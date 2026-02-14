@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism prompts prompts-verify run-handoff run-status products-fetch products-fetch-dry render-config claims final-validate final-validate-no-video upload-receipt upload-verify verify verify-manual verify-uploads verify-uploads-manual run-cleanup run-cleanup-apply cache-prune cache-prune-apply cache-prune-aggressive amazon-quarantine amazon-quarantine-clear overlays overlays-apply overlays-force-qr
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism prompts prompts-verify run-handoff run-status products-fetch products-fetch-dry render-config claims final-validate final-validate-no-video upload-receipt upload-verify verify verify-manual verify-uploads verify-uploads-manual run-cleanup run-cleanup-apply cache-prune cache-prune-apply cache-prune-aggressive amazon-quarantine amazon-quarantine-clear overlays overlays-apply overlays-force-qr render render-apply render-debug
 
 # --- Morning routine ---
 doctor:
@@ -295,6 +295,16 @@ overlays-apply:
 
 overlays-force-qr:
 	python3 -m rayvault.qr_overlay_builder --run-dir state/runs/$(RUN_ID) --apply --force-qr
+
+# --- FFmpeg render (segmented video assembler) ---
+render:
+	caffeinate -dimsu python3 -m rayvault.ffmpeg_render --run-dir state/runs/$(RUN_ID)
+
+render-apply:
+	caffeinate -dimsu python3 -m rayvault.ffmpeg_render --run-dir state/runs/$(RUN_ID) --apply
+
+render-debug:
+	caffeinate -dimsu python3 -m rayvault.ffmpeg_render --run-dir state/runs/$(RUN_ID) --apply --debug
 
 # --- Run cleanup (post-publish purge) ---
 run-cleanup:

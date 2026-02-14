@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Constants
 # ---------------------------------------------------------------------------
 
-RENDER_CONFIG_VERSION = "1.1"
+RENDER_CONFIG_VERSION = "1.3"
 
 T_INTRO = 2.0
 T_OUTRO = 1.5
@@ -50,6 +50,17 @@ AUDIO_DEFAULTS = {
 }
 
 CANVAS_DEFAULTS = {"w": 1920, "h": 1080, "fps": 30}
+
+OUTPUT_DEFAULTS = {
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "vcodec": "libx264",
+    "acodec": "aac",
+    "crf": 18,
+    "preset": "slow",
+    "pix_fmt": "yuv420p",
+}
 
 RAY_DEFAULTS = {
     "frame_path": "03_frame.png",
@@ -210,30 +221,54 @@ def generate_timeline(
         T_PER_PRODUCT_MAX,
     ) if total > 0 else T_PER_PRODUCT_DEFAULT
 
+    fps = CANVAS_DEFAULTS["fps"]
     segments: List[Dict[str, Any]] = []
+    seg_idx = 0
     t = 0.0
 
     # Intro
-    segments.append({"type": "intro", "t0": round(t, 3), "t1": round(t + T_INTRO, 3)})
+    t0 = round(t, 3)
+    t1 = round(t + T_INTRO, 3)
+    segments.append({
+        "id": f"seg_{seg_idx:03d}",
+        "type": "intro",
+        "t0": t0,
+        "t1": t1,
+        "frames": round((t1 - t0) * fps),
+    })
     t += T_INTRO
+    seg_idx += 1
 
     # Product segments
     for p in product_visuals:
-        seg = {
+        t0 = round(t, 3)
+        t1 = round(t + per_product, 3)
+        seg: Dict[str, Any] = {
+            "id": f"seg_{seg_idx:03d}",
             "type": "product",
             "rank": p["rank"],
             "asin": p.get("asin", ""),
-            "t0": round(t, 3),
-            "t1": round(t + per_product, 3),
+            "t0": t0,
+            "t1": t1,
+            "frames": round((t1 - t0) * fps),
             "visual": p["visual"],
         }
         if p.get("title"):
             seg["title"] = p["title"][:60]
         segments.append(seg)
         t += per_product
+        seg_idx += 1
 
     # Outro
-    segments.append({"type": "outro", "t0": round(t, 3), "t1": round(t + T_OUTRO, 3)})
+    t0 = round(t, 3)
+    t1 = round(t + T_OUTRO, 3)
+    segments.append({
+        "id": f"seg_{seg_idx:03d}",
+        "type": "outro",
+        "t0": t0,
+        "t1": t1,
+        "frames": round((t1 - t0) * fps),
+    })
 
     return segments
 
@@ -341,6 +376,7 @@ def generate_render_config(
     config = {
         "version": RENDER_CONFIG_VERSION,
         "generated_at_utc": utc_now_iso(),
+        "output": OUTPUT_DEFAULTS.copy(),
         "canvas": CANVAS_DEFAULTS.copy(),
         "audio": {
             "path": "02_audio.wav",
