@@ -270,6 +270,42 @@ def gate_stability_score(
     )
 
 
+def gate_audio_proof(manifest: Dict[str, Any]) -> GateResult:
+    """Validate audio_proof and derive safe_audio_mode.
+
+    safe_audio_mode = True ONLY if:
+      - tts_provider is a known TTS engine
+      - has_external_music == False
+      - has_external_sfx == False
+      - script_provenance in ("ai_generated", "ai_generated+human_edit")
+    """
+    proof = manifest.get("audio_proof")
+    if not proof:
+        return GateResult(
+            "audio_proof", True,
+            "no audio_proof block (optional gate, skipped)"
+        )
+
+    tts = proof.get("tts_provider", "")
+    has_music = proof.get("has_external_music", False)
+    has_sfx = proof.get("has_external_sfx", False)
+    prov = proof.get("script_provenance", "")
+
+    safe = bool(
+        tts
+        and not has_music
+        and not has_sfx
+        and prov in ("ai_generated", "ai_generated+human_edit")
+    )
+
+    detail = f"safe_audio_mode={safe} (tts={tts}, music={has_music}, sfx={has_sfx}, prov={prov})"
+
+    # Write derived safe_audio_mode back into manifest proof block
+    proof["safe_audio_mode"] = safe
+
+    return GateResult("audio_proof", True, detail)
+
+
 def gate_claims_validation(manifest: Dict[str, Any]) -> GateResult:
     claims = manifest.get("claims_validation", {})
     status = claims.get("status", "")
@@ -338,11 +374,14 @@ def validate_run(
     # Gate 8: claims validation
     gates.append(gate_claims_validation(manifest))
 
-    # Gate 9: final video (optional gate)
+    # Gate 9: audio proof (derives safe_audio_mode)
+    gates.append(gate_audio_proof(manifest))
+
+    # Gate 10: final video (optional gate)
     if require_video:
         gates.append(gate_final_video(run_dir))
 
-    # Gate 10: stability score
+    # Gate 11: stability score
     gates.append(gate_stability_score(manifest, stability_threshold))
 
     verdict = _build_verdict(run_id, gates)

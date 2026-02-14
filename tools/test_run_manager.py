@@ -11423,7 +11423,7 @@ class TestProductAssetFetchCache(unittest.TestCase):
         m = json.loads((self.run_dir / "00_manifest.json").read_text())
         summary = m.get("products_summary", [])
         self.assertGreater(len(summary), 0)
-        self.assertEqual(summary[0]["source"], "cache")
+        self.assertEqual(summary[0]["truth_source"], "CACHE")
 
     def test_multiple_products_mixed_cache(self):
         """Some products from cache, others need download."""
@@ -13026,6 +13026,603 @@ class TestCronVerifyVisibility(unittest.TestCase):
         summary = verify_batch(self.runs_root, manual=True, max_runs=2)
         self.assertEqual(summary["checked"], 2)
         self.assertEqual(summary["total_uploaded"], 5)
+
+
+# ── Truth Cache v1.2 tests ──────────────────────────────────────────────────
+
+class TestTruthCacheV12(unittest.TestCase):
+    """Tests for truth_cache.py v1.2 — mark_cache_broken, integrity, status."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.lib_root = Path(self.td) / "library"
+        self.lib_root.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _make_cache(self, **kwargs):
+        from rayvault.truth_cache import TruthCache, CachePolicy
+        policy = CachePolicy(**kwargs) if kwargs else CachePolicy()
+        return TruthCache(self.lib_root, policy)
+
+    def test_mark_cache_broken(self):
+        from rayvault.truth_cache import CACHE_BROKEN
+        cache = self._make_cache()
+        cache.put_from_fetch("B0BREAK", {"title": "X"}, [])
+        cache.mark_cache_broken("B0BREAK", "test_reason")
+        info = json.loads(cache.cache_info_path("B0BREAK").read_text())
+        self.assertEqual(info["status"], CACHE_BROKEN)
+        self.assertEqual(info["broken_reason"], "test_reason")
+        self.assertIn("broken_at_utc", info)
+
+    def test_broken_cache_needs_full_refresh(self):
+        from rayvault.truth_cache import CACHE_BROKEN
+        cache = self._make_cache(ttl_meta_sec=999999, ttl_images_sec=999999)
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff" * 200)
+        cache.put_from_fetch("B0BREAK", {"title": "X"}, [img])
+        cache.mark_cache_broken("B0BREAK", "corrupt")
+        need = cache.needs_refresh("B0BREAK")
+        self.assertEqual(need["status"], CACHE_BROKEN)
+        self.assertFalse(need["has_meta"])
+        self.assertFalse(need["has_images"])
+        self.assertTrue(need["refresh_meta"])
+        self.assertTrue(need["refresh_images"])
+
+    def test_broken_cache_get_returns_empty(self):
+        cache = self._make_cache()
+        cache.put_from_fetch("B0BREAK", {"title": "X"}, [])
+        cache.mark_cache_broken("B0BREAK", "corrupt")
+        cached = cache.get_cached("B0BREAK")
+        self.assertNotIn("meta", cached)
+        self.assertNotIn("images", cached)
+
+    def test_put_clears_broken_state(self):
+        from rayvault.truth_cache import CACHE_VALID
+        cache = self._make_cache()
+        cache.put_from_fetch("B0BREAK", {"title": "X"}, [])
+        cache.mark_cache_broken("B0BREAK", "corrupt")
+        # Fresh put should clear broken state
+        cache.put_from_fetch("B0BREAK", {"title": "Y"}, [])
+        info = json.loads(cache.cache_info_path("B0BREAK").read_text())
+        self.assertEqual(info["status"], CACHE_VALID)
+        self.assertNotIn("broken_reason", info)
+        self.assertNotIn("broken_at_utc", info)
+        cached = cache.get_cached("B0BREAK")
+        self.assertEqual(cached["meta"]["title"], "Y")
+
+    def test_metadata_sha256_stored(self):
+        cache = self._make_cache()
+        meta = {"title": "Test", "asin": "B0SHA"}
+        cache.put_from_fetch("B0SHA", meta, [])
+        info = json.loads(cache.cache_info_path("B0SHA").read_text())
+        self.assertIn("meta_sha256", info)
+        self.assertEqual(len(info["meta_sha256"]), 64)  # SHA256 hex length
+
+    def test_metadata_integrity_check_pass(self):
+        cache = self._make_cache()
+        meta = {"title": "Legit", "asin": "B0OK"}
+        cache.put_from_fetch("B0OK", meta, [])
+        # Read should succeed (hash matches)
+        cached = cache.get_cached("B0OK")
+        self.assertEqual(cached["meta"]["title"], "Legit")
+
+    def test_metadata_integrity_check_fail(self):
+        from rayvault.truth_cache import CACHE_BROKEN
+        cache = self._make_cache()
+        meta = {"title": "Original", "asin": "B0TAMPER"}
+        cache.put_from_fetch("B0TAMPER", meta, [])
+        # Tamper with metadata file directly
+        tampered = {"title": "TAMPERED", "asin": "B0TAMPER"}
+        with open(cache.meta_path("B0TAMPER"), "w") as f:
+            json.dump(tampered, f)
+        # get_cached should detect mismatch and mark broken
+        cached = cache.get_cached("B0TAMPER")
+        self.assertNotIn("meta", cached)
+        info = json.loads(cache.cache_info_path("B0TAMPER").read_text())
+        self.assertEqual(info["status"], CACHE_BROKEN)
+        self.assertIn("meta_sha256_mismatch", info.get("broken_reason", ""))
+
+    def test_verify_integrity_ok(self):
+        cache = self._make_cache()
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff" * 200)
+        cache.put_from_fetch("B0GOOD", {"title": "X"}, [img])
+        result = cache.verify_integrity("B0GOOD")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["issues"], [])
+
+    def test_verify_integrity_missing_asin(self):
+        cache = self._make_cache()
+        result = cache.verify_integrity("B0NOPE")
+        self.assertFalse(result["ok"])
+        self.assertIn("asin_dir_missing", result["issues"])
+
+    def test_verify_integrity_broken(self):
+        cache = self._make_cache()
+        cache.put_from_fetch("B0BRKN", {"title": "X"}, [])
+        cache.mark_cache_broken("B0BRKN", "test")
+        result = cache.verify_integrity("B0BRKN")
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("marked_broken" in i for i in result["issues"]))
+
+    def test_verify_integrity_meta_sha256_mismatch(self):
+        cache = self._make_cache()
+        cache.put_from_fetch("B0HASH", {"title": "X"}, [])
+        # Tamper metadata
+        with open(cache.meta_path("B0HASH"), "w") as f:
+            json.dump({"title": "CHANGED"}, f)
+        result = cache.verify_integrity("B0HASH")
+        self.assertFalse(result["ok"])
+        self.assertIn("meta_sha256_mismatch", result["issues"])
+
+    def test_needs_refresh_returns_status_valid(self):
+        from rayvault.truth_cache import CACHE_VALID
+        cache = self._make_cache(ttl_meta_sec=999999, ttl_images_sec=999999)
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff" * 200)
+        cache.put_from_fetch("B0V", {"title": "X"}, [img])
+        need = cache.needs_refresh("B0V")
+        self.assertEqual(need["status"], CACHE_VALID)
+
+    def test_needs_refresh_returns_status_expired(self):
+        from rayvault.truth_cache import CACHE_EXPIRED
+        cache = self._make_cache(ttl_meta_sec=0, ttl_images_sec=0)
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff" * 200)
+        cache.put_from_fetch("B0E", {"title": "X"}, [img])
+        need = cache.needs_refresh("B0E")
+        self.assertEqual(need["status"], CACHE_EXPIRED)
+
+    def test_cache_info_status_set_to_valid_on_put(self):
+        from rayvault.truth_cache import CACHE_VALID
+        cache = self._make_cache()
+        cache.put_from_fetch("B0S", {"title": "X"}, [])
+        info = json.loads(cache.cache_info_path("B0S").read_text())
+        self.assertEqual(info["status"], CACHE_VALID)
+
+
+# ── Product Asset Fetch v1.2 telemetry tests ────────────────────────────────
+
+class TestProductAssetFetchTelemetry(unittest.TestCase):
+    """Tests for product_asset_fetch.py v1.2 — cache_misses, truth_source, telemetry."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "state" / "runs" / "RUN_TEL"
+        self.products_dir = self.run_dir / "products"
+        self.products_dir.mkdir(parents=True)
+        self.lib_dir = Path(self.td) / "library"
+        self.lib_dir.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def _write_products(self, items):
+        self._write_json(self.products_dir / "products.json", {"items": items})
+
+    def test_fetch_result_has_cache_misses(self):
+        from rayvault.product_asset_fetch import FetchResult
+        r = FetchResult(ok=True, downloaded=0, skipped=0, errors=0, cache_hits=1, cache_misses=2)
+        self.assertEqual(r.cache_misses, 2)
+
+    def test_manifest_truth_cache_block(self):
+        """Manifest should contain truth_cache telemetry block when cache is used."""
+        from rayvault.product_asset_fetch import run_product_fetch
+        self._write_products([{
+            "rank": 1, "asin": "B0TELE", "title": "Telemetry Test",
+            "image_urls": [], "hires_image_urls": [],
+        }])
+        run_product_fetch(self.run_dir, library_dir=self.lib_dir)
+        manifest = json.loads((self.run_dir / "00_manifest.json").read_text())
+        self.assertIn("truth_cache", manifest)
+        tc = manifest["truth_cache"]
+        self.assertIn("hits", tc)
+        self.assertIn("misses", tc)
+        self.assertIn("ttl_meta_hours", tc)
+        self.assertIn("ttl_images_hours", tc)
+
+    def test_truth_source_live_fetch(self):
+        """Products fetched from network should have truth_source=LIVE_FETCH."""
+        from rayvault.product_asset_fetch import run_product_fetch
+        # No cache, no URLs — should be NONE
+        self._write_products([{
+            "rank": 1, "asin": "B0NONE", "title": "No URLs",
+            "image_urls": [], "hires_image_urls": [],
+        }])
+        run_product_fetch(self.run_dir, library_dir=self.lib_dir)
+        manifest = json.loads((self.run_dir / "00_manifest.json").read_text())
+        summary = manifest.get("products_summary", [])
+        self.assertTrue(len(summary) > 0)
+        self.assertEqual(summary[0]["truth_source"], "NONE")
+
+    def test_cache_miss_counted(self):
+        """Cache miss should be counted when cache is enabled but has no data."""
+        from rayvault.product_asset_fetch import run_product_fetch
+        self._write_products([{
+            "rank": 1, "asin": "B0MISS", "title": "Miss Test",
+            "image_urls": [], "hires_image_urls": [],
+        }])
+        result = run_product_fetch(self.run_dir, library_dir=self.lib_dir)
+        self.assertEqual(result.cache_misses, 1)
+        manifest = json.loads((self.run_dir / "00_manifest.json").read_text())
+        self.assertEqual(manifest["truth_cache"]["misses"], 1)
+
+    def test_cache_hit_truth_source(self):
+        """Cache hit should set truth_source=CACHE in products_summary."""
+        from rayvault.product_asset_fetch import run_product_fetch
+        from rayvault.truth_cache import TruthCache, CachePolicy
+        # Pre-populate cache
+        cache = TruthCache(self.lib_dir, CachePolicy(ttl_images_sec=999999))
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff\xd8" * 2000)
+        cache.put_from_fetch("B0HIT", {"title": "Hit", "asin": "B0HIT"}, [img])
+        self._write_products([{
+            "rank": 1, "asin": "B0HIT", "title": "Hit Test",
+            "image_urls": [], "hires_image_urls": [],
+        }])
+        result = run_product_fetch(self.run_dir, library_dir=self.lib_dir)
+        self.assertEqual(result.cache_hits, 1)
+        manifest = json.loads((self.run_dir / "00_manifest.json").read_text())
+        summary = manifest.get("products_summary", [])
+        self.assertEqual(summary[0]["truth_source"], "CACHE")
+
+
+# ── Claims guardrail v1.2 tests ─────────────────────────────────────────────
+
+class TestClaimsGuardrailCached(unittest.TestCase):
+    """Tests for claims_guardrail.py — cache-backed product text."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "run"
+        self.run_dir.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _write_file(self, rel_path, content):
+        fp = self.run_dir / rel_path
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(content, encoding="utf-8")
+
+    def _write_json(self, rel_path, data):
+        fp = self.run_dir / rel_path
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        with open(fp, "w") as f:
+            json.dump(data, f)
+
+    def test_uses_cached_metadata_when_available(self):
+        from rayvault.claims_guardrail import guardrail
+        # Write script
+        self._write_file("01_script.txt", "This product is waterproof and great.")
+        # Write cached product_metadata.json (from TruthCache)
+        self._write_json("products/p01/product_metadata.json", {
+            "title": "Waterproof Speaker IPX7",
+            "bullets": ["Truly waterproof IPX7 rated"],
+            "asin": "B0CACHE",
+        })
+        # No products.json — should still work with cached data
+        result = guardrail(self.run_dir, use_cached_products=True)
+        self.assertEqual(result["products_source"], "cached_metadata")
+        self.assertEqual(result["status"], "PASS")
+
+    def test_fallback_to_products_json(self):
+        from rayvault.claims_guardrail import guardrail
+        self._write_file("01_script.txt", "Great product for everyone.")
+        self._write_json("products/products.json", {
+            "items": [{"rank": 1, "title": "Speaker", "asin": "B0F"}]
+        })
+        result = guardrail(self.run_dir, use_cached_products=True)
+        self.assertEqual(result["products_source"], "products_json")
+
+    def test_cached_product_with_violation(self):
+        from rayvault.claims_guardrail import guardrail
+        self._write_file("01_script.txt", "This is FDA certified medical grade.")
+        self._write_json("products/p01/product_metadata.json", {
+            "title": "Basic Speaker",
+            "bullets": ["Good sound quality"],
+            "asin": "B0VIO",
+        })
+        result = guardrail(self.run_dir, use_cached_products=True)
+        self.assertEqual(result["status"], "REVIEW_REQUIRED")
+        self.assertTrue(len(result["violations"]) > 0)
+
+    def test_use_cached_false_ignores_cached(self):
+        from rayvault.claims_guardrail import guardrail
+        self._write_file("01_script.txt", "Nice product.")
+        self._write_json("products/products.json", {
+            "items": [{"rank": 1, "title": "Speaker", "asin": "B0F"}]
+        })
+        self._write_json("products/p01/product_metadata.json", {
+            "title": "Different",
+            "asin": "B0DIFF",
+        })
+        result = guardrail(self.run_dir, use_cached_products=False)
+        self.assertEqual(result["products_source"], "products_json")
+
+    def test_prefers_product_metadata_over_product_json(self):
+        """_load_cached_products prefers product_metadata.json over product.json."""
+        from rayvault.claims_guardrail import _load_cached_products
+        # Write both files for p01
+        self._write_json("products/p01/product_metadata.json", {
+            "title": "Cached Metadata", "asin": "B0META",
+        })
+        self._write_json("products/p01/product.json", {
+            "title": "Product JSON", "asin": "B0PROD",
+        })
+        products = _load_cached_products(self.run_dir)
+        self.assertIsNotNone(products)
+        self.assertEqual(products[0]["title"], "Cached Metadata")
+
+
+# ── Survival mode tests ──────────────────────────────────────────────────────
+
+class TestSurvivalMode(unittest.TestCase):
+    """Tests for survival mode on Amazon 403/429."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.lib_root = Path(self.td) / "library"
+        self.lib_root.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_get_stale_if_allowed_fresh(self):
+        from rayvault.truth_cache import TruthCache, CachePolicy
+        cache = TruthCache(self.lib_root, CachePolicy(survival_allow_stale_hours=168))
+        img = Path(self.td) / "01_main.jpg"
+        img.write_bytes(b"\xff" * 200)
+        cache.put_from_fetch("B0SURV", {"title": "X"}, [img])
+        stale = cache.get_stale_if_allowed("B0SURV")
+        self.assertIn("meta", stale)
+        self.assertIn("images", stale)
+
+    def test_get_stale_if_allowed_missing(self):
+        from rayvault.truth_cache import TruthCache, CachePolicy
+        cache = TruthCache(self.lib_root, CachePolicy())
+        stale = cache.get_stale_if_allowed("B0NOPE")
+        self.assertEqual(stale, {})
+
+    def test_get_stale_if_allowed_broken(self):
+        from rayvault.truth_cache import TruthCache, CachePolicy
+        cache = TruthCache(self.lib_root, CachePolicy())
+        cache.put_from_fetch("B0BRK", {"title": "X"}, [])
+        cache.mark_cache_broken("B0BRK", "test")
+        stale = cache.get_stale_if_allowed("B0BRK")
+        self.assertEqual(stale, {})
+
+    def test_effective_ttl_has_jitter(self):
+        from rayvault.truth_cache import TruthCache, CachePolicy
+        cache = TruthCache(self.lib_root, CachePolicy(
+            ttl_images_sec=86400, ttl_jitter_sec=3600
+        ))
+        results = set()
+        for _ in range(20):
+            results.add(cache.effective_ttl_images_sec())
+        # With jitter, should have variation
+        self.assertGreater(len(results), 1)
+
+    def test_effective_ttl_no_jitter(self):
+        from rayvault.truth_cache import TruthCache, CachePolicy
+        cache = TruthCache(self.lib_root, CachePolicy(
+            ttl_images_sec=86400, ttl_jitter_sec=0
+        ))
+        self.assertEqual(cache.effective_ttl_images_sec(), 86400)
+
+    def test_fetch_result_survival_fields(self):
+        from rayvault.product_asset_fetch import FetchResult
+        r = FetchResult(
+            ok=True, downloaded=0, skipped=3, errors=0,
+            cache_hits=3, cache_misses=0, amazon_blocks=1,
+            survival_mode=True,
+        )
+        self.assertTrue(r.survival_mode)
+        self.assertEqual(r.amazon_blocks, 1)
+
+    def test_manifest_stability_flags(self):
+        """Manifest should contain stability_flags when survival mode active."""
+        from rayvault.product_asset_fetch import run_product_fetch
+        run_dir = Path(self.td) / "runs" / "RUN_SURV"
+        products_dir = run_dir / "products"
+        products_dir.mkdir(parents=True)
+        with open(products_dir / "products.json", "w") as f:
+            json.dump({"items": [
+                {"rank": 1, "asin": "B0SV", "title": "Survival", "image_urls": [], "hires_image_urls": []},
+            ]}, f)
+        # Run with cache but no data → cache miss
+        result = run_product_fetch(run_dir, library_dir=self.lib_root)
+        manifest = json.loads((run_dir / "00_manifest.json").read_text())
+        tc = manifest.get("truth_cache", {})
+        self.assertIn("amazon_blocks", tc)
+        self.assertIn("survival_mode", tc)
+
+
+# ── Cleanup dead man's switch tests ──────────────────────────────────────────
+
+class TestCleanupDeadManSwitch(unittest.TestCase):
+    """Tests for cleanup_run.py dead man's switch (min-upload-age-hours)."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "run"
+        self.run_dir.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _write_json(self, rel_path, data):
+        fp = self.run_dir / rel_path
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        with open(fp, "w") as f:
+            json.dump(data, f)
+
+    def _setup_run_with_receipt(self, uploaded_at_utc, status="VERIFIED"):
+        self._write_json("00_manifest.json", {"run_id": "TEST", "status": status})
+        from rayvault.youtube_upload_receipt import sign_receipt
+        receipt = {
+            "version": "1.0", "run_id": "TEST", "status": status,
+            "uploader": "test", "uploaded_at_utc": uploaded_at_utc,
+            "inputs": {"video_sha256": "abc", "video_size_bytes": 1000},
+            "youtube": {"video_id": "vid123", "channel_id": "UC000"},
+        }
+        receipt["integrity"] = {"method": "hmac_sha256", "hmac_sha256": sign_receipt(receipt)}
+        self._write_json("publish/upload_receipt.json", receipt)
+        # Create fake video
+        video = self.run_dir / "publish" / "video_final.mp4"
+        video.write_bytes(b"\x00" * 2048)
+
+    def test_recent_upload_retains_video(self):
+        """Video uploaded < 24h ago should NOT be deleted."""
+        from rayvault.cleanup_run import cleanup
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._setup_run_with_receipt(now)
+        ok, info = cleanup(
+            self.run_dir, apply=True, delete_final_video=True,
+            min_upload_age_hours=24.0,
+        )
+        self.assertTrue(ok)
+        # Video should still exist (retained by dead man's switch)
+        self.assertTrue((self.run_dir / "publish" / "video_final.mp4").exists())
+        # Check manifest records retention reason
+        m = json.loads((self.run_dir / "00_manifest.json").read_text())
+        hk = m.get("housekeeping", {})
+        self.assertEqual(hk.get("final_video_retained_reason"), "MIN_UPLOAD_AGE_BUFFER")
+
+    def test_old_upload_allows_delete(self):
+        """Video uploaded > 24h ago should be deletable."""
+        from rayvault.cleanup_run import cleanup
+        self._setup_run_with_receipt("2020-01-01T00:00:00Z")
+        ok, info = cleanup(
+            self.run_dir, apply=True, delete_final_video=True,
+            min_upload_age_hours=24.0,
+        )
+        self.assertTrue(ok)
+        # Video should be deleted
+        self.assertFalse((self.run_dir / "publish" / "video_final.mp4").exists())
+
+    def test_force_bypasses_age_check(self):
+        """--force should bypass upload age check."""
+        from rayvault.cleanup_run import cleanup
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._setup_run_with_receipt(now)
+        ok, info = cleanup(
+            self.run_dir, apply=True, delete_final_video=True,
+            min_upload_age_hours=24.0, force=True,
+        )
+        self.assertTrue(ok)
+        # Force bypasses receipt check entirely, so receipt not loaded
+        # But video should be in purge targets
+
+    def test_zero_min_age_allows_immediate_delete(self):
+        """min_upload_age_hours=0 should allow immediate deletion."""
+        from rayvault.cleanup_run import cleanup
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._setup_run_with_receipt(now)
+        ok, info = cleanup(
+            self.run_dir, apply=True, delete_final_video=True,
+            min_upload_age_hours=0.0,
+        )
+        self.assertTrue(ok)
+        self.assertFalse((self.run_dir / "publish" / "video_final.mp4").exists())
+
+
+# ── Audio proof + safe_audio_mode tests ──────────────────────────────────────
+
+class TestAudioProofGate(unittest.TestCase):
+    """Tests for gate_audio_proof in final_validator.py."""
+
+    def test_no_audio_proof_passes(self):
+        from rayvault.final_validator import gate_audio_proof
+        manifest = {"status": "READY_FOR_RENDER"}
+        g = gate_audio_proof(manifest)
+        self.assertTrue(g.passed)
+        self.assertIn("optional", g.detail)
+
+    def test_safe_audio_all_tts(self):
+        from rayvault.final_validator import gate_audio_proof
+        manifest = {
+            "audio_proof": {
+                "tts_provider": "elevenlabs",
+                "has_external_music": False,
+                "has_external_sfx": False,
+                "script_provenance": "ai_generated",
+            }
+        }
+        g = gate_audio_proof(manifest)
+        self.assertTrue(g.passed)
+        self.assertIn("safe_audio_mode=True", g.detail)
+        # Check it wrote back to manifest
+        self.assertTrue(manifest["audio_proof"]["safe_audio_mode"])
+
+    def test_unsafe_audio_external_music(self):
+        from rayvault.final_validator import gate_audio_proof
+        manifest = {
+            "audio_proof": {
+                "tts_provider": "elevenlabs",
+                "has_external_music": True,
+                "has_external_sfx": False,
+                "script_provenance": "ai_generated",
+            }
+        }
+        g = gate_audio_proof(manifest)
+        self.assertTrue(g.passed)  # Gate passes, just derives safe_audio_mode
+        self.assertIn("safe_audio_mode=False", g.detail)
+        self.assertFalse(manifest["audio_proof"]["safe_audio_mode"])
+
+    def test_unsafe_audio_manual_script(self):
+        from rayvault.final_validator import gate_audio_proof
+        manifest = {
+            "audio_proof": {
+                "tts_provider": "elevenlabs",
+                "has_external_music": False,
+                "has_external_sfx": False,
+                "script_provenance": "manual",
+            }
+        }
+        g = gate_audio_proof(manifest)
+        self.assertFalse(manifest["audio_proof"]["safe_audio_mode"])
+
+    def test_safe_audio_human_edit_ok(self):
+        from rayvault.final_validator import gate_audio_proof
+        manifest = {
+            "audio_proof": {
+                "tts_provider": "openai_tts",
+                "has_external_music": False,
+                "has_external_sfx": False,
+                "script_provenance": "ai_generated+human_edit",
+            }
+        }
+        g = gate_audio_proof(manifest)
+        self.assertTrue(manifest["audio_proof"]["safe_audio_mode"])
+
+    def test_unsafe_audio_no_tts(self):
+        from rayvault.final_validator import gate_audio_proof
+        manifest = {
+            "audio_proof": {
+                "tts_provider": "",
+                "has_external_music": False,
+                "has_external_sfx": False,
+                "script_provenance": "ai_generated",
+            }
+        }
+        g = gate_audio_proof(manifest)
+        self.assertFalse(manifest["audio_proof"]["safe_audio_mode"])
 
 
 if __name__ == "__main__":

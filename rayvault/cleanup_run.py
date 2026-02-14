@@ -128,6 +128,7 @@ def cleanup(
     keep_main_image: bool = False,
     delete_final_video: bool = True,
     min_age_hours: float = 0.0,
+    min_upload_age_hours: float = 24.0,
     force: bool = False,
 ) -> Tuple[bool, Union[str, Dict[str, Any]]]:
     """Selective purge of heavy assets from a run directory.
@@ -197,13 +198,34 @@ def cleanup(
             if broll.exists():
                 purge_targets.append(broll)
 
-    # Final video: prefer VERIFIED, but accept UPLOADED with valid HMAC
+    # Final video: dead man's switch — enforce minimum upload age
     final_video = run_dir / "publish" / "video_final.mp4"
     can_delete_final = bool(
         receipt and receipt.get("status") in ("UPLOADED", "VERIFIED")
     )
+    video_retained_reason = None
     if delete_final_video and can_delete_final and final_video.exists():
-        purge_targets.append(final_video)
+        # Dead man's switch: check upload age
+        uploaded_at = receipt.get("uploaded_at_utc", "")
+        upload_age_ok = True
+        if min_upload_age_hours > 0 and uploaded_at and not force:
+            try:
+                t = datetime.fromisoformat(
+                    uploaded_at.replace("Z", "+00:00")
+                ).timestamp()
+                age_h = (time.time() - t) / 3600.0
+                if age_h < min_upload_age_hours:
+                    upload_age_ok = False
+                    next_eligible = datetime.fromtimestamp(
+                        t + min_upload_age_hours * 3600, tz=timezone.utc
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    video_retained_reason = "MIN_UPLOAD_AGE_BUFFER"
+            except Exception:
+                pass  # If can't parse, allow deletion
+
+        if upload_age_ok:
+            purge_targets.append(final_video)
+        # else: final video retained by dead man's switch
 
     # Calculate bytes before delete
     bytes_freed = sum(du_bytes(t) for t in purge_targets if t.exists())
@@ -223,22 +245,23 @@ def cleanup(
     # Write cleanup history to manifest (ring buffer, last 10)
     hk = manifest.setdefault("housekeeping", {})
     hist = hk.setdefault("cleanup_history", [])
-    hist.insert(
-        0,
-        {
-            "at_utc": utc_now_iso(),
-            "applied": apply,
-            "bytes_freed_est": bytes_freed,
-            "targets_count": (
-                deleted_count
-                if apply
-                else len([t for t in purge_targets if t.exists()])
-            ),
-            "keep_main_image": keep_main_image,
-            "delete_final_video": bool(delete_final_video and can_delete_final),
-            "force": force,
-        },
-    )
+    entry: Dict[str, Any] = {
+        "at_utc": utc_now_iso(),
+        "applied": apply,
+        "bytes_freed_est": bytes_freed,
+        "targets_count": (
+            deleted_count
+            if apply
+            else len([t for t in purge_targets if t.exists()])
+        ),
+        "keep_main_image": keep_main_image,
+        "delete_final_video": bool(delete_final_video and can_delete_final),
+        "force": force,
+    }
+    if video_retained_reason:
+        entry["final_video_retained_reason"] = video_retained_reason
+        hk["final_video_retained_reason"] = video_retained_reason
+    hist.insert(0, entry)
     hk["cleanup_history"] = hist[:10]
     atomic_write_json(manifest_path, manifest)
 
@@ -272,6 +295,12 @@ def main(argv: Optional[list] = None) -> int:
     )
     ap.add_argument("--min-age-hours", type=float, default=0.0)
     ap.add_argument(
+        "--min-upload-age-hours",
+        type=float,
+        default=24.0,
+        help="Dead man's switch: min hours since upload before deleting final video (default: 24)",
+    )
+    ap.add_argument(
         "--force",
         action="store_true",
         help="Skip upload receipt check (manual override)",
@@ -285,6 +314,7 @@ def main(argv: Optional[list] = None) -> int:
         keep_main_image=args.keep_main_image,
         delete_final_video=args.delete_final_video,
         min_age_hours=args.min_age_hours,
+        min_upload_age_hours=args.min_upload_age_hours,
         force=args.force,
     )
     if ok:

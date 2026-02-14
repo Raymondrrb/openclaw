@@ -7,12 +7,17 @@ keyed by ASIN with TTL-based freshness checks.
 
 Layout:
     state/library/products/{asin}/
-        cache_info.json          (timestamps, provenance, disk usage)
+        cache_info.json          (timestamps, provenance, disk usage, status)
         product_metadata.json    (title, bullets, price, etc.)
         source_images/
             01_main.jpg|png|webp
             02_alt.jpg ...
-        hashes.json              (sha1 per file)
+        hashes.json              (sha1 per image, sha256 for metadata)
+
+Cache status:
+    VALID    — all data present and within TTL
+    EXPIRED  — data present but beyond TTL (usable as stale fallback)
+    BROKEN   — corrupted or manually flagged (skip, re-download)
 
 Usage:
     from rayvault.truth_cache import TruthCache, CachePolicy
@@ -69,6 +74,22 @@ def sha1_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_json(obj: Any) -> str:
+    """Deterministic SHA256 of a JSON-serializable object."""
+    raw = json.dumps(obj, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return sha256_bytes(raw)
+
+
+# Cache status constants
+CACHE_VALID = "VALID"
+CACHE_EXPIRED = "EXPIRED"
+CACHE_BROKEN = "BROKEN"
+
+
 def du_bytes(path: Path) -> int:
     if not path.exists():
         return 0
@@ -95,6 +116,8 @@ class CachePolicy:
     ttl_images_sec: int = 21 * 24 * 3600  # 21 days for images
     max_gallery: int = 6
     copy_mode: str = "copy"  # "copy" or "symlink"
+    survival_allow_stale_hours: float = 168.0  # 7 days in survival mode
+    ttl_jitter_sec: int = 2 * 3600  # +/- 2h jitter to avoid sync spikes
 
 
 # ---------------------------------------------------------------------------
@@ -146,42 +169,90 @@ class TruthCache:
         """Check if cached data for an ASIN needs refreshing."""
         cached = self.get_cached(asin)
         info = cached.get("cache_info", {})
+
+        # Broken cache always needs full refresh
+        if info.get("status") == CACHE_BROKEN:
+            return {
+                "has_meta": False,
+                "has_images": False,
+                "meta_fresh": False,
+                "images_fresh": False,
+                "refresh_meta": True,
+                "refresh_images": True,
+                "status": CACHE_BROKEN,
+            }
+
         meta_fresh = self._is_fresh(
             info, "meta_fetched_at_utc", self.policy.ttl_meta_sec
         )
         imgs_fresh = self._is_fresh(
             info, "images_fetched_at_utc", self.policy.ttl_images_sec
         )
+
+        # Derive status
+        has_meta = bool(cached.get("meta"))
+        has_images = bool(cached.get("images"))
+        if has_meta and meta_fresh and has_images and imgs_fresh:
+            status = CACHE_VALID
+        elif has_meta or has_images:
+            status = CACHE_EXPIRED
+        else:
+            status = CACHE_EXPIRED  # empty = treat as expired
+
         return {
-            "has_meta": bool(cached.get("meta")),
-            "has_images": bool(cached.get("images")),
+            "has_meta": has_meta,
+            "has_images": has_images,
             "meta_fresh": meta_fresh,
             "images_fresh": imgs_fresh,
             "refresh_meta": not meta_fresh,
             "refresh_images": not imgs_fresh,
+            "status": status,
         }
 
     # --- Read ---
 
     def get_cached(self, asin: str) -> Dict[str, Any]:
-        """Get cached data for an ASIN. Returns empty dict on miss."""
+        """Get cached data for an ASIN. Returns empty dict on miss.
+
+        Verifies metadata SHA256 integrity if stored. On mismatch,
+        marks cache as broken and excludes meta from result.
+        """
         d = self.asin_dir(asin)
         if not d.exists():
             return {}
         out: Dict[str, Any] = {}
+
+        info_p = self.cache_info_path(asin)
+        info = read_json(info_p) if info_p.exists() else {}
+        out["cache_info"] = info
+
+        # Skip reading if broken
+        if info.get("status") == CACHE_BROKEN:
+            return out
+
         meta_p = self.meta_path(asin)
         if meta_p.exists():
             try:
-                out["meta"] = read_json(meta_p)
+                meta = read_json(meta_p)
+                # Verify integrity if hash is stored
+                expected = info.get("meta_sha256")
+                if expected:
+                    actual = sha256_json(meta)
+                    if actual != expected:
+                        self.mark_cache_broken(
+                            asin, f"meta_sha256_mismatch: expected {expected[:12]}… got {actual[:12]}…"
+                        )
+                        out["cache_info"] = read_json(self.cache_info_path(asin))
+                        return out
+                out["meta"] = meta
             except Exception:
                 pass
+
         imgs_d = self.images_dir(asin)
         if imgs_d.exists():
             out["images"] = sorted(
                 [p for p in imgs_d.iterdir() if p.is_file()]
             )
-        info_p = self.cache_info_path(asin)
-        out["cache_info"] = read_json(info_p) if info_p.exists() else {}
         return out
 
     def has_main_image(self, asin: str) -> bool:
@@ -192,6 +263,76 @@ class TruthCache:
         return any(
             f.name.startswith("01_main") for f in imgs.iterdir() if f.is_file()
         )
+
+    # --- Integrity ---
+
+    def mark_cache_broken(self, asin: str, reason: str) -> None:
+        """Flag an ASIN's cache as broken without deleting files.
+
+        Broken entries are skipped by needs_refresh/get_cached
+        until overwritten by a fresh put_from_fetch.
+        """
+        info: Dict[str, Any] = {}
+        if self.cache_info_path(asin).exists():
+            try:
+                info = read_json(self.cache_info_path(asin))
+            except Exception:
+                pass
+        info["status"] = CACHE_BROKEN
+        info["broken_reason"] = reason
+        info["broken_at_utc"] = utc_now_iso()
+        atomic_write_json(self.cache_info_path(asin), info)
+
+    def verify_integrity(self, asin: str) -> Dict[str, Any]:
+        """Check integrity of cached data for an ASIN.
+
+        Returns {"ok": bool, "issues": [...]}
+        """
+        issues: List[str] = []
+        d = self.asin_dir(asin)
+        if not d.exists():
+            return {"ok": False, "issues": ["asin_dir_missing"]}
+
+        info_p = self.cache_info_path(asin)
+        if not info_p.exists():
+            issues.append("cache_info_missing")
+            return {"ok": False, "issues": issues}
+
+        try:
+            info = read_json(info_p)
+        except Exception:
+            issues.append("cache_info_corrupt")
+            return {"ok": False, "issues": issues}
+
+        if info.get("status") == CACHE_BROKEN:
+            issues.append(f"marked_broken: {info.get('broken_reason', 'unknown')}")
+            return {"ok": False, "issues": issues}
+
+        # Check metadata integrity
+        meta_p = self.meta_path(asin)
+        if meta_p.exists():
+            try:
+                meta = read_json(meta_p)
+                expected = info.get("meta_sha256")
+                if expected:
+                    actual = sha256_json(meta)
+                    if actual != expected:
+                        issues.append("meta_sha256_mismatch")
+            except Exception:
+                issues.append("meta_corrupt")
+        else:
+            issues.append("meta_missing")
+
+        # Check images exist
+        imgs_d = self.images_dir(asin)
+        if imgs_d.is_dir():
+            img_files = [f for f in imgs_d.iterdir() if f.is_file()]
+            if not img_files:
+                issues.append("images_empty")
+        else:
+            issues.append("images_dir_missing")
+
+        return {"ok": len(issues) == 0, "issues": issues}
 
     # --- Write ---
 
@@ -260,10 +401,15 @@ class TruthCache:
                 pass
         if meta:
             info["meta_fetched_at_utc"] = utc_now_iso()
+            info["meta_sha256"] = sha256_json(meta)
         if stored:
             info["images_fetched_at_utc"] = utc_now_iso()
         info["note"] = note
         info["fetched_from"] = "amazon"
+        info["status"] = CACHE_VALID
+        # Clear any prior broken state
+        info.pop("broken_reason", None)
+        info.pop("broken_at_utc", None)
         if http_status is not None:
             info["http_status_last"] = http_status
         info["disk_bytes"] = du_bytes(d)
@@ -327,6 +473,63 @@ class TruthCache:
             "mode": mode,
             "images_copied": copied,
         }
+
+    # --- Survival mode ---
+
+    def get_stale_if_allowed(self, asin: str) -> Dict[str, Any]:
+        """Get cached data for survival mode (accept stale up to policy limit).
+
+        Returns cached dict (same format as get_cached) or empty dict.
+        """
+        d = self.asin_dir(asin)
+        if not d.exists():
+            return {}
+
+        info_p = self.cache_info_path(asin)
+        if not info_p.exists():
+            return {}
+        try:
+            info = read_json(info_p)
+        except Exception:
+            return {}
+
+        if info.get("status") == CACHE_BROKEN:
+            return {}
+
+        # Check if within survival stale window
+        fetched = info.get("images_fetched_at_utc") or info.get("meta_fetched_at_utc")
+        if not fetched:
+            return {}
+        try:
+            t = datetime.fromisoformat(fetched.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return {}
+        age_hours = (time.time() - t) / 3600.0
+        if age_hours > self.policy.survival_allow_stale_hours:
+            return {}
+
+        # Accept stale — read assets
+        out: Dict[str, Any] = {"cache_info": info}
+        meta_p = self.meta_path(asin)
+        if meta_p.exists():
+            try:
+                out["meta"] = read_json(meta_p)
+            except Exception:
+                pass
+        imgs_d = self.images_dir(asin)
+        if imgs_d.exists():
+            out["images"] = sorted(
+                [p for p in imgs_d.iterdir() if p.is_file()]
+            )
+        return out
+
+    def effective_ttl_images_sec(self) -> int:
+        """TTL with jitter applied (call per-product for anti-pattern)."""
+        import random
+        jitter = self.policy.ttl_jitter_sec
+        if jitter <= 0:
+            return self.policy.ttl_images_sec
+        return self.policy.ttl_images_sec + random.randint(-jitter, jitter)
 
     # --- Stats ---
 

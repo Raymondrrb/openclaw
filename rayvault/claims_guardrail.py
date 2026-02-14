@@ -172,8 +172,42 @@ def check_evidence(
 # ---------------------------------------------------------------------------
 
 
-def guardrail(run_dir: Path) -> Dict[str, Any]:
+def _load_cached_products(run_dir: Path) -> Optional[List[Dict[str, Any]]]:
+    """Try to load product metadata from per-product cached files.
+
+    These are written by product_asset_fetch when cache is enabled,
+    providing a single source of truth for claims validation.
+    """
+    products_dir = run_dir / "products"
+    if not products_dir.is_dir():
+        return None
+    product_dirs = sorted(
+        [d for d in products_dir.iterdir() if d.is_dir() and d.name.startswith("p")],
+        key=lambda d: d.name,
+    )
+    if not product_dirs:
+        return None
+    products = []
+    for pd in product_dirs:
+        # Prefer product_metadata.json (from cache), then product.json
+        for fname in ("product_metadata.json", "product.json"):
+            fp = pd / fname
+            if fp.exists():
+                try:
+                    products.append(read_json(fp))
+                except Exception:
+                    pass
+                break
+    return products if products else None
+
+
+def guardrail(run_dir: Path, use_cached_products: bool = True) -> Dict[str, Any]:
     """Run claims guardrail on a run directory.
+
+    Args:
+        run_dir: Run directory path
+        use_cached_products: If True, prefer cached product metadata
+            (from TruthCache materialization) over raw products.json
 
     Returns result dict with status PASS or REVIEW_REQUIRED.
     """
@@ -189,17 +223,27 @@ def guardrail(run_dir: Path) -> Dict[str, Any]:
             "products_count": 0,
         }
 
-    if not products_path.exists():
-        return {
-            "status": "ERROR",
-            "code": "MISSING_PRODUCTS_JSON",
-            "violations": [],
-            "trigger_sentences_count": 0,
-            "products_count": 0,
-        }
+    # Try cached products first (single source of truth from TruthCache)
+    products = None
+    products_source = "products_json"
+    if use_cached_products:
+        products = _load_cached_products(run_dir)
+        if products:
+            products_source = "cached_metadata"
+
+    # Fallback to products.json
+    if not products:
+        if not products_path.exists():
+            return {
+                "status": "ERROR",
+                "code": "MISSING_PRODUCTS_JSON",
+                "violations": [],
+                "trigger_sentences_count": 0,
+                "products_count": 0,
+            }
+        products = load_products(products_path)
 
     script = script_path.read_text(encoding="utf-8")
-    products = load_products(products_path)
 
     # Build union of all allowed text across products
     allowed_union = " ".join(
@@ -224,6 +268,7 @@ def guardrail(run_dir: Path) -> Dict[str, Any]:
         "violations": violations,
         "trigger_sentences_count": len(trigger_sents),
         "products_count": len(products),
+        "products_source": products_source,
         "checked_at_utc": utc_now_iso(),
     }
 

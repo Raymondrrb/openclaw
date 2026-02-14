@@ -100,6 +100,11 @@ def download_with_retries(
     retries: int = 3,
     backoff: float = 0.8,
 ) -> Tuple[bool, str]:
+    """Download url to out_path with retries.
+
+    Returns (success, reason_string).
+    Reason prefixed with "amazon_block" on 403/429 for survival mode detection.
+    """
     last_err = ""
     for i in range(retries):
         try:
@@ -115,6 +120,8 @@ def download_with_retries(
                 f.write(data)
             return True, "ok"
         except urllib.error.HTTPError as e:
+            if e.code in (403, 429):
+                return False, f"amazon_block_{e.code}"
             last_err = f"http_error {e.code}"
             time.sleep(backoff * (i + 1) * 2.0)
         except Exception as e:
@@ -187,6 +194,9 @@ class FetchResult:
     skipped: int
     errors: int
     cache_hits: int = 0
+    cache_misses: int = 0
+    amazon_blocks: int = 0
+    survival_mode: bool = False
     notes: List[str] = field(default_factory=list)
 
 
@@ -261,7 +271,9 @@ def run_product_fetch(
         from rayvault.truth_cache import TruthCache, CachePolicy
         cache = TruthCache(library_dir, CachePolicy())
 
-    downloaded = skipped = errors = cache_hits = 0
+    downloaded = skipped = errors = cache_hits = cache_misses = 0
+    amazon_blocks = 0
+    survival_mode = False
     notes: List[str] = []
 
     data = read_json(products_json)
@@ -316,11 +328,13 @@ def run_product_fetch(
                 products_summary.append({
                     "rank": rank, "asin": asin, "title": title,
                     "fidelity": "UNKNOWN", "broll": "PENDING",
-                    "source": "cache",
+                    "truth_source": "CACHE",
                 })
                 # Initialize qc.json if missing
                 _init_qc(pdir, asin, dry_run)
                 continue
+            else:
+                cache_misses += 1
 
         # --- Network fetch path ---
         urls = pick_urls(it)
@@ -332,7 +346,7 @@ def run_product_fetch(
                 products_summary.append({
                     "rank": rank, "asin": asin, "title": title,
                     "fidelity": "UNKNOWN", "broll": "PENDING",
-                    "source": "stale_cache",
+                    "truth_source": "STALE_CACHE",
                 })
                 _init_qc(pdir, asin, dry_run)
                 continue
@@ -342,6 +356,7 @@ def run_product_fetch(
             products_summary.append({
                 "rank": rank, "asin": asin, "title": title,
                 "fidelity": "UNKNOWN", "broll": "NONE",
+                "truth_source": "NONE",
             })
             continue
 
@@ -368,6 +383,12 @@ def run_product_fetch(
                 got_any = True
                 continue
 
+            # In survival mode, skip new downloads
+            if survival_mode and cache:
+                skipped += 1
+                notes.append(f"rank {rank} {asin}: skipped download (survival mode)")
+                continue
+
             ok, reason = download_with_retries(url, out_path)
             if ok:
                 downloaded += 1
@@ -375,14 +396,28 @@ def run_product_fetch(
                 hashes[fname] = sha1_file(out_path)
                 downloaded_paths.append(out_path)
             else:
-                errors += 1
-                notes.append(
-                    f"rank {rank} {asin}: failed {url} ({reason})"
-                )
+                # Detect Amazon 403/429 → trigger survival mode
+                if reason.startswith("amazon_block"):
+                    amazon_blocks += 1
+                    survival_mode = True
+                    notes.append(f"rank {rank} {asin}: {reason} — entering survival mode")
+                else:
+                    errors += 1
+                    notes.append(
+                        f"rank {rank} {asin}: failed {url} ({reason})"
+                    )
 
-        # If download failed entirely, try stale cache
+        # If download failed entirely, try stale/survival cache
         if not got_any and cache and not dry_run:
-            if _try_cache_fallback(cache, asin, pdir):
+            if survival_mode:
+                stale = cache.get_stale_if_allowed(asin)
+                if stale.get("images"):
+                    result = cache.materialize_to_run(asin, pdir)
+                    if result.get("ok"):
+                        cache_hits += 1
+                        got_any = True
+                        notes.append(f"rank {rank} asin {asin}: survival mode, stale cache used")
+            if not got_any and _try_cache_fallback(cache, asin, pdir):
                 cache_hits += 1
                 got_any = True
                 notes.append(f"rank {rank} asin {asin}: download failed, stale cache used")
@@ -407,6 +442,7 @@ def run_product_fetch(
             "title": title,
             "fidelity": "UNKNOWN" if got_any else "MISSING_IMAGES",
             "broll": "PENDING",
+            "truth_source": "LIVE_FETCH" if got_any else "NONE",
         })
 
     # Update manifest (non-destructive)
@@ -420,11 +456,36 @@ def run_product_fetch(
         manifest.setdefault("products", {})
         manifest["products"]["cache_hits"] = cache_hits
         manifest["products"]["library_dir"] = str(library_dir)
+        # Enhanced truth_cache telemetry block
+        manifest["truth_cache"] = {
+            "hits": cache_hits,
+            "misses": cache_misses,
+            "amazon_blocks": amazon_blocks,
+            "survival_mode": survival_mode,
+            "ttl_meta_hours": round(cache.policy.ttl_meta_sec / 3600, 1),
+            "ttl_images_hours": round(cache.policy.ttl_images_sec / 3600, 1),
+            "library_dir": str(library_dir),
+        }
+        # Stability flags
+        stability_notes = []
+        if survival_mode:
+            stability_notes.append("amazon_block_detected")
+        if cache_misses >= 4:
+            stability_notes.append("high_cache_miss_rate")
+        if stability_notes:
+            manifest["stability_flags"] = {
+                "survival_mode": survival_mode,
+                "low_stability": True,
+                "notes": stability_notes,
+            }
     if not dry_run:
         atomic_write_json(run_dir / "00_manifest.json", manifest)
 
     result_ok = errors == 0 or downloaded > 0 or cache_hits > 0
-    return FetchResult(result_ok, downloaded, skipped, errors, cache_hits, notes)
+    return FetchResult(
+        result_ok, downloaded, skipped, errors,
+        cache_hits, cache_misses, amazon_blocks, survival_mode, notes,
+    )
 
 
 def _init_qc(pdir: Path, asin: str, dry_run: bool) -> None:
@@ -482,10 +543,15 @@ def main(argv: Optional[list] = None) -> int:
         dry_run=args.dry_run,
         library_dir=library_dir,
     )
-    cache_info = f" cache_hits={res.cache_hits}" if res.cache_hits > 0 else ""
+    cache_info = ""
+    if res.cache_hits > 0 or res.cache_misses > 0:
+        cache_info = f" cache_hits={res.cache_hits} cache_misses={res.cache_misses}"
+    survival_info = ""
+    if res.survival_mode:
+        survival_info = f" SURVIVAL_MODE amazon_blocks={res.amazon_blocks}"
     print(
         f"product_asset_fetch: ok={res.ok} downloaded={res.downloaded} "
-        f"skipped={res.skipped} errors={res.errors}{cache_info}"
+        f"skipped={res.skipped} errors={res.errors}{cache_info}{survival_info}"
     )
     if res.notes:
         for n in res.notes[:10]:
