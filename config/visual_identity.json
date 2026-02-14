@@ -104,17 +104,31 @@
   },
 
   "identity_proof": {
-    "_doc": "Metadata stored with every approved asset for forensic traceability.",
+    "_doc": "Metadata stored with every approved asset for forensic traceability. Distinguishes automated vs human QC.",
     "fields": {
       "confidence": "HIGH | MEDIUM | LOW",
-      "reason": "reference_locked | dna_match | fingerprint_match | forced_no_sha8",
+      "method": "reference_locked | human_overlay_3_anchor | dna_match | automated_qc",
+      "reason": "verified_visual_identity | dna_match_no_sha8 | forced_no_sha8 | fingerprint_match",
+      "anchors_verified": ["hairline", "nose_bridge", "jawline"],
+      "seed": "integer seed used for this generation (if available)",
+      "prompt_id": "SAFE_STUDIO_V1 | OFFICE_V1 | DARKDESK_V1 | ...",
+      "prompt_hash": "sha1 first 12 chars — from prompt_registry",
       "at": "ISO timestamp of approval",
-      "operator_note": "optional operator reason"
+      "operator": "operator name (for human_overlay method)",
+      "operator_note": "optional reason"
     },
     "confidence_rules": {
-      "HIGH": "sha8 in filename + visual QC green + overlay test pass",
+      "HIGH": "sha8 in filename + visual QC green + overlay test pass on 3 anchors",
       "MEDIUM": "no sha8 but size+mtime match + visual QC yellow-or-better",
       "LOW": "no sha8, no fingerprint, allow-missing-sha8 override"
+    },
+    "anchor_fail_criteria": {
+      "_doc": "3-anchor overlay test: overlay Keyframe Zero at 50% opacity.",
+      "hairline": "double edge on hairline OR eyebrow ridge shift",
+      "nose_bridge": "double edge on nose bridge OR nostril width change",
+      "jawline": "double edge on jawline OR chin center shift",
+      "fail_rule": "any 1 anchor fail = ID FAIL",
+      "allow": "tiny pore/microtexture differences only"
     }
   },
 
@@ -125,9 +139,12 @@
       "visual_qc_result",
       "visual_fail_reason",
       "fallback_level",
+      "attempt_count",
       "seed_used",
       "prompt_id",
+      "prompt_hash",
       "identity_confidence",
+      "identity_method",
       "voice_profile",
       "tts_stability_setting"
     ]

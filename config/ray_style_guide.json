@@ -93,13 +93,21 @@
   ],
 
   "identity_overlay_test": {
-    "_doc": "Quick 10-second check: overlay Keyframe Zero at 50% opacity.",
-    "fail_if": [
-      "hairline height shifts noticeably",
-      "nose width changes",
-      "jaw angle changes"
-    ],
-    "allow": "tiny differences in pores/skin microtexture only"
+    "_doc": "Quick 10-second check: overlay Keyframe Zero at 50% opacity. Binary, 3 anchors.",
+    "method": "human_overlay_3_anchor",
+    "anchors": {
+      "hairline": "double edge on hairline OR eyebrow ridge shift → ID FAIL",
+      "nose_bridge": "double edge on nose bridge OR nostril width change → ID FAIL",
+      "jawline": "double edge on jawline OR chin center shift → ID FAIL"
+    },
+    "fail_rule": "any 1 anchor fail = discard",
+    "allow": "tiny pore/microtexture differences only",
+    "when_to_run": "Safe Mode only — never during varied configs (would create false fails)",
+    "soft_fail_exceptions": [
+      "minor beard texture noise",
+      "small lighting contrast difference",
+      "minor catchlight variation"
+    ]
   },
 
   "fallback_levels": {

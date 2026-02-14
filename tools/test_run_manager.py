@@ -10295,6 +10295,167 @@ class TestVisualConfigFiles(unittest.TestCase):
             self.assertIn(combo["accent"], vb["accent"],
                           f"Combo {combo_name}: accent {combo['accent']} not in variable_blocks")
 
+    def test_named_prompts_have_files(self):
+        """Named prompts reference files that exist."""
+        path = self._config_dir() / "prompt_cookbook.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        repo_root = Path(__file__).resolve().parent.parent
+        for name, prompt in data.get("named_prompts", {}).items():
+            if name.startswith("_"):
+                continue
+            if "file" in prompt:
+                fpath = repo_root / prompt["file"]
+                self.assertTrue(fpath.exists(), f"Prompt file missing: {prompt['file']}")
+
+    def test_seed_ladder_has_two_tiers(self):
+        """Seed ladder has tier_1 and tier_2."""
+        path = self._config_dir() / "prompt_cookbook.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        ladder = data.get("seed_ladder", {})
+        self.assertIn("tier_1", ladder)
+        self.assertIn("tier_2", ladder)
+        self.assertEqual(len(ladder["tier_1"]), 3)
+        self.assertEqual(len(ladder["tier_2"]), 3)
+
+    def test_identity_proof_has_method_and_anchors(self):
+        """identity_proof schema includes method, anchors_verified, prompt_id."""
+        path = self._config_dir() / "visual_identity.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        fields = data["identity_proof"]["fields"]
+        self.assertIn("method", fields)
+        self.assertIn("anchors_verified", fields)
+        self.assertIn("prompt_id", fields)
+        self.assertIn("prompt_hash", fields)
+        self.assertIn("seed", fields)
+        self.assertIn("operator", fields)
+        # Anchor fail criteria
+        self.assertIn("anchor_fail_criteria", data["identity_proof"])
+
+    def test_voice_dna_sentence_cap(self):
+        """Voice DNA has sentence length cap."""
+        path = self._config_dir() / "voice_dna.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("sentence_length_words_max", data["script_rules"])
+        self.assertEqual(data["script_rules"]["sentence_length_words_max"], 14)
+        # Never list includes rhetorical flourish
+        self.assertIn("rhetorical flourish", data["never"])
+
+    def test_safe_mode_loadable(self):
+        """safe_mode.json is valid and has all required sections."""
+        path = self._config_dir() / "safe_mode.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("identity", data)
+        self.assertIn("prompts", data)
+        self.assertIn("seed_ladder", data)
+        self.assertIn("fallback", data)
+        self.assertIn("qc", data)
+        self.assertIn("voice", data)
+        self.assertIn("reporting", data)
+        self.assertIn("stability_score", data)
+        self.assertIn("telemetry_fields", data)
+        # Seed ladder has both tiers
+        self.assertIn("tier_1", data["seed_ladder"])
+        self.assertIn("tier_2", data["seed_ladder"])
+        # Voice has sentence cap
+        self.assertEqual(data["voice"]["max_words_per_sentence"], 14)
+        self.assertTrue(data["voice"]["no_exclamations"])
+        self.assertTrue(data["voice"]["no_rhetorical_questions"])
+
+    def test_prompts_contain_hardening_phrases(self):
+        """All prompt files contain the hardening patches."""
+        repo_root = Path(__file__).resolve().parent.parent
+        for name in ["SAFE_STUDIO_V1", "OFFICE_V1", "DARKDESK_V1"]:
+            text = (repo_root / "prompts" / f"{name}.txt").read_text()
+            text_lower = text.lower()
+            self.assertIn("no tilt", text_lower, f"{name} missing no-tilt")
+            self.assertIn("no turn", text_lower, f"{name} missing no-turn")
+            self.assertIn("no beard density change", text_lower, f"{name} missing beard-density")
+            self.assertIn("no hands visible", text_lower, f"{name} missing no-hands")
+            self.assertIn("shoulders only", text_lower, f"{name} missing shoulders-only")
+
+
+# ---------------------------------------------------------------------------
+# Prompt registry tests
+# ---------------------------------------------------------------------------
+
+class TestPromptRegistry(unittest.TestCase):
+    """Tests for prompt_registry.py."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_prompt_hash_deterministic(self):
+        self._add_scripts_path()
+        from prompt_registry import prompt_hash
+        h1 = prompt_hash("hello world")
+        h2 = prompt_hash("hello world")
+        self.assertEqual(h1, h2)
+        self.assertEqual(len(h1), 12)
+
+    def test_prompt_hash_strips_whitespace(self):
+        self._add_scripts_path()
+        from prompt_registry import prompt_hash
+        h1 = prompt_hash("hello world")
+        h2 = prompt_hash("hello world\n\n")
+        self.assertEqual(h1, h2)
+
+    def test_list_prompts(self):
+        self._add_scripts_path()
+        from prompt_registry import list_prompts
+        prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
+        result = list_prompts(prompts_dir)
+        self.assertGreater(len(result), 0)
+        ids = [p["id"] for p in result]
+        self.assertIn("SAFE_STUDIO_V1", ids)
+        self.assertIn("OFFICE_V1", ids)
+        self.assertIn("DARKDESK_V1", ids)
+
+    def test_load_prompt(self):
+        self._add_scripts_path()
+        from prompt_registry import load_prompt
+        prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
+        text = load_prompt("SAFE_STUDIO_V1", prompts_dir)
+        self.assertIsNotNone(text)
+        self.assertIn("Ray", text)
+        self.assertIn("NEGATIVE:", text)
+
+    def test_load_missing_prompt(self):
+        self._add_scripts_path()
+        from prompt_registry import load_prompt
+        result = load_prompt("NONEXISTENT_PROMPT")
+        self.assertIsNone(result)
+
+    def test_telemetry_fields(self):
+        self._add_scripts_path()
+        from prompt_registry import telemetry_fields
+        prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
+        fields = telemetry_fields("SAFE_STUDIO_V1", prompts_dir)
+        self.assertTrue(fields["prompt_found"])
+        self.assertEqual(fields["prompt_id"], "SAFE_STUDIO_V1")
+        self.assertIsNotNone(fields["prompt_hash"])
+        self.assertEqual(len(fields["prompt_hash"]), 12)
+
+    def test_telemetry_missing_prompt(self):
+        self._add_scripts_path()
+        from prompt_registry import telemetry_fields
+        fields = telemetry_fields("NONEXISTENT")
+        self.assertFalse(fields["prompt_found"])
+        self.assertIsNone(fields["prompt_hash"])
+
+    def test_cli_list(self):
+        self._add_scripts_path()
+        from prompt_registry import main as reg_main
+        rc = reg_main(["--list"])
+        self.assertEqual(rc, 0)
+
+    def test_cli_verify(self):
+        self._add_scripts_path()
+        from prompt_registry import main as reg_main
+        rc = reg_main(["--verify"])
+        self.assertEqual(rc, 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

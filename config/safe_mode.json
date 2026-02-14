@@ -1,0 +1,109 @@
+{
+  "_doc": "Consolidated operational config — single source of truth for daily automation. Combines prompts, seeds, thresholds, QC, voice, and fallback into one file.",
+  "version": "1.0",
+
+  "identity": {
+    "character_id": "RAY_DZINE_LOCKED",
+    "reference_strength": 0.85,
+    "require_sha8_in_filename": true
+  },
+
+  "prompts": {
+    "_doc": "Canonical prompt IDs. Full text in prompts/*.txt files. Hash via prompt_registry.py.",
+    "safe": "SAFE_STUDIO_V1",
+    "office": "OFFICE_V1",
+    "darkdesk": "DARKDESK_V1"
+  },
+
+  "seed_ladder": {
+    "tier_1": [101, 202, 303],
+    "tier_2": [404, 505, 606],
+    "max_attempts": 6
+  },
+
+  "fallback": {
+    "level_0": {"prompt_id": "config_of_day", "seeds": "tier_1[0]"},
+    "level_1": {"action": "seed_swap_same_prompt", "seeds": "tier_1[1..2]"},
+    "level_2": {"prompt_id": "SAFE_STUDIO_V1", "seeds": "tier_2[0..2]"},
+    "level_3": {"action": "library", "seeds": "none"},
+    "level_4": {"action": "manual", "seeds": "none"}
+  },
+
+  "stability_score": {
+    "_doc": "Deterministic metric. Higher = better. Score 0 if library used.",
+    "formula": "100 - (fallback_level * 25) - ((attempts_used - 1) * 8)",
+    "interpretation": {
+      "90_100": "smooth day",
+      "70_89": "mild friction",
+      "40_69": "unstable day — watch prompts/model",
+      "below_40": "crisis — force Safe Mode or library"
+    },
+    "library_score": 0
+  },
+
+  "qc": {
+    "fast_fail": [
+      "mouth_line_break",
+      "teeth_shadow",
+      "teeth_visible",
+      "pupil_divergence",
+      "jaw_neck_merge",
+      "hands_visible",
+      "identity_drift",
+      "color_cast_on_skin"
+    ],
+    "soft_fail": [
+      "minor_beard_noise",
+      "minor_catchlight_diff",
+      "bokeh_insufficient",
+      "minor_lighting_mismatch"
+    ],
+    "overlay_rule": "human_overlay_3_anchor",
+    "anchors": ["hairline", "nose_bridge", "jawline"]
+  },
+
+  "voice": {
+    "voice_id": "RAY_V1",
+    "tts_stability": 0.80,
+    "tts_expressiveness": 0.40,
+    "max_words_per_sentence": 14,
+    "max_sentences": 8,
+    "no_exclamations": true,
+    "no_rhetorical_questions": true,
+    "no_all_caps": true,
+    "word_count_full": {"min": 90, "max": 140},
+    "word_count_shorts": {"min": 60, "max": 90}
+  },
+
+  "reporting": {
+    "headline_fields": [
+      "run_id", "status", "prompt_id", "seed",
+      "fallback_level", "identity_confidence", "patient_zero"
+    ],
+    "store_hashes": true,
+    "hash_fields": ["prompt_hash", "script_hash"]
+  },
+
+  "telemetry_fields": {
+    "_doc": "Every generation run must produce these in status_summary.txt.",
+    "required": [
+      "run_id",
+      "visual_qc_result",
+      "visual_fail_reason",
+      "fallback_level",
+      "attempts_used",
+      "seed_index",
+      "seed_used",
+      "mode_used",
+      "prompt_id",
+      "prompt_hash",
+      "reference_strength",
+      "identity_confidence",
+      "identity_method",
+      "stability_score",
+      "voice_profile",
+      "tts_stability_setting",
+      "script_hash"
+    ]
+  }
+}

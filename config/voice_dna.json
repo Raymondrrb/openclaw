@@ -27,7 +27,10 @@
     "whisper",
     "vocal fry",
     "heavy upspeak",
-    "emotional rollercoaster within one video"
+    "emotional rollercoaster within one video",
+    "rhetorical flourish",
+    "exclamation marks in script",
+    "words: crazy, insane, unbelievable, incredible, mind-blowing"
   ],
 
   "script_rules": {
@@ -35,7 +38,7 @@
     "main_points": "max 3 bullets",
     "cta": "1 line",
     "emotional_tone": "one tone per video (neutral to slightly upbeat)",
-    "sentence_length": "short and clear",
+    "sentence_length_words_max": 14,
     "word_count_full": {"min": 90, "max": 140},
     "word_count_shorts": {"min": 60, "max": 90}
   },

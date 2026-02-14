@@ -1,0 +1,15 @@
+Ray (use the existing Ray character identity and the verified face reference). Same exact person, same facial structure, same hairline, same beard shape, same nose and jaw proportions. Do NOT change facial structure. No alternate identity. No hairstyle changes. No beard length changes. No age changes. No beard density change. Medium close-up talking head. Head straight, no tilt, no turn, no 3/4 view. Neutral expression only. No smile. No grimace. Looking directly into the camera lens. Mouth closed, relaxed lips, clean continuous lip line for lip-sync; no teeth silhouettes; no lip shadow breaks. Clean jawline and chin contour, no shadow artifacts.
+
+Eye-level camera, centered framing, stable composition, headroom 8-10%. 85mm lens look (no wide angle), natural perspective, no facial distortion. No wide-angle distortion. No 35mm look. No fisheye. Shoulders relaxed. Hands out of frame, no hands visible, shoulders only.
+
+Softbox key light front-left, gentle fill front-right, subtle rim light for separation. Neutral face light. No colored cast on skin. No extreme shadows under nose/lips. Skin tone unchanged. No harsh shadows under nose/lips/chin.
+
+Cozy desk setup, dark wood tones, blurred shelves and warm practical light in background, deep bokeh, no readable text, no brand logos, no props in focus.
+
+Solid black crew-neck t-shirt, premium cotton, no logos, no patterns.
+
+Background ambient slightly cool, face lighting remains neutral. Subtle warm practical light visible only in background bokeh.
+
+Clean cinematic realism. Natural skin texture, consistent pores, stable features across generations, clean background bokeh. No plastic skin. No waxy face.
+
+NEGATIVE: open mouth, teeth showing, teeth shadow, teeth silhouettes, exaggerated smile, distorted lips, double chin artifacts, messy beard noise, hairstyle change, beard length change, age change, sunglasses, hat, heavy wrinkles, low-res, oversharpen, cartoon, anime, CGI, hands visible, extra fingers, text, logos, busy background, patterned clothing, blue skin tint, cyan cast on face, color spill, lip shadow breaks, mouth seam artifacts, asymmetrical lips, warped philtrum, stretched jaw, muddy skin, oversharpened pores, plastic skin, waxy face, wide-angle distortion, fisheye.
