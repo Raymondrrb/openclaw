@@ -44,17 +44,13 @@ if str(_tools) not in sys.path:
     sys.path.insert(0, str(_tools))
 
 from tools.lib.common import load_env_file
-from tools.lib.config import load_worker_config
+from tools.lib.config import load_worker_config, ExitCode
 
-
-# ---------------------------------------------------------------------------
-# Exit codes
-# ---------------------------------------------------------------------------
-
-EXIT_OK = 0
-EXIT_WARN = 1
-EXIT_CRITICAL = 2
-EXIT_ERROR = 3
+# Exit code aliases for readability
+EXIT_OK = ExitCode.OK
+EXIT_WARN = ExitCode.WARN
+EXIT_CRITICAL = ExitCode.CRITICAL
+EXIT_ERROR = ExitCode.ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +66,23 @@ def _is_pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True  # exists but no permission = still alive
+
+
+def _pid_is_rayvault(pid: int) -> bool:
+    """Check if a PID is actually a rayvault worker (not a recycled PID).
+
+    Uses psutil if available; falls back to os.kill(pid, 0).
+    """
+    try:
+        import psutil
+        p = psutil.Process(pid)
+        cmd = " ".join(p.cmdline()).lower()
+        return "rayvault" in cmd or "worker" in cmd
+    except ImportError:
+        # No psutil — fall back to simple alive check
+        return _is_pid_alive(pid)
+    except Exception:
+        return False
 
 
 def cmd_worker(args: argparse.Namespace) -> int:
@@ -92,7 +105,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
     # PID guardrail: refuse to start if another worker is alive
     existing_pid = read_pid()
     if existing_pid:
-        if _is_pid_alive(existing_pid):
+        if _pid_is_rayvault(existing_pid):
             print(
                 f"[cli] Worker already running (PID {existing_pid}). Refusing to start.",
                 file=sys.stderr,
@@ -100,7 +113,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
             print("[cli] Use: rayvault_cli.py stop", file=sys.stderr)
             return EXIT_WARN
         else:
-            # Stale PID file — clean up
+            # Stale or recycled PID — clean up
             remove_pid()
 
     # Signal handlers

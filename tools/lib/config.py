@@ -23,10 +23,22 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
+from enum import IntEnum
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from tools.lib.common import project_root, load_env_file
+
+
+# ---------------------------------------------------------------------------
+# Exit codes (SRE-friendly, automatable via cron/menubar)
+# ---------------------------------------------------------------------------
+
+class ExitCode(IntEnum):
+    OK = 0
+    WARN = 1
+    CRITICAL = 2
+    ERROR = 3
 
 
 # ---------------------------------------------------------------------------
@@ -135,17 +147,21 @@ class HealthThresholds:
 class WorkerConfig:
     """All tunables for a worker instance."""
     worker_id: str = ""
+    task_type: str = ""  # filter claim_next by task_type (empty = any)
 
     # Lease & heartbeat
     lease_minutes: int = 15
     heartbeat_interval_sec: int = 120
     heartbeat_jitter_sec: int = 15
     heartbeat_max_retries: int = 3
+    heartbeat_timeout_sec: int = 10        # per-RPC call timeout
+    heartbeat_uncertain_threshold: int = 3  # consecutive net errors → panic
 
     # Polling
     poll_interval_sec: int = 30
     poll_jitter_sec: int = 15
     quarantine_sec: int = 45
+    post_run_backoff_sec: int = 5  # cooldown between runs
 
     # Paths (relative to repo root)
     spool_dir: str = ""
@@ -154,6 +170,7 @@ class WorkerConfig:
 
     # Network
     rpc_timeout_sec: int = 10
+    claim_timeout_sec: int = 15  # claim/release RPCs (can be slower)
 
     # Truncation limits
     max_worker_error_len: int = 500
@@ -171,6 +188,19 @@ class WorkerConfig:
         if not self.state_dir:
             self.state_dir = os.path.join(root, "state")
 
+        # Sanity: heartbeat must fit inside lease (with margin)
+        lease_sec = self.lease_minutes * 60
+        if self.heartbeat_interval_sec >= lease_sec // 2:
+            raise ValueError(
+                f"heartbeat_interval_sec ({self.heartbeat_interval_sec}s) must be "
+                f"< lease/2 ({lease_sec // 2}s). Raise lease or lower heartbeat."
+            )
+        if self.heartbeat_timeout_sec >= self.heartbeat_interval_sec:
+            raise ValueError(
+                f"heartbeat_timeout_sec ({self.heartbeat_timeout_sec}s) must be "
+                f"< heartbeat_interval_sec ({self.heartbeat_interval_sec}s)."
+            )
+
 
 # ---------------------------------------------------------------------------
 # Secrets (never serialized, never logged)
@@ -184,6 +214,21 @@ class SecretsConfig:
     telegram_bot_token: str = ""
     telegram_admin_chat_id: str = ""
     vercel_base_url: str = ""
+
+
+def validate_secrets(secrets: SecretsConfig) -> None:
+    """Raise ValueError if critical Supabase secrets are missing.
+
+    Call this before operations that need the DB (worker, doctor, etc.).
+    Intentionally NOT in __post_init__ — allows CLI help/parse without .env.
+    """
+    missing = []
+    if not secrets.supabase_url:
+        missing.append("SUPABASE_URL")
+    if not secrets.supabase_service_key:
+        missing.append("SUPABASE_SERVICE_KEY")
+    if missing:
+        raise ValueError(f"Missing required env vars: {', '.join(missing)}")
 
 
 # ---------------------------------------------------------------------------
@@ -204,14 +249,19 @@ def load_worker_config(
 
     cfg = WorkerConfig(
         worker_id=worker_id or os.environ.get("WORKER_ID", ""),
+        task_type=os.environ.get("TASK_TYPE", ""),
         lease_minutes=int(os.environ.get("LEASE_MINUTES", "15")),
         heartbeat_interval_sec=int(os.environ.get("HEARTBEAT_INTERVAL_SEC", "120")),
         heartbeat_jitter_sec=int(os.environ.get("HEARTBEAT_JITTER_SEC", "15")),
         heartbeat_max_retries=int(os.environ.get("HEARTBEAT_MAX_RETRIES", "3")),
+        heartbeat_timeout_sec=int(os.environ.get("HEARTBEAT_TIMEOUT_SEC", "10")),
+        heartbeat_uncertain_threshold=int(os.environ.get("HEARTBEAT_UNCERTAIN_THRESHOLD", "3")),
         poll_interval_sec=int(os.environ.get("POLL_INTERVAL_SEC", "30")),
         poll_jitter_sec=int(os.environ.get("POLL_JITTER_SEC", "15")),
         quarantine_sec=int(os.environ.get("QUARANTINE_SEC", "45")),
+        post_run_backoff_sec=int(os.environ.get("POST_RUN_BACKOFF_SEC", "5")),
         rpc_timeout_sec=int(os.environ.get("RPC_TIMEOUT_SEC", "10")),
+        claim_timeout_sec=int(os.environ.get("CLAIM_TIMEOUT_SEC", "15")),
         max_worker_error_len=int(os.environ.get("MAX_WORKER_ERROR_LEN", "500")),
         telegram_max_len=int(os.environ.get("TELEGRAM_MAX_LEN", "4000")),
     )

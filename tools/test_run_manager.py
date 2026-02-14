@@ -2294,5 +2294,225 @@ class TestContractCheck(unittest.TestCase):
         self.assertEqual(len(failed), 4)
 
 
+# ==========================================================================
+# WorkerConfig sanity validation tests
+# ==========================================================================
+
+class TestConfigSanity(unittest.TestCase):
+    """Tests for WorkerConfig __post_init__ sanity checks."""
+
+    def test_heartbeat_too_high_raises(self):
+        """heartbeat_interval_sec >= lease/2 raises ValueError."""
+        from lib.config import WorkerConfig
+        with self.assertRaises(ValueError) as ctx:
+            WorkerConfig(
+                worker_id="test",
+                lease_minutes=10,           # 600s → /2 = 300s
+                heartbeat_interval_sec=300,  # 300 >= 300 → fail
+            )
+        self.assertIn("heartbeat_interval_sec", str(ctx.exception))
+
+    def test_heartbeat_ok(self):
+        """heartbeat_interval_sec < lease/2 works fine."""
+        from lib.config import WorkerConfig
+        cfg = WorkerConfig(
+            worker_id="test",
+            lease_minutes=10,            # 600s → /2 = 300s
+            heartbeat_interval_sec=120,  # 120 < 300 → ok
+        )
+        self.assertEqual(cfg.heartbeat_interval_sec, 120)
+
+    def test_timeout_too_high_raises(self):
+        """heartbeat_timeout_sec >= heartbeat_interval_sec raises ValueError."""
+        from lib.config import WorkerConfig
+        with self.assertRaises(ValueError) as ctx:
+            WorkerConfig(
+                worker_id="test",
+                lease_minutes=15,
+                heartbeat_interval_sec=120,
+                heartbeat_timeout_sec=120,  # 120 >= 120 → fail
+            )
+        self.assertIn("heartbeat_timeout_sec", str(ctx.exception))
+
+    def test_timeout_ok(self):
+        """heartbeat_timeout_sec < heartbeat_interval_sec works fine."""
+        from lib.config import WorkerConfig
+        cfg = WorkerConfig(
+            worker_id="test",
+            lease_minutes=15,
+            heartbeat_interval_sec=120,
+            heartbeat_timeout_sec=10,
+        )
+        self.assertEqual(cfg.heartbeat_timeout_sec, 10)
+
+
+# ==========================================================================
+# SecretsConfig validate_secrets tests
+# ==========================================================================
+
+class TestValidateSecrets(unittest.TestCase):
+    """Tests for validate_secrets utility."""
+
+    def test_valid_secrets_pass(self):
+        """validate_secrets does not raise when all required fields present."""
+        from lib.config import SecretsConfig, validate_secrets
+        s = SecretsConfig(
+            supabase_url="https://example.supabase.co",
+            supabase_service_key="secret123",
+        )
+        validate_secrets(s)  # should not raise
+
+    def test_missing_url_raises(self):
+        """validate_secrets raises when supabase_url is empty."""
+        from lib.config import SecretsConfig, validate_secrets
+        s = SecretsConfig(supabase_url="", supabase_service_key="key")
+        with self.assertRaises(ValueError) as ctx:
+            validate_secrets(s)
+        self.assertIn("SUPABASE_URL", str(ctx.exception))
+
+    def test_missing_key_raises(self):
+        """validate_secrets raises when supabase_service_key is empty."""
+        from lib.config import SecretsConfig, validate_secrets
+        s = SecretsConfig(supabase_url="https://x.co", supabase_service_key="")
+        with self.assertRaises(ValueError) as ctx:
+            validate_secrets(s)
+        self.assertIn("SUPABASE_SERVICE_KEY", str(ctx.exception))
+
+    def test_both_missing_raises(self):
+        """validate_secrets lists all missing vars."""
+        from lib.config import SecretsConfig, validate_secrets
+        s = SecretsConfig()
+        with self.assertRaises(ValueError) as ctx:
+            validate_secrets(s)
+        msg = str(ctx.exception)
+        self.assertIn("SUPABASE_URL", msg)
+        self.assertIn("SUPABASE_SERVICE_KEY", msg)
+
+
+# ==========================================================================
+# PID guardrail tests
+# ==========================================================================
+
+class TestPidGuardrail(unittest.TestCase):
+    """Tests for _is_pid_alive and _pid_is_rayvault."""
+
+    def test_dead_pid(self):
+        """_is_pid_alive returns False for non-existent PID."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from rayvault_cli import _is_pid_alive
+        self.assertFalse(_is_pid_alive(99999999))
+
+    def test_pid_is_rayvault_dead_pid(self):
+        """_pid_is_rayvault returns False for dead PID."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from rayvault_cli import _pid_is_rayvault
+        self.assertFalse(_pid_is_rayvault(99999999))
+
+
+# ==========================================================================
+# BrowserContextManager tests (unit, no Playwright)
+# ==========================================================================
+
+class TestBrowserContextManager(unittest.TestCase):
+    """Unit tests for BrowserContextManager (no real Playwright)."""
+
+    def test_default_viewport(self):
+        """BrowserContextManager uses default viewport."""
+        from lib.browser import BrowserContextManager, DEFAULT_VIEWPORT
+        from lib.config import WorkerConfig
+        cfg = WorkerConfig(worker_id="test")
+        bcm = BrowserContextManager(cfg)
+        self.assertEqual(bcm.viewport, DEFAULT_VIEWPORT)
+
+    def test_custom_viewport(self):
+        """BrowserContextManager accepts custom viewport."""
+        from lib.browser import BrowserContextManager
+        from lib.config import WorkerConfig
+        cfg = WorkerConfig(worker_id="test")
+        custom = {"width": 1920, "height": 1080}
+        bcm = BrowserContextManager(cfg, viewport=custom)
+        self.assertEqual(bcm.viewport, custom)
+
+    def test_paths_set(self):
+        """BrowserContextManager sets storage and trace paths."""
+        from lib.browser import BrowserContextManager
+        from lib.config import WorkerConfig
+        cfg = WorkerConfig(worker_id="test")
+        bcm = BrowserContextManager(cfg)
+        self.assertIn("storage_state.json", str(bcm._storage_path))
+        self.assertIn("traces", str(bcm._traces_dir))
+
+    def test_no_context_before_enter(self):
+        """BrowserContextManager has no context before __aenter__."""
+        from lib.browser import BrowserContextManager
+        from lib.config import WorkerConfig
+        cfg = WorkerConfig(worker_id="test")
+        bcm = BrowserContextManager(cfg)
+        self.assertIsNone(bcm.browser)
+        self.assertIsNone(bcm.context)
+
+
+# ==========================================================================
+# Async worker unit tests (no network)
+# ==========================================================================
+
+try:
+    import httpx as _httpx_check  # noqa: F401
+    _HAS_HTTPX = True
+except ImportError:
+    _HAS_HTTPX = False
+
+
+@unittest.skipUnless(_HAS_HTTPX, "httpx not installed")
+class TestAsyncWorkerHelpers(unittest.TestCase):
+    """Unit tests for worker_async.py helpers."""
+
+    def test_atomic_write_json(self):
+        """_atomic_write_json creates file atomically."""
+        from worker_async import _atomic_write_json, _read_json
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir) / "sub" / "test.json"
+            _atomic_write_json(p, {"key": "value"})
+            data = _read_json(p)
+            self.assertEqual(data["key"], "value")
+
+    def test_read_json_missing(self):
+        """_read_json returns None for missing file."""
+        from worker_async import _read_json
+        data = _read_json(Path("/nonexistent/file.json"))
+        self.assertIsNone(data)
+
+    def test_checkpoint_roundtrip(self):
+        """save_checkpoint + load_checkpoint preserves data."""
+        from worker_async import save_checkpoint, load_checkpoint, clear_checkpoint
+        from lib.config import WorkerConfig
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = WorkerConfig(worker_id="test", checkpoint_dir=tmpdir)
+            run_id = "test-run-123"
+
+            save_checkpoint(cfg, run_id, "research", data={"elapsed_s": 1.5})
+            ckpt = load_checkpoint(cfg, run_id)
+            self.assertEqual(ckpt["stage"], "research")
+            self.assertIn("research", ckpt["completed_steps"])
+            self.assertEqual(ckpt["data"]["elapsed_s"], 1.5)
+
+            clear_checkpoint(cfg, run_id)
+            ckpt2 = load_checkpoint(cfg, run_id)
+            self.assertEqual(ckpt2["stage"], "init")  # back to default
+
+    def test_checkpoint_idempotent_stages(self):
+        """Saving same stage twice doesn't duplicate in completed_steps."""
+        from worker_async import save_checkpoint, load_checkpoint
+        from lib.config import WorkerConfig
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = WorkerConfig(worker_id="test", checkpoint_dir=tmpdir)
+            run_id = "test-run-456"
+
+            save_checkpoint(cfg, run_id, "research")
+            save_checkpoint(cfg, run_id, "research")
+            ckpt = load_checkpoint(cfg, run_id)
+            self.assertEqual(ckpt["completed_steps"].count("research"), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
