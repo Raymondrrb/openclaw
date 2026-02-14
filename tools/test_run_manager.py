@@ -8437,10 +8437,156 @@ class TestRefreshHistoryCounters(unittest.TestCase):
             self.assertEqual(len(history), 1)
             entry = history[0]
             # All forensic counters must be present
-            for key in ["at", "scanned", "enriched", "failed_probe",
+            for key in ["at", "scanned", "checked", "enriched", "failed_probe",
                         "skipped_unchanged", "skipped_dedup", "skipped_no_sha8",
-                        "sha8_mismatch", "force", "allow_missing_sha8"]:
+                        "skipped_outside_root", "sha8_mismatch", "force",
+                        "allow_missing_sha8"]:
                 self.assertIn(key, entry, f"Missing key: {key}")
+
+
+# ---------------------------------------------------------------------------
+# is_under_root + checked counter + is-not-None defensive update
+# ---------------------------------------------------------------------------
+
+class TestRefreshRootGuard(unittest.TestCase):
+    """Tests for root guardrail and checked counter."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_is_under_root_true(self):
+        self._add_scripts_path()
+        from video_index_refresh import _is_under_root
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            child = root / "sub" / "file.txt"
+            child.parent.mkdir(parents=True)
+            child.touch()
+            self.assertTrue(_is_under_root(child, root))
+
+    def test_is_under_root_false(self):
+        self._add_scripts_path()
+        from video_index_refresh import _is_under_root
+        with tempfile.TemporaryDirectory() as td1, tempfile.TemporaryDirectory() as td2:
+            outside = Path(td2) / "file.txt"
+            outside.touch()
+            self.assertFalse(_is_under_root(outside, Path(td1)))
+
+    def test_checked_counter(self):
+        """checked counts files that passed is_file + dedup + sha8 gate."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index
+        with tempfile.TemporaryDirectory() as td:
+            # index_path must be under state_root (td/video/index.json → td/)
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            # 2 files with sha8, 1 without
+            (final / "V_R1_s1_aabbccdd.mp4").write_bytes(b"x" * 500)
+            (final / "V_R1_s2_11223344.mp4").write_bytes(b"x" * 500)
+            (final / "legacy_no_sha8.mp4").write_bytes(b"x" * 500)
+            stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
+            # 2 with sha8 should be checked, 1 skipped_no_sha8
+            self.assertEqual(stats.checked, 2)
+            self.assertEqual(stats.skipped_no_sha8, 1)
+
+    def test_symlink_outside_root_skipped(self):
+        """Symlink pointing outside state root is skipped."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index
+        with tempfile.TemporaryDirectory() as td1, tempfile.TemporaryDirectory() as td2:
+            # State root is td1, file is in td2
+            vid = Path(td1) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            # Real file outside root
+            outside = Path(td2) / "V_R1_s1_aabbccdd.mp4"
+            outside.write_bytes(b"x" * 500)
+            # Symlink inside final/ pointing outside
+            link = final / "V_R1_s1_aabbccdd.mp4"
+            link.symlink_to(outside)
+            stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
+            self.assertEqual(stats.skipped_outside_root, 1)
+            self.assertEqual(stats.checked, 0)
+
+
+class TestDefensiveProbeUpdate(unittest.TestCase):
+    """Test that probe data uses `is not None` checks (not truthy)."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_zero_duration_still_written(self):
+        """Duration of 0.0 should still be written (not skipped by truthy check)."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            # Probe returns duration=0.0 (edge case, but valid)
+            fake_meta = {
+                "format": {"duration": "0.0", "bit_rate": "0"},
+                "streams": [{"codec_type": "video", "codec_name": "h264"}],
+            }
+            with mock.patch("video_index_refresh._ffprobe_json", return_value=fake_meta):
+                refresh_index(final_dir=final, index_path=idx_path, force=True)
+            idx = _load_index(idx_path)
+            entry = idx["items"]["aabbccdd"]
+            # Duration 0.0 should be recorded, not skipped
+            self.assertEqual(entry["duration"], 0.0)
+            # bitrate 0 should also be recorded
+            self.assertEqual(entry["bitrate_bps"], 0)
+
+    def test_none_codec_preserves_existing(self):
+        """If probe returns None codec, existing value is preserved."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index, _atomic_write_json
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            # Pre-seed with good codec data
+            _atomic_write_json(idx_path, {
+                "version": "1.0",
+                "items": {
+                    "aabbccdd": {
+                        "path": str(v),
+                        "video_codec": "h264",
+                        "audio_codec": "aac",
+                    },
+                },
+            })
+            # Degraded probe: no streams info (codecs = None)
+            fake_meta = {
+                "format": {"duration": "5.0", "bit_rate": "2000000"},
+                "streams": [],
+            }
+            with mock.patch("video_index_refresh._ffprobe_json", return_value=fake_meta):
+                refresh_index(final_dir=final, index_path=idx_path, force=True)
+            idx = _load_index(idx_path)
+            entry = idx["items"]["aabbccdd"]
+            # Existing good values should be preserved
+            self.assertEqual(entry["video_codec"], "h264")
+            self.assertEqual(entry["audio_codec"], "aac")
 
 
 if __name__ == "__main__":

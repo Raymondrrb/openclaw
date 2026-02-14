@@ -159,14 +159,25 @@ def _infer_run_and_segment(p: Path) -> Tuple[str, str]:
 # Core refresh logic
 # ---------------------------------------------------------------------------
 
+def _is_under_root(p: Path, root: Path) -> bool:
+    """Check if resolved path is under root directory."""
+    try:
+        p.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 @dataclass
 class RefreshStats:
     """Statistics from an index refresh run."""
     scanned: int = 0
+    checked: int = 0
     probed: int = 0
     skipped_mtime: int = 0
     skipped_dedup: int = 0
     skipped_no_sha8: int = 0
+    skipped_outside_root: int = 0
     enriched: int = 0
     failed_probe: int = 0
     sha8_mismatch: int = 0
@@ -201,6 +212,9 @@ def refresh_index(
     if not final_dir.exists():
         return stats
 
+    # Anchor state root from index_path layout (state/video/index.json → state/)
+    state_root = index_path.parent.parent.resolve()
+
     mp4_files = sorted(final_dir.glob("*.mp4"))
     stats.scanned = len(mp4_files)
 
@@ -209,6 +223,11 @@ def refresh_index(
     for fp in mp4_files:
         # Guard: skip non-files (symlinks to dirs, broken paths, etc.)
         if not fp.is_file():
+            continue
+
+        # Guard: reject files outside state root (path traversal / stale symlink)
+        if not _is_under_root(fp, state_root):
+            stats.skipped_outside_root += 1
             continue
 
         # Dedup: skip if we've already processed this resolved path
@@ -224,6 +243,8 @@ def refresh_index(
         if not sha8 and not allow_missing_sha8:
             stats.skipped_no_sha8 += 1
             continue
+
+        stats.checked += 1
 
         # SHA8 validation: if file has sha8 in name and it's already indexed
         # under a different sha8, flag mismatch
@@ -269,15 +290,16 @@ def refresh_index(
             "file_mtime_ns": current_mtime_ns,
             "refreshed_at": datetime.now(timezone.utc).isoformat(),
         })
-        # Defensive update: only overwrite probe fields if new value is non-empty.
-        # Prevents a degraded ffprobe from wiping good metadata.
-        if probe_data["duration"] > 0:
+        # Defensive update: only overwrite probe fields if value is not None.
+        # Using `is not None` instead of truthy check — avoids ignoring
+        # valid 0.0 duration or 0 bitrate from edge-case probes.
+        if probe_data["duration"] is not None:
             entry["duration"] = probe_data["duration"]
-        if probe_data["bitrate_bps"] > 0:
+        if probe_data["bitrate_bps"] is not None:
             entry["bitrate_bps"] = probe_data["bitrate_bps"]
-        if probe_data["video_codec"]:
+        if probe_data["video_codec"] is not None:
             entry["video_codec"] = probe_data["video_codec"]
-        if probe_data["audio_codec"]:
+        if probe_data["audio_codec"] is not None:
             entry["audio_codec"] = probe_data["audio_codec"]
 
         items[key] = entry
@@ -294,11 +316,13 @@ def refresh_index(
         history.append({
             "at": datetime.now(timezone.utc).isoformat(),
             "scanned": stats.scanned,
+            "checked": stats.checked,
             "enriched": stats.enriched,
             "failed_probe": stats.failed_probe,
             "skipped_unchanged": stats.skipped_mtime,
             "skipped_dedup": stats.skipped_dedup,
             "skipped_no_sha8": stats.skipped_no_sha8,
+            "skipped_outside_root": stats.skipped_outside_root,
             "sha8_mismatch": stats.sha8_mismatch,
             "force": force,
             "allow_missing_sha8": allow_missing_sha8,
@@ -353,12 +377,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     print(f"\n  Scanned: {stats.scanned}")
+    print(f"  Checked: {stats.checked}")
     print(f"  Probed: {stats.probed}")
     print(f"  Skipped (unchanged): {stats.skipped_mtime}")
     if stats.skipped_dedup > 0:
         print(f"  Skipped (dedup): {stats.skipped_dedup}")
     if stats.skipped_no_sha8 > 0:
         print(f"  Skipped (no sha8): {stats.skipped_no_sha8}")
+    if stats.skipped_outside_root > 0:
+        print(f"  Skipped (outside root): {stats.skipped_outside_root}")
     print(f"  Enriched: {stats.enriched}")
     if stats.failed_probe > 0:
         print(f"  Failed probe: {stats.failed_probe}")
