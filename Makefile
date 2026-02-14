@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism prompts prompts-verify run-handoff run-status products-fetch products-fetch-dry render-config claims final-validate final-validate-no-video upload-receipt upload-verify verify verify-manual verify-uploads verify-uploads-manual run-cleanup run-cleanup-apply cache-prune cache-prune-apply cache-prune-aggressive amazon-quarantine amazon-quarantine-clear
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism prompts prompts-verify run-handoff run-status products-fetch products-fetch-dry render-config claims final-validate final-validate-no-video upload-receipt upload-verify verify verify-manual verify-uploads verify-uploads-manual run-cleanup run-cleanup-apply cache-prune cache-prune-apply cache-prune-aggressive amazon-quarantine amazon-quarantine-clear overlays overlays-apply overlays-force-qr
 
 # --- Morning routine ---
 doctor:
@@ -285,6 +285,16 @@ verify-uploads:
 
 verify-uploads-manual:
 	python3 -m rayvault.cron_verify_visibility --manual
+
+# --- QR/Overlay builder (affiliate visual assets) ---
+overlays:
+	python3 -m rayvault.qr_overlay_builder --run-dir state/runs/$(RUN_ID)
+
+overlays-apply:
+	python3 -m rayvault.qr_overlay_builder --run-dir state/runs/$(RUN_ID) --apply
+
+overlays-force-qr:
+	python3 -m rayvault.qr_overlay_builder --run-dir state/runs/$(RUN_ID) --apply --force-qr
 
 # --- Run cleanup (post-publish purge) ---
 run-cleanup:

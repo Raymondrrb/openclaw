@@ -14309,5 +14309,199 @@ class TestPlaceholderDetection(unittest.TestCase):
         self.assertEqual(MIN_PRODUCT_IMAGE_BYTES, 30_000)
 
 
+class TestOverlayDisplayMode(unittest.TestCase):
+    """Tests for QR/overlay display mode policy."""
+
+    def test_red_tier_always_hide(self):
+        from rayvault.qr_overlay_builder import resolve_display_mode, OverlayFlags, DISPLAY_HIDE
+        flags = OverlayFlags()
+        mode = resolve_display_mode("RED", True, "https://amzn.to/abc", flags)
+        self.assertEqual(mode, DISPLAY_HIDE)
+
+    def test_no_link_is_hide(self):
+        from rayvault.qr_overlay_builder import resolve_display_mode, OverlayFlags, DISPLAY_HIDE
+        flags = OverlayFlags()
+        mode = resolve_display_mode("GREEN", True, None, flags)
+        self.assertEqual(mode, DISPLAY_HIDE)
+
+    def test_not_eligible_is_hide(self):
+        from rayvault.qr_overlay_builder import resolve_display_mode, OverlayFlags, DISPLAY_HIDE
+        flags = OverlayFlags()
+        mode = resolve_display_mode("GREEN", False, "https://amzn.to/abc", flags)
+        self.assertEqual(mode, DISPLAY_HIDE)
+
+    def test_green_default_is_link_plus_qr(self):
+        from rayvault.qr_overlay_builder import resolve_display_mode, OverlayFlags, DISPLAY_LINK_PLUS_QR
+        flags = OverlayFlags()
+        mode = resolve_display_mode("GREEN", True, "https://amzn.to/abc", flags)
+        self.assertEqual(mode, DISPLAY_LINK_PLUS_QR)
+
+    def test_amber_default_is_link_only(self):
+        from rayvault.qr_overlay_builder import resolve_display_mode, OverlayFlags, DISPLAY_LINK_ONLY
+        flags = OverlayFlags()
+        mode = resolve_display_mode("AMBER", True, "https://amzn.to/abc", flags)
+        self.assertEqual(mode, DISPLAY_LINK_ONLY)
+
+    def test_amber_with_allow_qr(self):
+        from rayvault.qr_overlay_builder import resolve_display_mode, OverlayFlags, DISPLAY_LINK_PLUS_QR
+        flags = OverlayFlags(allow_qr_amber=True)
+        mode = resolve_display_mode("AMBER", True, "https://amzn.to/abc", flags)
+        self.assertEqual(mode, DISPLAY_LINK_PLUS_QR)
+
+    def test_no_qr_flag(self):
+        from rayvault.qr_overlay_builder import resolve_display_mode, OverlayFlags, DISPLAY_LINK_ONLY
+        flags = OverlayFlags(no_qr=True)
+        mode = resolve_display_mode("GREEN", True, "https://amzn.to/abc", flags)
+        self.assertEqual(mode, DISPLAY_LINK_ONLY)
+
+    def test_force_qr_overrides_amber(self):
+        from rayvault.qr_overlay_builder import resolve_display_mode, OverlayFlags, DISPLAY_LINK_PLUS_QR
+        flags = OverlayFlags(force_qr=True)
+        mode = resolve_display_mode("AMBER", True, "https://amzn.to/abc", flags)
+        self.assertEqual(mode, DISPLAY_LINK_PLUS_QR)
+
+    def test_force_qr_does_not_override_red(self):
+        from rayvault.qr_overlay_builder import resolve_display_mode, OverlayFlags, DISPLAY_HIDE
+        flags = OverlayFlags(force_qr=True)
+        mode = resolve_display_mode("RED", True, "https://amzn.to/abc", flags)
+        self.assertEqual(mode, DISPLAY_HIDE)
+
+    def test_force_qr_does_not_override_no_link(self):
+        from rayvault.qr_overlay_builder import resolve_display_mode, OverlayFlags, DISPLAY_HIDE
+        flags = OverlayFlags(force_qr=True)
+        mode = resolve_display_mode("GREEN", True, None, flags)
+        self.assertEqual(mode, DISPLAY_HIDE)
+
+
+class TestOverlayBuilder(unittest.TestCase):
+    """Tests for the overlay builder flow (without Pillow/qrcode)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.run_dir = Path(self.tmp) / "RUN_TEST"
+        self.run_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def test_build_overlays_red_tier_all_hidden(self):
+        from rayvault.qr_overlay_builder import build_overlays
+        manifest = {
+            "run_id": "RUN_TEST",
+            "affiliate_policy": {"episode_truth_tier": "RED", "links_enabled": False},
+            "products_summary": [
+                {"rank": 1, "asin": "B0A", "title": "Test", "affiliate": {
+                    "eligible": False, "short_link": None, "blocked_reason": "EPISODE_TIER_RED",
+                }},
+            ],
+        }
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+        result = build_overlays(self.run_dir, apply=False)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.hidden, 1)
+        self.assertEqual(result.generated, 0)
+
+    def test_build_overlays_green_eligible_counts_as_generated(self):
+        from rayvault.qr_overlay_builder import build_overlays
+        manifest = {
+            "run_id": "RUN_TEST",
+            "affiliate_policy": {"episode_truth_tier": "GREEN", "links_enabled": True},
+            "products_summary": [
+                {"rank": 1, "asin": "B0A", "title": "Great Product", "affiliate": {
+                    "eligible": True, "short_link": "https://amzn.to/abc",
+                }},
+                {"rank": 2, "asin": "B0B", "title": "Another One", "affiliate": {
+                    "eligible": True, "short_link": "https://amzn.to/def",
+                }},
+            ],
+        }
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+        result = build_overlays(self.run_dir, apply=False)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.generated, 2)
+        self.assertEqual(result.hidden, 0)
+
+    def test_build_overlays_mixed_eligible(self):
+        from rayvault.qr_overlay_builder import build_overlays
+        manifest = {
+            "run_id": "RUN_TEST",
+            "products": {"episode_truth_tier": "GREEN"},
+            "products_summary": [
+                {"rank": 1, "asin": "B0A", "affiliate": {
+                    "eligible": True, "short_link": "https://amzn.to/abc",
+                }},
+                {"rank": 2, "asin": "B0B", "affiliate": {
+                    "eligible": True, "short_link": None,
+                }},
+                {"rank": 3, "asin": "B0C", "affiliate": {
+                    "eligible": False, "short_link": "https://amzn.to/xyz",
+                }},
+            ],
+        }
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+        result = build_overlays(self.run_dir, apply=False)
+        self.assertEqual(result.generated, 1)  # Only B0A
+        self.assertEqual(result.hidden, 2)  # B0B (no link) + B0C (not eligible)
+
+    def test_build_overlays_no_manifest(self):
+        from rayvault.qr_overlay_builder import build_overlays
+        result = build_overlays(self.run_dir, apply=False)
+        self.assertFalse(result.ok)
+        self.assertIn("manifest not found", result.warnings)
+
+    def test_build_overlays_empty_products(self):
+        from rayvault.qr_overlay_builder import build_overlays
+        manifest = {"run_id": "RUN_TEST", "products_summary": []}
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+        result = build_overlays(self.run_dir, apply=False)
+        self.assertTrue(result.ok)
+
+    def test_display_mode_written_back(self):
+        from rayvault.qr_overlay_builder import build_overlays, DISPLAY_LINK_PLUS_QR, DISPLAY_LINK_ONLY, _has_qrcode
+        manifest = {
+            "run_id": "RUN_TEST",
+            "products": {"episode_truth_tier": "GREEN"},
+            "products_summary": [
+                {"rank": 1, "asin": "B0A", "affiliate": {
+                    "eligible": True, "short_link": "https://amzn.to/abc",
+                }},
+            ],
+        }
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+        result = build_overlays(self.run_dir, apply=False)
+        # display_mode depends on qrcode availability
+        expected = DISPLAY_LINK_PLUS_QR if _has_qrcode() else DISPLAY_LINK_ONLY
+        self.assertEqual(result.items[0]["display_mode"], expected)
+
+    def test_truncate_text(self):
+        from rayvault.qr_overlay_builder import truncate_text
+        self.assertEqual(truncate_text("Short", 52), "Short")
+        long = "A" * 60
+        trunc = truncate_text(long, 52)
+        self.assertEqual(len(trunc), 52)
+        self.assertTrue(trunc.endswith("\u2026"))
+
+    def test_amber_display_mode_in_items(self):
+        from rayvault.qr_overlay_builder import build_overlays, DISPLAY_LINK_ONLY
+        manifest = {
+            "run_id": "RUN_TEST",
+            "products": {"episode_truth_tier": "AMBER"},
+            "products_summary": [
+                {"rank": 1, "asin": "B0A", "affiliate": {
+                    "eligible": True, "short_link": "https://amzn.to/abc",
+                }},
+            ],
+        }
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+        result = build_overlays(self.run_dir, apply=False)
+        self.assertEqual(result.items[0]["display_mode"], DISPLAY_LINK_ONLY)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
