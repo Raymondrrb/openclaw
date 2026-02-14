@@ -4156,5 +4156,1032 @@ class TestScriptWriterContract(unittest.TestCase):
         self.assertTrue(len(key) == 64)  # SHA-256 hex
 
 
+# ==========================================================================
+# Script Writer Final (Layer 2) tests
+# ==========================================================================
+
+class TestScriptFinalSchema(unittest.TestCase):
+    """Tests for SCRIPT_FINAL_SCHEMA validation."""
+
+    def _make_valid_script(self):
+        return {
+            "status": "ok",
+            "contract_version": "script_writer_final/v0.1.0",
+            "script_version": 1,
+            "total_word_count": 600,
+            "estimated_duration_sec": 240,
+            "script": {
+                "intro": "Looking for the best wireless earbuds in 2026? We tested dozens to find the three that actually deliver.",
+                "segments": [
+                    {
+                        "product_key": "B0EXAMPLE1:best_overall",
+                        "asin": "B0EXAMPLE1",
+                        "slot": "best_overall",
+                        "heading": "Number one: the Sony WF-1000XM5",
+                        "body": "The Sony WF-1000XM5 dominates with its industry-leading ANC. "
+                                "Noise cancellation is best-in-class, and the battery lasts eight hours "
+                                "on a single charge. The sound profile is balanced with punchy bass.",
+                        "verdict_line": "If you want the best, this is it.",
+                        "transition": "But what if you want great sound without the premium price?",
+                        "estimated_words": 200,
+                    },
+                    {
+                        "product_key": "B0EXAMPLE2:best_value",
+                        "asin": "B0EXAMPLE2",
+                        "slot": "best_value",
+                        "heading": "Number two: the budget champion",
+                        "body": "The EarFun Air Pro delivers ninety percent of the performance "
+                                "at a third of the price. Active noise cancellation works surprisingly "
+                                "well, and the six-hour battery handles a full commute.",
+                        "verdict_line": "Best bang for your buck, hands down.",
+                        "transition": "And for those who want the absolute pinnacle of audio quality...",
+                        "estimated_words": 200,
+                    },
+                    {
+                        "product_key": "B0EXAMPLE3:best_premium",
+                        "asin": "B0EXAMPLE3",
+                        "slot": "best_premium",
+                        "heading": "Number three: the audiophile's choice",
+                        "body": "The Sennheiser Momentum 4 is what premium feels like. "
+                                "The spatial audio is stunning, materials feel luxurious, "
+                                "and the sound signature is warm and detailed.",
+                        "verdict_line": "Pure audio bliss for the discerning ear.",
+                        "transition": "So which one should you pick? Let me break it down.",
+                        "estimated_words": 200,
+                    },
+                ],
+                "outro": "Links to all three are in the description. Hit like if this helped, subscribe for more honest reviews, and drop a comment with your pick.",
+            },
+        }
+
+    def test_valid_script_passes_schema(self):
+        """Valid final script passes schema validation."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import SCRIPT_FINAL_SCHEMA
+        script = self._make_valid_script()
+        errors = validate_output(script, SCRIPT_FINAL_SCHEMA)
+        self.assertEqual(errors, [], f"Unexpected errors: {errors}")
+
+    def test_missing_segment_field_fails(self):
+        """Missing required segment field fails validation."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import SCRIPT_FINAL_SCHEMA
+        script = self._make_valid_script()
+        del script["script"]["segments"][0]["verdict_line"]
+        errors = validate_output(script, SCRIPT_FINAL_SCHEMA)
+        self.assertTrue(any("verdict_line" in str(e) for e in errors))
+
+    def test_intro_too_long_fails(self):
+        """Intro exceeding maxLength fails validation."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import SCRIPT_FINAL_SCHEMA
+        script = self._make_valid_script()
+        script["script"]["intro"] = "x" * 301
+        errors = validate_output(script, SCRIPT_FINAL_SCHEMA)
+        self.assertTrue(any("too long" in str(e).lower() for e in errors))
+
+    def test_invalid_slot_fails(self):
+        """Invalid slot enum value fails validation."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import SCRIPT_FINAL_SCHEMA
+        script = self._make_valid_script()
+        script["script"]["segments"][0]["slot"] = "best_budget"
+        errors = validate_output(script, SCRIPT_FINAL_SCHEMA)
+        self.assertTrue(len(errors) > 0)
+
+    def test_body_too_short_fails(self):
+        """Body below minLength fails validation."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import SCRIPT_FINAL_SCHEMA
+        script = self._make_valid_script()
+        script["script"]["segments"][0]["body"] = "Too short."
+        errors = validate_output(script, SCRIPT_FINAL_SCHEMA)
+        self.assertTrue(any("too short" in str(e).lower() for e in errors))
+
+
+class TestQualityGateScriptFinal(unittest.TestCase):
+    """Tests for quality_gate_script_final."""
+
+    def _make_valid_script(self):
+        return {
+            "total_word_count": 600,
+            "estimated_duration_sec": 240,
+            "script": {
+                "intro": "A fresh, niche-specific hook for the video intro.",
+                "segments": [
+                    {
+                        "product_key": "B0EXAMPLE1:best_overall",
+                        "asin": "B0EXAMPLE1",
+                        "slot": "best_overall",
+                        "body": "x" * 60,
+                        "estimated_words": 200,
+                    },
+                    {
+                        "product_key": "B0EXAMPLE2:best_value",
+                        "asin": "B0EXAMPLE2",
+                        "slot": "best_value",
+                        "body": "x" * 60,
+                        "estimated_words": 200,
+                    },
+                    {
+                        "product_key": "B0EXAMPLE3:best_premium",
+                        "asin": "B0EXAMPLE3",
+                        "slot": "best_premium",
+                        "body": "x" * 60,
+                        "estimated_words": 200,
+                    },
+                ],
+                "outro": "Links below, subscribe and like.",
+            },
+        }
+
+    def test_valid_passes(self):
+        """Valid script passes quality gate."""
+        from lib.schemas import quality_gate_script_final
+        issues = quality_gate_script_final(self._make_valid_script())
+        self.assertEqual(issues, [])
+
+    def test_product_key_mismatch(self):
+        """Mismatched product_key flagged."""
+        from lib.schemas import quality_gate_script_final
+        script = self._make_valid_script()
+        script["script"]["segments"][0]["product_key"] = "WRONG:best_overall"
+        issues = quality_gate_script_final(script)
+        self.assertTrue(any("mismatch" in i for i in issues))
+
+    def test_duplicate_slot(self):
+        """Duplicate slot flagged."""
+        from lib.schemas import quality_gate_script_final
+        script = self._make_valid_script()
+        script["script"]["segments"][1]["slot"] = "best_overall"
+        issues = quality_gate_script_final(script)
+        self.assertTrue(any("duplicate" in i for i in issues))
+
+    def test_segment_imbalance(self):
+        """Segment imbalance (>2x ratio) flagged."""
+        from lib.schemas import quality_gate_script_final
+        script = self._make_valid_script()
+        script["script"]["segments"][0]["estimated_words"] = 500
+        script["script"]["segments"][1]["estimated_words"] = 100
+        script["script"]["segments"][2]["estimated_words"] = 200
+        issues = quality_gate_script_final(script)
+        self.assertTrue(any("imbalance" in i.lower() for i in issues))
+
+    def test_word_count_too_low(self):
+        """Total word count below 400 flagged."""
+        from lib.schemas import quality_gate_script_final
+        script = self._make_valid_script()
+        script["total_word_count"] = 200
+        issues = quality_gate_script_final(script)
+        self.assertTrue(any("too low" in i for i in issues))
+
+    def test_word_count_too_high(self):
+        """Total word count above 900 flagged."""
+        from lib.schemas import quality_gate_script_final
+        script = self._make_valid_script()
+        script["total_word_count"] = 1200
+        issues = quality_gate_script_final(script)
+        self.assertTrue(any("too high" in i for i in issues))
+
+    def test_generic_intro(self):
+        """Generic YouTube opener flagged."""
+        from lib.schemas import quality_gate_script_final
+        script = self._make_valid_script()
+        script["script"]["intro"] = "Hey guys welcome back to the channel today we review earbuds."
+        issues = quality_gate_script_final(script)
+        self.assertTrue(any("generic" in i.lower() for i in issues))
+
+    def test_duration_inconsistency(self):
+        """Duration not matching word count flagged."""
+        from lib.schemas import quality_gate_script_final
+        script = self._make_valid_script()
+        script["total_word_count"] = 600
+        script["estimated_duration_sec"] = 30  # Way off for 600 words
+        issues = quality_gate_script_final(script)
+        self.assertTrue(any("inconsistent" in i for i in issues))
+
+
+class TestBuildScriptPayload(unittest.TestCase):
+    """Tests for build_script_payload pipeline helper."""
+
+    def test_builds_from_outline(self):
+        """Payload correctly built from validated outline."""
+        from lib.schemas import build_script_payload
+        outline = {
+            "status": "ok",
+            "contract_version": "script_writer/v0.1.0",
+            "outline_version": 1,
+            "outline": {
+                "hook": "Looking for the best earbuds?",
+                "products": [
+                    {
+                        "product_key": "B0X:best_overall",
+                        "asin": "B0X",
+                        "slot": "best_overall",
+                        "angle": "The all-rounder",
+                        "points": ["ANC", "Battery"],
+                        "verdict": "The one.",
+                    },
+                ],
+                "cta": "Links below!",
+            },
+        }
+        payload = build_script_payload(outline, niche="earbuds", locale="en-US")
+        self.assertEqual(payload["niche"], "earbuds")
+        self.assertEqual(payload["locale"], "en-US")
+        self.assertEqual(payload["mode"], "generate")
+        self.assertEqual(payload["outline"]["hook"], "Looking for the best earbuds?")
+        self.assertEqual(len(payload["outline"]["products"]), 1)
+        self.assertEqual(payload["outline"]["products"][0]["asin"], "B0X")
+
+    def test_patch_mode(self):
+        """Payload mode set correctly for patch."""
+        from lib.schemas import build_script_payload
+        outline = {
+            "status": "ok", "contract_version": "v1", "outline_version": 2,
+            "outline": {"hook": "h", "products": [], "cta": "c"},
+        }
+        payload = build_script_payload(outline, mode="patch")
+        self.assertEqual(payload["mode"], "patch")
+
+
+class TestValidateOutlineForLayer2(unittest.TestCase):
+    """Tests for validate_outline_for_layer2 pre-check."""
+
+    def test_valid_outline_passes(self):
+        """Valid outline passes pre-check."""
+        from lib.schemas import validate_outline_for_layer2
+        outline = {
+            "status": "ok",
+            "outline": {
+                "hook": "A sufficiently long hook for testing purposes.",
+                "products": [
+                    {"angle": "Good angle", "points": ["p1", "p2"]},
+                ],
+                "cta": "Links below, subscribe now!",
+            },
+        }
+        issues = validate_outline_for_layer2(outline)
+        self.assertEqual(issues, [])
+
+    def test_needs_human_status_fails(self):
+        """Outline with needs_human status fails."""
+        from lib.schemas import validate_outline_for_layer2
+        outline = {"status": "needs_human", "outline": {"hook": "h" * 20, "products": [{"angle": "a", "points": ["p"]}], "cta": "c" * 20}}
+        issues = validate_outline_for_layer2(outline)
+        self.assertTrue(any("status" in i for i in issues))
+
+    def test_needs_review_angle_fails(self):
+        """Product with [needs review] angle fails."""
+        from lib.schemas import validate_outline_for_layer2
+        outline = {
+            "status": "ok",
+            "outline": {
+                "hook": "A sufficiently long hook text.",
+                "products": [{"angle": "[needs review]", "points": ["p1"]}],
+                "cta": "Links below, subscribe!",
+            },
+        }
+        issues = validate_outline_for_layer2(outline)
+        self.assertTrue(any("needs review" in i for i in issues))
+
+
+# ==========================================================================
+# FinalScriptPatchPolicy tests
+# ==========================================================================
+
+class TestFinalScriptPatchPolicy(unittest.TestCase):
+    """Tests for FinalScriptPatchPolicy — Layer 2 script patching."""
+
+    def _make_script_doc(self):
+        return {
+            "contract_version": "script_writer_final/v0.1.0",
+            "script_version": 1,
+            "total_word_count": 600,
+            "estimated_duration_sec": 240,
+            "script": {
+                "intro": "Looking for the best earbuds? We tested them all.",
+                "segments": [
+                    {
+                        "product_key": "B0EXAMPLE1:best_overall",
+                        "asin": "B0EXAMPLE1",
+                        "slot": "best_overall",
+                        "heading": "Number one pick",
+                        "body": "The Sony WF-1000XM5 dominates with industry-leading noise cancellation and eight-hour battery life.",
+                        "verdict_line": "The best overall choice.",
+                        "transition": "But what about value?",
+                        "estimated_words": 200,
+                    },
+                ],
+                "outro": "Links in description. Like and subscribe for more reviews.",
+            },
+        }
+
+    def test_replace_intro_allowed(self):
+        """Replacing intro is allowed."""
+        from lib.apply_patch import apply_final_script_patch
+        doc = self._make_script_doc()
+        ops = [{"op": "replace", "path": "/script/intro", "value": "Updated fresh intro for the video."}]
+        result = apply_final_script_patch(doc, ops)
+        self.assertEqual(result["script"]["intro"], "Updated fresh intro for the video.")
+
+    def test_replace_body_allowed(self):
+        """Replacing segment body is allowed."""
+        from lib.apply_patch import apply_final_script_patch
+        doc = self._make_script_doc()
+        new_body = "A brand new body text that describes the product in detail and meets the minimum length requirement for the schema."
+        ops = [{"op": "replace", "path": "/script/segments/0/body", "value": new_body}]
+        result = apply_final_script_patch(doc, ops)
+        self.assertEqual(result["script"]["segments"][0]["body"], new_body)
+
+    def test_replace_outro_allowed(self):
+        """Replacing outro is allowed."""
+        from lib.apply_patch import apply_final_script_patch
+        doc = self._make_script_doc()
+        ops = [{"op": "replace", "path": "/script/outro", "value": "New outro with call to action please."}]
+        result = apply_final_script_patch(doc, ops)
+        self.assertEqual(result["script"]["outro"], "New outro with call to action please.")
+
+    def test_replace_asin_forbidden(self):
+        """Replacing asin in final script is forbidden."""
+        from lib.apply_patch import apply_final_script_patch, PatchError
+        doc = self._make_script_doc()
+        ops = [{"op": "replace", "path": "/script/segments/0/asin", "value": "HACKED"}]
+        with self.assertRaises(PatchError) as ctx:
+            apply_final_script_patch(doc, ops)
+        self.assertIn("forbidden", str(ctx.exception).lower())
+
+    def test_replace_estimated_words_forbidden(self):
+        """Replacing estimated_words is forbidden."""
+        from lib.apply_patch import apply_final_script_patch, PatchError
+        doc = self._make_script_doc()
+        ops = [{"op": "replace", "path": "/script/segments/0/estimated_words", "value": 999}]
+        with self.assertRaises(PatchError):
+            apply_final_script_patch(doc, ops)
+
+    def test_replace_total_word_count_forbidden(self):
+        """Replacing total_word_count is forbidden."""
+        from lib.apply_patch import apply_final_script_patch, PatchError
+        doc = self._make_script_doc()
+        ops = [{"op": "replace", "path": "/total_word_count", "value": 9999}]
+        with self.assertRaises(PatchError):
+            apply_final_script_patch(doc, ops)
+
+    def test_body_too_long_post_patch(self):
+        """Body exceeding max chars after patch is rejected."""
+        from lib.apply_patch import apply_final_script_patch, PatchError
+        doc = self._make_script_doc()
+        ops = [{"op": "replace", "path": "/script/segments/0/body", "value": "x" * 700}]
+        with self.assertRaises(PatchError) as ctx:
+            apply_final_script_patch(doc, ops)
+        self.assertIn("too long", str(ctx.exception))
+
+    def test_intro_too_long_post_patch(self):
+        """Intro exceeding max chars after patch is rejected."""
+        from lib.apply_patch import apply_final_script_patch, PatchError
+        doc = self._make_script_doc()
+        ops = [{"op": "replace", "path": "/script/intro", "value": "x" * 400}]
+        with self.assertRaises(PatchError) as ctx:
+            apply_final_script_patch(doc, ops)
+        self.assertIn("too long", str(ctx.exception))
+
+    def test_max_ops_enforced(self):
+        """Too many ops rejected."""
+        from lib.apply_patch import apply_final_script_patch, PatchError
+        doc = self._make_script_doc()
+        ops = [{"op": "replace", "path": "/script/intro", "value": f"v{i} intro text here."} for i in range(10)]
+        with self.assertRaises(PatchError) as ctx:
+            apply_final_script_patch(doc, ops)
+        self.assertIn("Too many", str(ctx.exception))
+
+    def test_remove_op_blocked(self):
+        """Remove operations blocked."""
+        from lib.apply_patch import apply_final_script_patch, PatchError
+        doc = self._make_script_doc()
+        ops = [{"op": "remove", "path": "/script/intro"}]
+        with self.assertRaises(PatchError):
+            apply_final_script_patch(doc, ops)
+
+    def test_original_not_mutated(self):
+        """Original document not mutated by patch."""
+        from lib.apply_patch import apply_final_script_patch
+        doc = self._make_script_doc()
+        original_intro = doc["script"]["intro"]
+        ops = [{"op": "replace", "path": "/script/intro", "value": "Brand new intro for the video."}]
+        result = apply_final_script_patch(doc, ops)
+        self.assertEqual(doc["script"]["intro"], original_intro)
+        self.assertNotEqual(result["script"]["intro"], original_intro)
+
+
+# ==========================================================================
+# Patch idempotency tests
+# ==========================================================================
+
+class TestPatchIdempotency(unittest.TestCase):
+    """Tests for canonical hashing and patch ID computation."""
+
+    def test_canonical_json_deterministic(self):
+        """canonical_json produces same output for same data regardless of key order."""
+        from lib.apply_patch import canonical_json
+        a = {"z": 1, "a": 2, "m": [3, 4]}
+        b = {"a": 2, "m": [3, 4], "z": 1}
+        self.assertEqual(canonical_json(a), canonical_json(b))
+
+    def test_canonical_json_compact(self):
+        """canonical_json uses compact separators."""
+        from lib.apply_patch import canonical_json
+        result = canonical_json({"key": "value"})
+        self.assertNotIn(" ", result)
+        self.assertEqual(result, '{"key":"value"}')
+
+    def test_compute_base_hash_stable(self):
+        """Same document always produces same hash."""
+        from lib.apply_patch import compute_base_hash
+        doc = {"a": 1, "b": [2, 3]}
+        h1 = compute_base_hash(doc)
+        h2 = compute_base_hash(doc)
+        self.assertEqual(h1, h2)
+        self.assertEqual(len(h1), 64)  # SHA-256 hex
+
+    def test_compute_base_hash_different_for_different_docs(self):
+        """Different documents produce different hashes."""
+        from lib.apply_patch import compute_base_hash
+        h1 = compute_base_hash({"a": 1})
+        h2 = compute_base_hash({"a": 2})
+        self.assertNotEqual(h1, h2)
+
+    def test_validate_base_hash_matches(self):
+        """validate_base_hash returns True for matching document."""
+        from lib.apply_patch import compute_base_hash, validate_base_hash
+        doc = {"hello": "world"}
+        h = compute_base_hash(doc)
+        self.assertTrue(validate_base_hash(doc, h))
+
+    def test_validate_base_hash_fails_on_change(self):
+        """validate_base_hash returns False when document changed."""
+        from lib.apply_patch import compute_base_hash, validate_base_hash
+        doc = {"hello": "world"}
+        h = compute_base_hash(doc)
+        doc["hello"] = "changed"
+        self.assertFalse(validate_base_hash(doc, h))
+
+    def test_compute_patch_id_deterministic(self):
+        """Same base_hash + ops produces same patch_id."""
+        from lib.apply_patch import compute_patch_id
+        ops = [{"op": "replace", "path": "/x", "value": "y"}]
+        id1 = compute_patch_id("abc123", ops)
+        id2 = compute_patch_id("abc123", ops)
+        self.assertEqual(id1, id2)
+
+    def test_compute_patch_id_different_base(self):
+        """Different base_hash produces different patch_id."""
+        from lib.apply_patch import compute_patch_id
+        ops = [{"op": "replace", "path": "/x", "value": "y"}]
+        id1 = compute_patch_id("abc123", ops)
+        id2 = compute_patch_id("def456", ops)
+        self.assertNotEqual(id1, id2)
+
+    def test_stale_patch_rejected(self):
+        """apply_final_script_patch rejects stale patch."""
+        from lib.apply_patch import apply_final_script_patch, compute_base_hash, PatchError
+        doc = {
+            "contract_version": "v1", "script_version": 1,
+            "total_word_count": 100, "estimated_duration_sec": 40,
+            "script": {
+                "intro": "Some intro text for testing purposes.",
+                "segments": [], "outro": "Some outro text for testing.",
+            },
+        }
+        old_hash = compute_base_hash(doc)
+        doc["script"]["intro"] = "Modified intro text for testing purposes."
+        ops = [{"op": "replace", "path": "/script/outro", "value": "New outro for testing right here."}]
+        with self.assertRaises(PatchError) as ctx:
+            apply_final_script_patch(doc, ops, expected_base_hash=old_hash)
+        self.assertIn("Stale", str(ctx.exception))
+
+
+# ==========================================================================
+# Script Writer Final contract tests
+# ==========================================================================
+
+class TestScriptFinalContract(unittest.TestCase):
+    """Tests for script_writer_final contract loading."""
+
+    def test_contract_file_exists(self):
+        """Contract markdown file exists."""
+        contract_path = Path(__file__).resolve().parent.parent / "contracts" / "script_writer_final" / "v0.1.0.md"
+        self.assertTrue(contract_path.exists(), f"Missing: {contract_path}")
+
+    def test_contract_loader_reads(self):
+        """ContractLoader can read the script_writer_final contract."""
+        from lib.prompt_contract_loader import ContractLoader
+        contracts_dir = str(Path(__file__).resolve().parent.parent / "contracts")
+        loader = ContractLoader(contracts_dir)
+        text = loader.load("script_writer_final", "v0.1.0")
+        self.assertIn("Script Writer", text)
+        self.assertIn("LAYER 2", text)
+        self.assertIn("PATCH MODE", text)
+
+    def test_final_contract_spec_valid(self):
+        """SCRIPT_FINAL_CONTRACT has expected fields."""
+        from lib.schemas import SCRIPT_FINAL_CONTRACT
+        self.assertEqual(SCRIPT_FINAL_CONTRACT.name, "script_writer_final")
+        self.assertEqual(SCRIPT_FINAL_CONTRACT.version, "v0.1.0")
+        self.assertTrue(len(SCRIPT_FINAL_CONTRACT.economy_rules) >= 4)
+
+    def test_final_patch_contract_no_cache(self):
+        """SCRIPT_FINAL_PATCH_CONTRACT uses no-cache policy."""
+        from lib.schemas import SCRIPT_FINAL_PATCH_CONTRACT
+        self.assertEqual(SCRIPT_FINAL_PATCH_CONTRACT.cache_policy.name, "none")
+
+
+# ==========================================================================
+# Voice Script (Layer 3) tests
+# ==========================================================================
+
+class TestVoiceScriptSchema(unittest.TestCase):
+    """Tests for VOICE_SCRIPT_SCHEMA validation."""
+
+    def _make_valid_voice_script(self):
+        return {
+            "status": "ok",
+            "contract_version": "voice_script/v0.1.0",
+            "total_duration_sec": 180,
+            "segments": [
+                {"segment_id": "intro", "kind": "intro", "text": "Looking for the best wireless earbuds? We tested them all so you don't have to.", "lip_sync_hint": "excited", "approx_duration_sec": 10},
+                {"segment_id": "p0", "kind": "product", "product_key": "B0X:best_overall", "text": "The Sony WF-1000XM5 delivers the best noise cancellation in any earbud we tested this year.", "lip_sync_hint": "serious", "approx_duration_sec": 15},
+                {"segment_id": "t0_1", "kind": "transition", "text": "But what if you want great sound without breaking the bank?", "lip_sync_hint": "neutral", "approx_duration_sec": 5},
+                {"segment_id": "p1", "kind": "product", "product_key": "B0Y:best_value", "text": "The EarFun Air Pro punches way above its weight class with solid noise cancellation.", "lip_sync_hint": "excited", "approx_duration_sec": 15},
+                {"segment_id": "t1_2", "kind": "transition", "text": "And for those who want nothing but the absolute best quality.", "lip_sync_hint": "neutral", "approx_duration_sec": 5},
+                {"segment_id": "p2", "kind": "product", "product_key": "B0Z:best_premium", "text": "The Sennheiser Momentum 4 is what premium audio is supposed to feel like in every detail.", "lip_sync_hint": "serious", "approx_duration_sec": 15},
+                {"segment_id": "outro", "kind": "outro", "text": "Links to all three are in the description. Subscribe for more honest reviews.", "lip_sync_hint": "neutral", "approx_duration_sec": 8},
+            ],
+            "audio_plan": [
+                {"segment_id": "intro", "voice_id": "voice1", "model": "eleven_multilingual_v2", "stability": 0.4, "style": 0.35, "output_filename": "seg_intro.mp3"},
+                {"segment_id": "p0", "voice_id": "voice1", "model": "eleven_multilingual_v2", "stability": 0.4, "style": 0.35, "output_filename": "seg_p0.mp3"},
+                {"segment_id": "t0_1", "voice_id": "voice1", "model": "eleven_multilingual_v2", "stability": 0.5, "style": 0.2, "output_filename": "seg_t0_1.mp3"},
+                {"segment_id": "p1", "voice_id": "voice1", "model": "eleven_multilingual_v2", "stability": 0.4, "style": 0.35, "output_filename": "seg_p1.mp3"},
+                {"segment_id": "t1_2", "voice_id": "voice1", "model": "eleven_multilingual_v2", "stability": 0.5, "style": 0.2, "output_filename": "seg_t1_2.mp3"},
+                {"segment_id": "p2", "voice_id": "voice1", "model": "eleven_multilingual_v2", "stability": 0.4, "style": 0.35, "output_filename": "seg_p2.mp3"},
+                {"segment_id": "outro", "voice_id": "voice1", "model": "eleven_multilingual_v2", "stability": 0.5, "style": 0.3, "output_filename": "seg_outro.mp3"},
+            ],
+        }
+
+    def test_valid_voice_script_passes(self):
+        """Valid voice script passes schema validation."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import VOICE_SCRIPT_SCHEMA
+        vs = self._make_valid_voice_script()
+        errors = validate_output(vs, VOICE_SCRIPT_SCHEMA)
+        self.assertEqual(errors, [], f"Unexpected errors: {errors}")
+
+    def test_too_few_segments_fails(self):
+        """Fewer than 4 segments fails minItems."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import VOICE_SCRIPT_SCHEMA
+        vs = self._make_valid_voice_script()
+        vs["segments"] = vs["segments"][:2]
+        errors = validate_output(vs, VOICE_SCRIPT_SCHEMA)
+        self.assertTrue(any("too short" in str(e).lower() for e in errors))
+
+    def test_invalid_kind_fails(self):
+        """Invalid segment kind fails enum."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import VOICE_SCRIPT_SCHEMA
+        vs = self._make_valid_voice_script()
+        vs["segments"][0]["kind"] = "interlude"
+        errors = validate_output(vs, VOICE_SCRIPT_SCHEMA)
+        self.assertTrue(len(errors) > 0)
+
+    def test_invalid_lip_sync_hint_fails(self):
+        """Invalid lip_sync_hint fails enum."""
+        from lib.json_schema_guard import validate_output
+        from lib.schemas import VOICE_SCRIPT_SCHEMA
+        vs = self._make_valid_voice_script()
+        vs["segments"][0]["lip_sync_hint"] = "happy"
+        errors = validate_output(vs, VOICE_SCRIPT_SCHEMA)
+        self.assertTrue(len(errors) > 0)
+
+
+class TestQualityGateVoiceScript(unittest.TestCase):
+    """Tests for quality_gate_voice_script."""
+
+    def _make_valid_segments(self):
+        return {
+            "total_duration_sec": 30,
+            "segments": [
+                {"segment_id": "intro", "kind": "intro", "text": "Looking for earbuds? We tested them all.", "lip_sync_hint": "excited", "approx_duration_sec": 4},
+                {"segment_id": "p0", "kind": "product", "text": "The Sony delivers best noise cancellation in any earbud we tested.", "lip_sync_hint": "serious", "approx_duration_sec": 5},
+                {"segment_id": "t0_1", "kind": "transition", "text": "What about value for money options?", "lip_sync_hint": "neutral", "approx_duration_sec": 4},
+                {"segment_id": "p1", "kind": "product", "text": "The EarFun punches above its weight with great cancellation and comfort.", "lip_sync_hint": "excited", "approx_duration_sec": 5},
+                {"segment_id": "p2", "kind": "product", "text": "The Sennheiser is what premium audio should feel like in every way.", "lip_sync_hint": "serious", "approx_duration_sec": 5},
+                {"segment_id": "outro", "kind": "outro", "text": "Links are in the description below. Subscribe.", "lip_sync_hint": "neutral", "approx_duration_sec": 4},
+            ],
+            "audio_plan": [
+                {"segment_id": "intro", "voice_id": "v1", "model": "m"},
+                {"segment_id": "p0", "voice_id": "v1", "model": "m"},
+                {"segment_id": "t0_1", "voice_id": "v1", "model": "m"},
+                {"segment_id": "p1", "voice_id": "v1", "model": "m"},
+                {"segment_id": "p2", "voice_id": "v1", "model": "m"},
+                {"segment_id": "outro", "voice_id": "v1", "model": "m"},
+            ],
+        }
+
+    def test_valid_passes(self):
+        """Valid voice script passes quality gate."""
+        from lib.schemas import quality_gate_voice_script
+        issues = quality_gate_voice_script(self._make_valid_segments())
+        self.assertEqual(issues, [])
+
+    def test_duplicate_segment_id(self):
+        """Duplicate segment_id flagged."""
+        from lib.schemas import quality_gate_voice_script
+        vs = self._make_valid_segments()
+        vs["segments"][1]["segment_id"] = "intro"
+        issues = quality_gate_voice_script(vs)
+        self.assertTrue(any("duplicate" in i for i in issues))
+
+    def test_missing_audio_plan(self):
+        """Missing segment in audio_plan flagged."""
+        from lib.schemas import quality_gate_voice_script
+        vs = self._make_valid_segments()
+        vs["audio_plan"] = vs["audio_plan"][:3]
+        issues = quality_gate_voice_script(vs)
+        self.assertTrue(any("missing" in i.lower() for i in issues))
+
+    def test_no_intro_flagged(self):
+        """Missing intro kind flagged."""
+        from lib.schemas import quality_gate_voice_script
+        vs = self._make_valid_segments()
+        vs["segments"][0]["kind"] = "product"
+        issues = quality_gate_voice_script(vs)
+        self.assertTrue(any("intro" in i.lower() for i in issues))
+
+    def test_no_outro_flagged(self):
+        """Missing outro kind flagged."""
+        from lib.schemas import quality_gate_voice_script
+        vs = self._make_valid_segments()
+        vs["segments"][-1]["kind"] = "product"
+        issues = quality_gate_voice_script(vs)
+        self.assertTrue(any("outro" in i.lower() for i in issues))
+
+    def test_stability_out_of_range(self):
+        """Stability > 1 flagged."""
+        from lib.schemas import quality_gate_voice_script
+        vs = self._make_valid_segments()
+        vs["audio_plan"][0]["stability"] = 1.5
+        issues = quality_gate_voice_script(vs)
+        self.assertTrue(any("stability" in i for i in issues))
+
+    def test_total_duration_mismatch(self):
+        """Total duration mismatch flagged."""
+        from lib.schemas import quality_gate_voice_script
+        vs = self._make_valid_segments()
+        vs["total_duration_sec"] = 999
+        issues = quality_gate_voice_script(vs)
+        self.assertTrue(any("mismatch" in i for i in issues))
+
+
+class TestVoiceScriptContract(unittest.TestCase):
+    """Tests for voice_script contract loading."""
+
+    def test_contract_file_exists(self):
+        """Contract markdown file exists."""
+        contract_path = Path(__file__).resolve().parent.parent / "contracts" / "voice_script" / "v0.1.0.md"
+        self.assertTrue(contract_path.exists(), f"Missing: {contract_path}")
+
+    def test_contract_loader_reads(self):
+        """ContractLoader can read the voice_script contract."""
+        from lib.prompt_contract_loader import ContractLoader
+        contracts_dir = str(Path(__file__).resolve().parent.parent / "contracts")
+        loader = ContractLoader(contracts_dir)
+        text = loader.load("voice_script", "v0.1.0")
+        self.assertIn("Voice Script", text)
+        self.assertIn("LAYER 3", text)
+        self.assertIn("TTS TAGS", text)
+
+    def test_voice_contract_spec_valid(self):
+        """VOICE_SCRIPT_CONTRACT has expected fields."""
+        from lib.schemas import VOICE_SCRIPT_CONTRACT
+        self.assertEqual(VOICE_SCRIPT_CONTRACT.name, "voice_script")
+        self.assertEqual(VOICE_SCRIPT_CONTRACT.version, "v0.1.0")
+        self.assertTrue(len(VOICE_SCRIPT_CONTRACT.economy_rules) >= 4)
+
+
+# ==========================================================================
+# Tone Gate tests
+# ==========================================================================
+
+class TestToneGate(unittest.TestCase):
+    """Tests for tone gate — pre-TTS duration validation."""
+
+    def test_strip_tts_tags(self):
+        """TTS tags are stripped from text."""
+        from lib.tone_gate import strip_tts_tags
+        text = "Hello [pause=300ms] world [emphasis]great[/emphasis] product [rate=1.05]fast[/rate]."
+        result = strip_tts_tags(text)
+        self.assertNotIn("[pause", result)
+        self.assertNotIn("[emphasis", result)
+        self.assertNotIn("[rate", result)
+        self.assertIn("Hello", result)
+        self.assertIn("world", result)
+
+    def test_count_words(self):
+        """Word count is accurate after tag stripping."""
+        from lib.tone_gate import count_words
+        text = "This is [pause=300ms] a test with [emphasis]five[/emphasis] tagged words plus more."
+        words = count_words(text)
+        self.assertEqual(words, 10)
+
+    def test_estimate_duration(self):
+        """Duration estimation is reasonable."""
+        from lib.tone_gate import estimate_duration_sec
+        # 165 words at 165 WPM = 60 seconds
+        text = " ".join(["word"] * 165)
+        dur = estimate_duration_sec(text, wpm=165)
+        self.assertAlmostEqual(dur, 60.0, places=1)
+
+    def test_valid_segments_pass(self):
+        """Well-sized segments pass tone gate."""
+        from lib.tone_gate import tone_gate_validate
+        segments = [
+            {"segment_id": "intro", "kind": "intro", "text": "Looking for the best earbuds in two thousand twenty six?", "approx_duration_sec": 8},
+            {"segment_id": "p0", "kind": "product", "text": "The Sony delivers excellent noise cancellation.", "approx_duration_sec": 6},
+        ]
+        violations = tone_gate_validate(segments)
+        self.assertEqual(violations, [])
+
+    def test_overly_long_segment_flagged(self):
+        """Segment too long for stated duration flagged."""
+        from lib.tone_gate import tone_gate_validate
+        # 80 words for a 10-second segment (80 words ≈ 29s at 165 WPM)
+        text = " ".join(["word"] * 80)
+        segments = [
+            {"segment_id": "p0", "kind": "product", "text": text, "approx_duration_sec": 10},
+        ]
+        violations = tone_gate_validate(segments)
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].segment_id, "p0")
+
+    def test_too_many_words_flagged(self):
+        """Segment with too many words flagged."""
+        from lib.tone_gate import tone_gate_validate, ToneGateRules
+        text = " ".join(["word"] * 100)
+        segments = [
+            {"segment_id": "p0", "kind": "product", "text": text, "approx_duration_sec": 60},
+        ]
+        violations = tone_gate_validate(segments, ToneGateRules(max_words_per_segment=80))
+        self.assertEqual(len(violations), 1)
+        self.assertIn("Too many", violations[0].issue)
+
+    def test_too_few_words_flagged(self):
+        """Segment with too few words flagged."""
+        from lib.tone_gate import tone_gate_validate
+        segments = [
+            {"segment_id": "p0", "kind": "product", "text": "Hi.", "approx_duration_sec": 10},
+        ]
+        violations = tone_gate_validate(segments)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("Too few", violations[0].issue)
+
+    def test_build_repair_prompt(self):
+        """Repair prompt generated correctly."""
+        from lib.tone_gate import ToneViolation, build_tone_repair_prompt
+        violations = [ToneViolation(
+            segment_id="p0", kind="product",
+            approx_duration_sec=10.0, estimated_duration_sec=25.0,
+            word_count=60, issue="Text too long",
+        )]
+        prompt = build_tone_repair_prompt(violations)
+        self.assertIn("REPAIR REQUEST", prompt)
+        self.assertIn("p0", prompt)
+        self.assertIn("patch_ops", prompt)
+
+
+# ==========================================================================
+# Media Manifest tests
+# ==========================================================================
+
+class TestMediaManifest(unittest.TestCase):
+    """Tests for media manifest builder."""
+
+    def _make_voice_script(self):
+        return {
+            "contract_version": "voice_script/v0.1.0",
+            "total_duration_sec": 60,
+            "segments": [
+                {"segment_id": "intro", "kind": "intro", "text": "Hello this is a test intro.", "lip_sync_hint": "excited", "approx_duration_sec": 10},
+                {"segment_id": "p0", "kind": "product", "product_key": "B0X:best_overall", "text": "Product description here.", "lip_sync_hint": "neutral", "approx_duration_sec": 20},
+                {"segment_id": "t0_1", "kind": "transition", "text": "Moving on to the next pick.", "lip_sync_hint": "neutral", "approx_duration_sec": 5},
+                {"segment_id": "outro", "kind": "outro", "text": "Subscribe and like the video.", "lip_sync_hint": "neutral", "approx_duration_sec": 8},
+            ],
+            "audio_plan": [
+                {"segment_id": "intro", "voice_id": "v1", "model": "eleven_multilingual_v2", "stability": 0.4, "style": 0.35, "output_filename": "seg_intro.mp3"},
+                {"segment_id": "p0", "voice_id": "v1", "model": "eleven_multilingual_v2", "stability": 0.4, "style": 0.35, "output_filename": "seg_p0.mp3"},
+                {"segment_id": "t0_1", "voice_id": "v1", "model": "eleven_multilingual_v2", "stability": 0.5, "style": 0.2, "output_filename": "seg_t0_1.mp3"},
+                {"segment_id": "outro", "voice_id": "v1", "model": "eleven_multilingual_v2", "stability": 0.5, "style": 0.3, "output_filename": "seg_outro.mp3"},
+            ],
+        }
+
+    def test_manifest_structure(self):
+        """Manifest has correct top-level structure."""
+        from lib.media_manifest import build_media_manifest
+        vs = self._make_voice_script()
+        m = build_media_manifest(vs, run_id="RAY-99")
+        self.assertEqual(m["manifest_version"], "1.0")
+        self.assertEqual(m["run_id"], "RAY-99")
+        self.assertEqual(m["fps"], 30)
+        self.assertEqual(m["resolution"], "1920x1080")
+        self.assertIn("segments", m)
+        self.assertIn("deliver", m)
+        self.assertEqual(len(m["segments"]), 4)
+
+    def test_segment_audio_paths(self):
+        """Segment audio paths use content-addressed digests."""
+        from lib.media_manifest import build_media_manifest
+        vs = self._make_voice_script()
+        m = build_media_manifest(vs, run_id="RAY-99")
+        for seg in m["segments"]:
+            self.assertIn("RAY-99", seg["audio_path"])
+            self.assertIn("seg_", seg["audio_path"])
+            self.assertTrue(seg["audio_path"].endswith(".mp3"))
+            self.assertTrue(len(seg["audio_digest"]) == 64)
+
+    def test_audio_digest_deterministic(self):
+        """Same inputs produce same audio digest."""
+        from lib.media_manifest import compute_audio_digest
+        d1 = compute_audio_digest("v1", "Hello world", "model1")
+        d2 = compute_audio_digest("v1", "Hello world", "model1")
+        self.assertEqual(d1, d2)
+
+    def test_audio_digest_different_text(self):
+        """Different text produces different digest."""
+        from lib.media_manifest import compute_audio_digest
+        d1 = compute_audio_digest("v1", "Hello", "model1")
+        d2 = compute_audio_digest("v1", "Goodbye", "model1")
+        self.assertNotEqual(d1, d2)
+
+    def test_audio_digest_normalizes_whitespace(self):
+        """Text whitespace is normalized before hashing."""
+        from lib.media_manifest import compute_audio_digest
+        d1 = compute_audio_digest("v1", "Hello  world", "model1")
+        d2 = compute_audio_digest("v1", "Hello world", "model1")
+        self.assertEqual(d1, d2)
+
+    def test_deliver_section(self):
+        """Deliver section has output path and preset."""
+        from lib.media_manifest import build_media_manifest
+        vs = self._make_voice_script()
+        m = build_media_manifest(vs, run_id="RAY-99", output_path="out.mp4", render_preset="ProRes")
+        self.assertEqual(m["deliver"]["output_path"], "out.mp4")
+        self.assertEqual(m["deliver"]["preset"], "ProRes")
+
+
+# ==========================================================================
+# Voice Patch Policy tests
+# ==========================================================================
+
+class TestVoicePatchPolicy(unittest.TestCase):
+    """Tests for VoicePatchPolicy — Layer 3 voice script patching."""
+
+    def _make_voice_doc(self):
+        return {
+            "contract_version": "voice_script/v0.1.0",
+            "total_duration_sec": 60,
+            "segments": [
+                {"segment_id": "intro", "kind": "intro", "product_key": None, "text": "Looking for the best earbuds in twenty twenty six?", "lip_sync_hint": "excited", "approx_duration_sec": 10},
+                {"segment_id": "p0", "kind": "product", "product_key": "B0X:best_overall", "text": "The Sony delivers excellent noise cancellation in this price range.", "lip_sync_hint": "serious", "approx_duration_sec": 15},
+            ],
+            "audio_plan": [
+                {"segment_id": "intro", "voice_id": "v1", "model": "eleven_multilingual_v2", "stability": 0.4, "style": 0.35, "output_filename": "seg_intro.mp3"},
+                {"segment_id": "p0", "voice_id": "v1", "model": "eleven_multilingual_v2", "stability": 0.4, "style": 0.35, "output_filename": "seg_p0.mp3"},
+            ],
+        }
+
+    def test_replace_text_allowed(self):
+        """Replacing segment text is allowed."""
+        from lib.apply_patch import apply_voice_patch
+        doc = self._make_voice_doc()
+        ops = [{"op": "replace", "path": "/segments/0/text", "value": "Updated intro text that is long enough for the schema."}]
+        result = apply_voice_patch(doc, ops)
+        self.assertIn("Updated intro", result["segments"][0]["text"])
+
+    def test_replace_lip_sync_hint_allowed(self):
+        """Replacing lip_sync_hint is allowed."""
+        from lib.apply_patch import apply_voice_patch
+        doc = self._make_voice_doc()
+        ops = [{"op": "replace", "path": "/segments/0/lip_sync_hint", "value": "neutral"}]
+        result = apply_voice_patch(doc, ops)
+        self.assertEqual(result["segments"][0]["lip_sync_hint"], "neutral")
+
+    def test_replace_stability_allowed(self):
+        """Replacing audio_plan stability is allowed."""
+        from lib.apply_patch import apply_voice_patch
+        doc = self._make_voice_doc()
+        ops = [{"op": "replace", "path": "/audio_plan/0/stability", "value": 0.6}]
+        result = apply_voice_patch(doc, ops)
+        self.assertEqual(result["audio_plan"][0]["stability"], 0.6)
+
+    def test_replace_segment_id_forbidden(self):
+        """Replacing segment_id is forbidden."""
+        from lib.apply_patch import apply_voice_patch, PatchError
+        doc = self._make_voice_doc()
+        ops = [{"op": "replace", "path": "/segments/0/segment_id", "value": "hacked"}]
+        with self.assertRaises(PatchError) as ctx:
+            apply_voice_patch(doc, ops)
+        self.assertIn("forbidden", str(ctx.exception).lower())
+
+    def test_replace_voice_id_forbidden(self):
+        """Replacing voice_id is forbidden."""
+        from lib.apply_patch import apply_voice_patch, PatchError
+        doc = self._make_voice_doc()
+        ops = [{"op": "replace", "path": "/audio_plan/0/voice_id", "value": "hacked"}]
+        with self.assertRaises(PatchError):
+            apply_voice_patch(doc, ops)
+
+    def test_replace_model_forbidden(self):
+        """Replacing model is forbidden."""
+        from lib.apply_patch import apply_voice_patch, PatchError
+        doc = self._make_voice_doc()
+        ops = [{"op": "replace", "path": "/audio_plan/0/model", "value": "hacked"}]
+        with self.assertRaises(PatchError):
+            apply_voice_patch(doc, ops)
+
+    def test_text_too_long_post_patch(self):
+        """Text exceeding max chars after patch is rejected."""
+        from lib.apply_patch import apply_voice_patch, PatchError
+        doc = self._make_voice_doc()
+        ops = [{"op": "replace", "path": "/segments/0/text", "value": "x" * 600}]
+        with self.assertRaises(PatchError) as ctx:
+            apply_voice_patch(doc, ops)
+        self.assertIn("too long", str(ctx.exception))
+
+    def test_original_not_mutated(self):
+        """Original document not mutated by voice patch."""
+        from lib.apply_patch import apply_voice_patch
+        doc = self._make_voice_doc()
+        original_text = doc["segments"][0]["text"]
+        ops = [{"op": "replace", "path": "/segments/0/text", "value": "New text for the intro segment here."}]
+        result = apply_voice_patch(doc, ops)
+        self.assertEqual(doc["segments"][0]["text"], original_text)
+        self.assertNotEqual(result["segments"][0]["text"], original_text)
+
+
+# ==========================================================================
+# Pipeline helper tests (voice payload + pre-check)
+# ==========================================================================
+
+class TestVoicePipelineHelpers(unittest.TestCase):
+    """Tests for build_voice_payload and validate_script_for_layer3."""
+
+    def test_build_voice_payload(self):
+        """Payload correctly built from final script."""
+        from lib.schemas import build_voice_payload
+        final_script = {
+            "status": "ok",
+            "contract_version": "script_writer_final/v0.1.0",
+            "estimated_duration_sec": 240,
+            "script": {
+                "intro": "A great intro for the video.",
+                "segments": [
+                    {"product_key": "B0X:best_overall", "slot": "best_overall",
+                     "heading": "h", "body": "b", "verdict_line": "v", "transition": "t"},
+                ],
+                "outro": "Links below.",
+            },
+        }
+        payload = build_voice_payload(final_script, niche="earbuds", locale="pt-BR", voice_id="myvoice")
+        self.assertEqual(payload["niche"], "earbuds")
+        self.assertEqual(payload["locale"], "pt-BR")
+        self.assertEqual(payload["voice_id"], "myvoice")
+        self.assertEqual(len(payload["script"]["segments"]), 1)
+
+    def test_validate_script_for_layer3_valid(self):
+        """Valid script passes layer 3 pre-check."""
+        from lib.schemas import validate_script_for_layer3
+        script = {
+            "status": "ok",
+            "total_word_count": 600,
+            "script": {
+                "intro": "A sufficiently long intro text here.",
+                "segments": [{"body": "x" * 60}],
+                "outro": "A sufficiently long outro text here.",
+            },
+        }
+        issues = validate_script_for_layer3(script)
+        self.assertEqual(issues, [])
+
+    def test_validate_script_for_layer3_needs_human(self):
+        """Script with needs_human status fails."""
+        from lib.schemas import validate_script_for_layer3
+        script = {
+            "status": "needs_human",
+            "total_word_count": 600,
+            "script": {"intro": "x" * 30, "segments": [{"body": "x" * 60}], "outro": "x" * 30},
+        }
+        issues = validate_script_for_layer3(script)
+        self.assertTrue(any("status" in i for i in issues))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
