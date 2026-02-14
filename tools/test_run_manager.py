@@ -13625,5 +13625,448 @@ class TestAudioProofGate(unittest.TestCase):
         self.assertFalse(manifest["audio_proof"]["safe_audio_mode"])
 
 
+class TestAmazonQuarantine(unittest.TestCase):
+    """Tests for amazon_quarantine module."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.lock_path = Path(self.tmp) / "amazon_quarantine.lock"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_no_lock_not_quarantined(self):
+        from rayvault.amazon_quarantine import is_quarantined
+        self.assertFalse(is_quarantined(self.lock_path))
+
+    def test_set_and_check_quarantine(self):
+        from rayvault.amazon_quarantine import is_quarantined, set_quarantine
+        set_quarantine(self.lock_path, code=429, cooldown_hours=2.0, jitter_minutes=0)
+        self.assertTrue(is_quarantined(self.lock_path))
+
+    def test_remaining_minutes(self):
+        from rayvault.amazon_quarantine import set_quarantine, remaining_minutes
+        set_quarantine(self.lock_path, code=403, cooldown_hours=2.0, jitter_minutes=0)
+        mins = remaining_minutes(self.lock_path)
+        self.assertGreater(mins, 100)  # ~120 min
+
+    def test_clear_quarantine(self):
+        from rayvault.amazon_quarantine import set_quarantine, clear_quarantine, is_quarantined
+        set_quarantine(self.lock_path, code=429, cooldown_hours=2.0, jitter_minutes=0)
+        self.assertTrue(is_quarantined(self.lock_path))
+        cleared = clear_quarantine(self.lock_path)
+        self.assertTrue(cleared)
+        self.assertFalse(is_quarantined(self.lock_path))
+
+    def test_expired_quarantine(self):
+        from rayvault.amazon_quarantine import is_quarantined
+        # Write a lock with already-expired cooldown
+        expired = {
+            "at_utc": "2025-01-01T00:00:00Z",
+            "code": 429,
+            "cooldown_until_utc": "2025-01-01T04:00:00Z",
+        }
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.lock_path, "w") as f:
+            json.dump(expired, f)
+        self.assertFalse(is_quarantined(self.lock_path))
+
+    def test_lock_file_format(self):
+        from rayvault.amazon_quarantine import set_quarantine
+        set_quarantine(self.lock_path, code=403, cooldown_hours=4.0, jitter_minutes=0, note="test block")
+        data = json.loads(self.lock_path.read_text())
+        self.assertEqual(data["code"], 403)
+        self.assertIn("cooldown_until_utc", data)
+        self.assertEqual(data["note"], "test block")
+        self.assertIn("at_utc", data)
+
+
+class TestCachePrune(unittest.TestCase):
+    """Tests for cache_prune module."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = Path(self.tmp)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_prune_empty_dir(self):
+        from rayvault.cache_prune import prune
+        result = prune(self.root, max_unused_days=30, apply=False)
+        self.assertEqual(result["deleted_count"], 0)
+        self.assertEqual(result["kept_count"], 0)
+
+    def test_prune_nonexistent_root(self):
+        from rayvault.cache_prune import prune
+        result = prune(Path("/nonexistent_dir_xyz"), max_unused_days=30)
+        self.assertEqual(result.get("error"), "root_not_found")
+
+    def test_prune_old_entry(self):
+        from rayvault.cache_prune import prune
+        # Create an old ASIN entry
+        asin_dir = self.root / "B0OLD123"
+        asin_dir.mkdir(parents=True)
+        cache_info = {
+            "last_used_utc": "2024-01-01T00:00:00Z",
+            "images_fetched_at_utc": "2024-01-01T00:00:00Z",
+        }
+        with open(asin_dir / "cache_info.json", "w") as f:
+            json.dump(cache_info, f)
+
+        result = prune(self.root, max_unused_days=30, apply=False)
+        self.assertEqual(result["deleted_count"], 1)
+        self.assertIn("B0OLD123", result["deleted"])
+        # Dry-run: dir should still exist
+        self.assertTrue(asin_dir.exists())
+
+    def test_prune_apply_deletes(self):
+        from rayvault.cache_prune import prune
+        asin_dir = self.root / "B0DEL456"
+        asin_dir.mkdir(parents=True)
+        cache_info = {
+            "last_used_utc": "2024-01-01T00:00:00Z",
+        }
+        with open(asin_dir / "cache_info.json", "w") as f:
+            json.dump(cache_info, f)
+
+        result = prune(self.root, max_unused_days=30, apply=True)
+        self.assertEqual(result["deleted_count"], 1)
+        self.assertFalse(asin_dir.exists())
+
+    def test_prune_keeps_fresh_entry(self):
+        from rayvault.cache_prune import prune
+        asin_dir = self.root / "B0FRESH"
+        asin_dir.mkdir(parents=True)
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cache_info = {"last_used_utc": now_iso}
+        with open(asin_dir / "cache_info.json", "w") as f:
+            json.dump(cache_info, f)
+
+        result = prune(self.root, max_unused_days=30, apply=False)
+        self.assertEqual(result["deleted_count"], 0)
+        self.assertEqual(result["kept_count"], 1)
+
+    def test_prune_skips_broken(self):
+        from rayvault.cache_prune import prune
+        asin_dir = self.root / "B0BROKEN"
+        asin_dir.mkdir(parents=True)
+        cache_info = {
+            "status": "BROKEN",
+            "last_used_utc": "2024-01-01T00:00:00Z",
+        }
+        with open(asin_dir / "cache_info.json", "w") as f:
+            json.dump(cache_info, f)
+
+        result = prune(self.root, max_unused_days=30, apply=False)
+        self.assertEqual(result["deleted_count"], 0)
+        self.assertEqual(result["kept_count"], 1)
+
+    def test_prune_skips_no_cache_info(self):
+        from rayvault.cache_prune import prune
+        asin_dir = self.root / "B0NOINFO"
+        asin_dir.mkdir(parents=True)
+        # No cache_info.json
+
+        result = prune(self.root, max_unused_days=30, apply=False)
+        self.assertEqual(result["skipped_count"], 1)
+
+
+class TestBrollPromotion(unittest.TestCase):
+    """Tests for B-roll library promotion in TruthCache."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.lib = Path(self.tmp) / "library"
+        self.lib.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_promote_broll(self):
+        from rayvault.truth_cache import TruthCache
+        cache = TruthCache(self.lib)
+        asin = "B0TEST123"
+
+        # Create a fake approved.mp4
+        src_dir = Path(self.tmp) / "run" / "products" / "p01" / "broll"
+        src_dir.mkdir(parents=True)
+        src_mp4 = src_dir / "approved.mp4"
+        src_mp4.write_bytes(b"\x00" * 1024)
+
+        self.assertFalse(cache.has_approved_broll(asin))
+        ok = cache.promote_broll(asin, src_mp4)
+        self.assertTrue(ok)
+        self.assertTrue(cache.has_approved_broll(asin))
+        self.assertTrue(cache.approved_broll_path(asin).exists())
+
+    def test_promote_broll_nonexistent_source(self):
+        from rayvault.truth_cache import TruthCache
+        cache = TruthCache(self.lib)
+        ok = cache.promote_broll("B0NOPE", Path("/nonexistent.mp4"))
+        self.assertFalse(ok)
+
+    def test_approved_broll_path(self):
+        from rayvault.truth_cache import TruthCache
+        cache = TruthCache(self.lib)
+        path = cache.approved_broll_path("B0XYZ")
+        self.assertIn("approved_broll", str(path))
+        self.assertIn("approved.mp4", str(path))
+
+    def test_last_used_utc_updated_on_materialize(self):
+        from rayvault.truth_cache import TruthCache
+        cache = TruthCache(self.lib)
+        asin = "B0USED"
+
+        # Setup cache with an image
+        imgs_dir = cache.images_dir(asin)
+        imgs_dir.mkdir(parents=True)
+        img = imgs_dir / "01_main.jpg"
+        img.write_bytes(b"\xff\xd8" + b"\x00" * 4096)
+        meta = {"asin": asin, "title": "Test"}
+        meta_path = cache.meta_path(asin)
+        from rayvault.truth_cache import atomic_write_json, sha256_json, utc_now_iso
+        atomic_write_json(meta_path, meta)
+        info = {
+            "meta_fetched_at_utc": utc_now_iso(),
+            "images_fetched_at_utc": utc_now_iso(),
+            "status": "VALID",
+            "meta_sha256": sha256_json(meta),
+        }
+        atomic_write_json(cache.cache_info_path(asin), info)
+
+        # Materialize
+        run_pdir = Path(self.tmp) / "run" / "products" / "p01"
+        run_pdir.mkdir(parents=True)
+        result = cache.materialize_to_run(asin, run_pdir)
+        self.assertTrue(result["ok"])
+
+        # Check last_used_utc was set
+        updated_info = json.loads(cache.cache_info_path(asin).read_text())
+        self.assertIn("last_used_utc", updated_info)
+
+
+class TestDoublePassVerify(unittest.TestCase):
+    """Tests for double-pass verification on unsafe audio."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.run_dir = Path(self.tmp) / "RUN_TEST"
+        self.run_dir.mkdir(parents=True)
+        self.publish = self.run_dir / "publish"
+        self.publish.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    def _make_receipt(self, status="UPLOADED"):
+        receipt = {
+            "run_id": "RUN_TEST",
+            "status": status,
+            "youtube": {
+                "video_id": "dQw4w9WgXcQ",
+                "processing_state": "UNKNOWN",
+                "visibility_state": "UNKNOWN",
+                "copyright_claims": [],
+            },
+            "integrity": {"salt": "test_salt"},
+        }
+        self._write_json(self.publish / "upload_receipt.json", receipt)
+        return receipt
+
+    def _make_manifest(self, safe_audio=True):
+        manifest = {
+            "status": "UPLOADED",
+            "audio_proof": {"safe_audio_mode": safe_audio},
+        }
+        self._write_json(self.run_dir / "00_manifest.json", manifest)
+        return manifest
+
+    def test_safe_audio_verifies_in_one_pass(self):
+        """safe_audio_mode=true → single pass is enough."""
+        from rayvault.verify_visibility import verify
+        self._make_receipt()
+        self._make_manifest(safe_audio=True)
+
+        # Mock verifier that succeeds
+        verify_cmd = "echo '{\"ok\": true, \"processing\": \"succeeded\", \"privacy\": \"unlisted\", \"claims\": []}'"
+        result = verify(self.run_dir, verify_cmd=verify_cmd)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "VERIFIED")
+
+    def test_unsafe_audio_needs_two_passes(self):
+        """safe_audio_mode=false → first pass records but doesn't verify."""
+        from rayvault.verify_visibility import verify
+        self._make_receipt()
+        self._make_manifest(safe_audio=False)
+
+        verify_cmd = "echo '{\"ok\": true, \"processing\": \"succeeded\", \"privacy\": \"unlisted\", \"claims\": []}'"
+        result = verify(self.run_dir, verify_cmd=verify_cmd)
+        # First pass should NOT verify yet
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("reason"), "double_pass_pending")
+        self.assertEqual(result["passes"], 1)
+
+    def test_unsafe_audio_two_passes_close_not_enough(self):
+        """Two passes within 12h shouldn't verify."""
+        from rayvault.verify_visibility import verify, _check_double_pass
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        receipt = {
+            "status": "UPLOADED",
+            "youtube": {
+                "video_id": "test123",
+                "processing_state": "SUCCEEDED",
+                "visibility_state": "UNLISTED",
+                "copyright_claims": [],
+            },
+            "integrity": {},
+            "verify_passes": [
+                {"at_utc": now_iso, "processing": "SUCCEEDED", "visibility": "UNLISTED"},
+                {"at_utc": now_iso, "processing": "SUCCEEDED", "visibility": "UNLISTED"},
+            ],
+        }
+        dp = _check_double_pass(receipt, spacing_hours=12.0)
+        self.assertFalse(dp["met"])
+        self.assertEqual(dp["passes"], 2)
+
+    def test_unsafe_audio_two_passes_spaced_ok(self):
+        """Two passes spaced > 12h should satisfy double-pass."""
+        from rayvault.verify_visibility import _check_double_pass
+        t1 = "2026-02-10T06:00:00Z"
+        t2 = "2026-02-10T20:00:00Z"  # 14h later
+        receipt = {
+            "verify_passes": [
+                {"at_utc": t1, "processing": "SUCCEEDED", "visibility": "UNLISTED"},
+                {"at_utc": t2, "processing": "SUCCEEDED", "visibility": "UNLISTED"},
+            ],
+        }
+        dp = _check_double_pass(receipt, spacing_hours=12.0)
+        self.assertTrue(dp["met"])
+
+    def test_manual_verify_bypasses_double_pass(self):
+        """Manual verification should bypass double-pass requirement."""
+        from rayvault.verify_visibility import verify
+        self._make_receipt()
+        self._make_manifest(safe_audio=False)
+
+        result = verify(self.run_dir, manual=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "VERIFIED")
+        self.assertEqual(result["method"], "manual")
+
+    def test_double_pass_not_needed_when_no_audio_proof(self):
+        """No audio_proof block → no double-pass requirement."""
+        from rayvault.verify_visibility import verify
+        self._make_receipt()
+        self._write_json(self.run_dir / "00_manifest.json", {"status": "UPLOADED"})
+
+        verify_cmd = "echo '{\"ok\": true, \"processing\": \"succeeded\", \"privacy\": \"unlisted\", \"claims\": []}'"
+        result = verify(self.run_dir, verify_cmd=verify_cmd)
+        self.assertTrue(result["ok"])
+
+    def test_verify_passes_recorded_in_receipt(self):
+        """Verify passes should be recorded in the receipt file."""
+        from rayvault.verify_visibility import verify
+        self._make_receipt()
+        self._make_manifest(safe_audio=True)
+
+        verify_cmd = "echo '{\"ok\": true, \"processing\": \"succeeded\", \"privacy\": \"unlisted\", \"claims\": []}'"
+        verify(self.run_dir, verify_cmd=verify_cmd)
+
+        receipt = json.loads((self.publish / "upload_receipt.json").read_text())
+        self.assertIn("verify_passes", receipt)
+        self.assertEqual(len(receipt["verify_passes"]), 1)
+
+
+class TestRenderConfigLibraryBroll(unittest.TestCase):
+    """Tests for library b-roll priority in render_config_generate."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.run_dir = Path(self.tmp) / "RUN_TEST"
+        self.run_dir.mkdir(parents=True)
+        self.lib_dir = Path(self.tmp) / "library"
+        self.lib_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_library_broll_takes_priority(self):
+        from rayvault.render_config_generate import resolve_visual_mode
+        asin = "B0TEST"
+        pdir = self.run_dir / "products" / "p01"
+        pdir.mkdir(parents=True)
+
+        # Put a main image in run dir
+        src_imgs = pdir / "source_images"
+        src_imgs.mkdir(parents=True)
+        (src_imgs / "01_main.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 100)
+
+        # Put library b-roll
+        lib_broll_dir = self.lib_dir / "products" / asin / "approved_broll"
+        lib_broll_dir.mkdir(parents=True)
+        (lib_broll_dir / "approved.mp4").write_bytes(b"\x00" * 1024)
+
+        visual = resolve_visual_mode(pdir, self.run_dir, None, asin=asin, library_dir=self.lib_dir)
+        self.assertEqual(visual["mode"], "BROLL_VIDEO")
+        self.assertEqual(visual["reason"], "library_approved_broll")
+
+    def test_no_library_falls_back_to_run_broll(self):
+        from rayvault.render_config_generate import resolve_visual_mode
+        pdir = self.run_dir / "products" / "p01"
+        broll_dir = pdir / "broll"
+        broll_dir.mkdir(parents=True)
+        (broll_dir / "approved.mp4").write_bytes(b"\x00" * 1024)
+
+        visual = resolve_visual_mode(pdir, self.run_dir, None, asin="B0OTHER")
+        self.assertEqual(visual["mode"], "BROLL_VIDEO")
+        self.assertEqual(visual["reason"], "approved_broll")
+
+    def test_no_broll_falls_back_to_ken_burns(self):
+        from rayvault.render_config_generate import resolve_visual_mode
+        pdir = self.run_dir / "products" / "p01"
+        src_imgs = pdir / "source_images"
+        src_imgs.mkdir(parents=True)
+        (src_imgs / "01_main.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 100)
+
+        visual = resolve_visual_mode(pdir, self.run_dir, None, asin="B0KEN")
+        self.assertEqual(visual["mode"], "KEN_BURNS")
+
+    def test_generate_render_config_with_library(self):
+        from rayvault.render_config_generate import generate_render_config
+        # Setup minimal run
+        (self.run_dir / "01_script.txt").write_text("Test script with some words " * 20)
+        products_dir = self.run_dir / "products"
+        products_dir.mkdir(parents=True)
+        items = [{"rank": 1, "asin": "B0LIB", "title": "Test Product"}]
+        with open(products_dir / "products.json", "w") as f:
+            json.dump({"items": items}, f)
+
+        # Add library broll
+        lib_broll = self.lib_dir / "products" / "B0LIB" / "approved_broll"
+        lib_broll.mkdir(parents=True)
+        (lib_broll / "approved.mp4").write_bytes(b"\x00" * 1024)
+
+        p01 = products_dir / "p01"
+        p01.mkdir(parents=True)
+
+        result = generate_render_config(self.run_dir, library_dir=self.lib_dir)
+        self.assertGreater(result["fidelity_score"], 0)
+        # Check segments have the library broll product
+        segments = result["config"]["segments"]
+        product_segs = [s for s in segments if s["type"] == "product"]
+        self.assertEqual(len(product_segs), 1)
+        self.assertEqual(product_segs[0]["visual"]["reason"], "library_approved_broll")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

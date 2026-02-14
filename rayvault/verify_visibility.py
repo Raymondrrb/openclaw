@@ -125,12 +125,79 @@ def run_external_verifier(
 # ---------------------------------------------------------------------------
 
 
+DOUBLE_PASS_SPACING_HOURS = 12.0
+
+
+def _parse_utc(iso_str: str) -> float:
+    """Parse ISO UTC string to timestamp. Returns 0.0 on failure."""
+    try:
+        return datetime.fromisoformat(
+            iso_str.replace("Z", "+00:00")
+        ).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _needs_double_pass(manifest_path: Path) -> bool:
+    """Check if run requires double-pass verify (safe_audio_mode=false)."""
+    if not manifest_path.exists():
+        return False
+    try:
+        m = read_json(manifest_path)
+        proof = m.get("audio_proof", {})
+        return proof.get("safe_audio_mode") is False
+    except Exception:
+        return False
+
+
+def _check_double_pass(
+    receipt: Dict[str, Any],
+    spacing_hours: float = DOUBLE_PASS_SPACING_HOURS,
+) -> Dict[str, Any]:
+    """Check if double-pass requirement is met.
+
+    Returns {"met": bool, "passes": int, "next_allowed_utc": str | None}
+    """
+    passes = receipt.get("verify_passes", [])
+    if len(passes) < 2:
+        return {
+            "met": False,
+            "passes": len(passes),
+            "next_allowed_utc": None,
+        }
+
+    # Check spacing between first and last pass
+    first_ts = _parse_utc(passes[0].get("at_utc", ""))
+    last_ts = _parse_utc(passes[-1].get("at_utc", ""))
+    if first_ts <= 0 or last_ts <= 0:
+        return {"met": False, "passes": len(passes), "next_allowed_utc": None}
+
+    spacing_sec = last_ts - first_ts
+    required_sec = spacing_hours * 3600.0
+    if spacing_sec >= required_sec:
+        return {"met": True, "passes": len(passes), "next_allowed_utc": None}
+
+    # Not enough spacing — compute when next pass is allowed
+    next_ts = first_ts + required_sec
+    next_utc = datetime.fromtimestamp(next_ts, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    return {
+        "met": False,
+        "passes": len(passes),
+        "next_allowed_utc": next_utc,
+    }
+
+
 def verify(
     run_dir: Path,
     verify_cmd: Optional[str] = None,
     manual: bool = False,
 ) -> Dict[str, Any]:
     """Verify upload and promote receipt to VERIFIED if checks pass.
+
+    For runs with safe_audio_mode=false, requires 2 OK verification
+    passes spaced >= 12h before promoting to VERIFIED.
 
     Returns dict with verified status and details.
     """
@@ -156,7 +223,9 @@ def verify(
     if receipt.get("status") == "VERIFIED" and not manual:
         return {"ok": True, "status": "VERIFIED", "already": True}
 
-    # Manual verification (trust operator)
+    double_pass = _needs_double_pass(manifest_path)
+
+    # Manual verification (trust operator — bypasses double-pass)
     if manual:
         receipt["youtube"]["processing_state"] = "SUCCEEDED"
         receipt["youtube"]["visibility_state"] = "MANUAL_VERIFIED"
@@ -208,9 +277,36 @@ def verify(
     ok_claims = len(receipt["youtube"]["copyright_claims"]) == 0
 
     if ok_processing and ok_claims:
+        # Record this pass
+        receipt.setdefault("verify_passes", []).append({
+            "at_utc": utc_now_iso(),
+            "processing": receipt["youtube"]["processing_state"],
+            "visibility": receipt["youtube"]["visibility_state"],
+        })
+
+        # Double-pass gate for unsafe audio
+        if double_pass:
+            dp_status = _check_double_pass(receipt)
+            if not dp_status["met"]:
+                # Pass recorded but not enough passes or spacing yet
+                atomic_write_json(receipt_path, receipt)
+                _update_manifest(manifest_path, receipt)
+                return {
+                    "ok": False,
+                    "status": "UPLOADED",
+                    "reason": "double_pass_pending",
+                    "passes": dp_status["passes"],
+                    "next_allowed_utc": dp_status["next_allowed_utc"],
+                    "processing": receipt["youtube"]["processing_state"],
+                    "visibility": receipt["youtube"]["visibility_state"],
+                    "claims": 0,
+                }
+
         receipt["status"] = "VERIFIED"
         receipt["verified_at_utc"] = utc_now_iso()
         receipt["verified_by"] = "external_verifier"
+        if double_pass:
+            receipt["verified_by"] = "external_verifier_double_pass"
 
         # Re-sign receipt
         try:
@@ -247,6 +343,8 @@ def _update_manifest(
     m["publish"]["visibility_state"] = receipt.get("youtube", {}).get(
         "visibility_state"
     )
+    if receipt.get("verify_passes"):
+        m["publish"]["verify_passes"] = len(receipt["verify_passes"])
     if receipt.get("status") == "VERIFIED":
         m["status"] = "VERIFIED"
     atomic_write_json(manifest_path, m)

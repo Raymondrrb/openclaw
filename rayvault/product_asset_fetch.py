@@ -271,10 +271,21 @@ def run_product_fetch(
         from rayvault.truth_cache import TruthCache, CachePolicy
         cache = TruthCache(library_dir, CachePolicy())
 
+    # Check quarantine lock (prevents hammering Amazon across runs)
+    quarantine_lock = run_dir.parent.parent / "amazon_quarantine.lock"
+    quarantine_active = False
+    try:
+        from rayvault.amazon_quarantine import is_quarantined
+        quarantine_active = is_quarantined(quarantine_lock)
+    except ImportError:
+        pass
+
     downloaded = skipped = errors = cache_hits = cache_misses = 0
     amazon_blocks = 0
-    survival_mode = False
+    survival_mode = quarantine_active
     notes: List[str] = []
+    if quarantine_active:
+        notes.append("quarantine active — starting in survival mode")
 
     data = read_json(products_json)
     items = data.get("items") or []
@@ -396,11 +407,17 @@ def run_product_fetch(
                 hashes[fname] = sha1_file(out_path)
                 downloaded_paths.append(out_path)
             else:
-                # Detect Amazon 403/429 → trigger survival mode
+                # Detect Amazon 403/429 → trigger survival mode + quarantine
                 if reason.startswith("amazon_block"):
                     amazon_blocks += 1
                     survival_mode = True
                     notes.append(f"rank {rank} {asin}: {reason} — entering survival mode")
+                    try:
+                        from rayvault.amazon_quarantine import set_quarantine
+                        code = int(reason.split("_")[-1]) if reason[-3:].isdigit() else 429
+                        set_quarantine(quarantine_lock, code=code)
+                    except (ImportError, ValueError):
+                        pass
                 else:
                     errors += 1
                     notes.append(

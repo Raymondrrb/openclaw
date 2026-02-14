@@ -467,12 +467,48 @@ class TruthCache:
                 cached["meta"],
             )
 
+        # Touch last_used_utc for cache pruning
+        info_p = self.cache_info_path(asin)
+        if info_p.exists():
+            try:
+                info = read_json(info_p)
+                info["last_used_utc"] = utc_now_iso()
+                atomic_write_json(info_p, info)
+            except Exception:
+                pass
+
         return {
             "ok": True,
             "code": "MATERIALIZED",
             "mode": mode,
             "images_copied": copied,
         }
+
+    # --- B-roll library ---
+
+    def approved_broll_path(self, asin: str) -> Path:
+        return self.asin_dir(asin) / "approved_broll" / "approved.mp4"
+
+    def has_approved_broll(self, asin: str) -> bool:
+        return self.approved_broll_path(asin).exists()
+
+    def promote_broll(self, asin: str, source_mp4: Path) -> bool:
+        """Copy approved b-roll into library for reuse across runs.
+
+        Args:
+            asin: Amazon ASIN
+            source_mp4: Path to approved.mp4 in the run
+
+        Returns True if promoted successfully.
+        """
+        if not source_mp4.exists():
+            return False
+        dest = self.approved_broll_path(asin)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".tmp")
+        shutil.copy2(str(source_mp4), str(tmp))
+        os.replace(tmp, dest)
+        return True
 
     # --- Survival mode ---
 

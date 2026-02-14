@@ -136,14 +136,17 @@ def resolve_visual_mode(
     pdir: Path,
     run_dir: Path,
     qc: Optional[Dict[str, Any]],
+    asin: str = "",
+    library_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Determine visual mode for a product.
 
     Strict priority:
     1. QC override (SKIP, STILL_ONLY)
-    2. approved.mp4 in broll/ (BROLL_VIDEO)
-    3. 01_main.* in source_images/ (KEN_BURNS)
-    4. SKIP (never invent)
+    2. Library approved b-roll (digital patrimony from prior runs)
+    3. Run approved.mp4 in broll/ (BROLL_VIDEO)
+    4. 01_main.* in source_images/ (KEN_BURNS)
+    5. SKIP (never invent)
     """
     requested_method = ""
     fidelity_result = "UNKNOWN"
@@ -162,8 +165,17 @@ def resolve_visual_mode(
             return {"mode": "STILL_ONLY", "source": main_img, "reason": "qc_still_only"}
         return {"mode": "SKIP", "source": None, "reason": "qc_still_only_but_missing_main"}
 
-    # Strict: only approved.mp4 (never glob random mp4)
-    # Approved broll always takes priority when available
+    # Library approved b-roll (reuse from prior runs — saves Dzine credits)
+    if library_dir and asin and requested_method in ("", "AUTO", "DZINE_I2V", "KEN_BURNS"):
+        lib_broll = library_dir / "products" / asin / "approved_broll" / "approved.mp4"
+        if lib_broll.exists():
+            return {
+                "mode": "BROLL_VIDEO",
+                "source": str(lib_broll),
+                "reason": "library_approved_broll",
+            }
+
+    # Run approved broll (strict: only approved.mp4, never glob random mp4)
     approved_broll = pdir / "broll" / "approved.mp4"
     if approved_broll.exists() and requested_method in ("", "AUTO", "DZINE_I2V", "KEN_BURNS"):
         return {
@@ -235,6 +247,7 @@ def generate_render_config(
     run_dir: Path,
     require_audio: bool = False,
     min_truth_products: int = 4,
+    library_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Generate 05_render_config.json for a run directory.
 
@@ -294,7 +307,9 @@ def generate_render_config(
             except Exception:
                 qc = None
 
-        visual = resolve_visual_mode(pdir, run_dir, qc)
+        visual = resolve_visual_mode(
+            pdir, run_dir, qc, asin=asin, library_dir=library_dir,
+        )
 
         if visual["mode"] in ("BROLL_VIDEO", "KEN_BURNS", "STILL_ONLY"):
             truth_count += 1
@@ -393,6 +408,11 @@ def main(argv: Optional[list] = None) -> int:
         default=4,
         help="Minimum products with truth visuals (default 4 of 5)",
     )
+    ap.add_argument(
+        "--library-dir",
+        default="state/library",
+        help="Truth cache library root for b-roll reuse (default: state/library)",
+    )
     args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir).expanduser().resolve()
@@ -400,11 +420,14 @@ def main(argv: Optional[list] = None) -> int:
         print(f"Run dir not found: {run_dir}", file=sys.stderr)
         return 2
 
+    lib_dir = Path(args.library_dir).expanduser().resolve() if args.library_dir else None
+
     try:
         result = generate_render_config(
             run_dir,
             require_audio=args.require_audio,
             min_truth_products=args.min_truth_products,
+            library_dir=lib_dir,
         )
         score = result["fidelity_score"]
         review = result["needs_manual_review"]
