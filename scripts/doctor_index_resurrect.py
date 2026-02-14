@@ -10,10 +10,16 @@ An item is resurrected ONLY if ALL of these are true:
   4. No conflict with existing item (same sha8 key already in items)
   5. The file is stable (size hasn't changed in 0.3s)
 
+Identity confidence (graduated):
+  - HIGH:   sha8 in filename + file exists + stable
+  - MEDIUM: no sha8 but file_bytes + file_mtime_ns match previous entry
+  - LOW:    no sha8, no fingerprint match (allow-missing-sha8 override)
+
 Strategy:
   - Default: dry-run (report only)
   - --apply: actually restore entries to items
   - --limit N: max entries to restore per run (safety valve)
+  - --note "reason": operator note persisted in restored entry + history
   - resurrect_history ring buffer in meta_info
   - Uses advisory file lock
 
@@ -22,6 +28,7 @@ Usage:
     python3 scripts/doctor_index_resurrect.py --state-dir state --apply
     python3 scripts/doctor_index_resurrect.py --state-dir state --apply --limit 10
     python3 scripts/doctor_index_resurrect.py --state-dir state --apply --allow-missing-sha8
+    python3 scripts/doctor_index_resurrect.py --state-dir state --apply --note "drive reattached"
 
 Exit codes:
     0: OK (or nothing to restore)
@@ -40,6 +47,18 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+try:
+    from _policy import (
+        CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, CONFIDENCE_LOW,
+        STABILITY_SLEEP_SEC, HISTORY_RING_SIZE,
+    )
+except ImportError:
+    CONFIDENCE_HIGH = "high"
+    CONFIDENCE_MEDIUM = "medium"
+    CONFIDENCE_LOW = "low"
+    STABILITY_SLEEP_SEC = 0.3
+    HISTORY_RING_SIZE = 10
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +150,7 @@ def _has_sha8_in_filename(p: Path) -> bool:
     return bool(re.search(r"_([0-9a-fA-F]{8})\.mp4$", p.name))
 
 
-def _is_file_stable(path: Path, sleep_s: float = 0.3) -> bool:
+def _is_file_stable(path: Path, sleep_s: float = STABILITY_SLEEP_SEC) -> bool:
     """Verify file size hasn't changed (catches mid-write files)."""
     try:
         s1 = path.stat().st_size
@@ -159,6 +178,34 @@ def _env_fingerprint() -> Dict[str, str]:
         }
 
 
+def _assess_identity_confidence(
+    path: Path,
+    meta: dict,
+    has_sha8: bool,
+) -> str:
+    """Assess identity confidence for a resurrect candidate.
+
+    Returns:
+        CONFIDENCE_HIGH / CONFIDENCE_MEDIUM / CONFIDENCE_LOW
+    """
+    if has_sha8:
+        return CONFIDENCE_HIGH
+
+    # No sha8 — check if size/mtime fingerprint matches the stored entry
+    try:
+        st = path.stat()
+        stored_size = meta.get("file_bytes")
+        stored_mtime = meta.get("file_mtime_ns")
+        if (stored_size is not None and stored_mtime is not None
+                and st.st_size == stored_size
+                and st.st_mtime_ns == stored_mtime):
+            return CONFIDENCE_MEDIUM
+    except OSError:
+        pass
+
+    return CONFIDENCE_LOW
+
+
 # ---------------------------------------------------------------------------
 # Resurrect logic
 # ---------------------------------------------------------------------------
@@ -168,6 +215,7 @@ def resurrect_dangling(
     apply: bool = False,
     limit: int = 0,
     allow_missing_sha8: bool = False,
+    note: str = "",
 ) -> Dict[str, Any]:
     """Attempt to restore entries from dangling_items back to items.
 
@@ -178,11 +226,17 @@ def resurrect_dangling(
       4. no key conflict in items
       5. file is stable
 
+    Identity confidence is assessed and persisted:
+      - HIGH:   sha8 in filename
+      - MEDIUM: no sha8 but size+mtime match previous entry
+      - LOW:    no sha8, no fingerprint match
+
     Args:
         index_path: Path to index.json.
         apply: If True, actually restore entries.
         limit: Max entries to restore (0 = unlimited).
         allow_missing_sha8: Allow restore of entries without sha8.
+        note: Operator note persisted in restored entry + history.
 
     Returns:
         Dict with resurrect stats.
@@ -190,6 +244,7 @@ def resurrect_dangling(
     now = datetime.now(timezone.utc).isoformat()
     stats: Dict[str, Any] = {
         "candidates": 0,
+        "would_restore": 0,
         "restored": 0,
         "rejected_missing_file": 0,
         "rejected_outside_root": 0,
@@ -197,6 +252,9 @@ def resurrect_dangling(
         "rejected_conflict": 0,
         "rejected_unstable": 0,
         "rejected_permission": 0,
+        "restored_high": 0,
+        "restored_medium": 0,
+        "restored_low": 0,
         "apply": apply,
         "entries": [],
     }
@@ -208,8 +266,7 @@ def resurrect_dangling(
         meta_info = idx.setdefault("meta_info", {})
 
         if not dangling_items:
-            # Persist history even when empty (observability)
-            _persist_history(meta_info, stats, now, apply)
+            _persist_history(meta_info, stats, now, apply, note)
             _atomic_write_json(index_path, idx)
             return stats
 
@@ -230,7 +287,7 @@ def resurrect_dangling(
             raw_path = meta.get("path")
             if not raw_path:
                 stats["rejected_missing_file"] += 1
-                stats["entries"].append((sha8, "no_path"))
+                stats["entries"].append((sha8, "no_path", None))
                 continue
 
             p = Path(raw_path).expanduser()
@@ -243,53 +300,70 @@ def resurrect_dangling(
                 exists = path.exists()
             except PermissionError:
                 stats["rejected_permission"] += 1
-                stats["entries"].append((sha8, "permission_denied"))
+                stats["entries"].append((sha8, "permission_denied", None))
                 continue
 
             if not exists:
                 stats["rejected_missing_file"] += 1
-                stats["entries"].append((sha8, "missing_file"))
+                stats["entries"].append((sha8, "missing_file", None))
                 continue
 
             # Gate 2: under root
             if not _is_under_root(path, state_root):
                 stats["rejected_outside_root"] += 1
-                stats["entries"].append((sha8, "outside_root"))
+                stats["entries"].append((sha8, "outside_root", None))
                 continue
 
             # Gate 3: sha8 in filename
-            if not allow_missing_sha8 and not _has_sha8_in_filename(path):
+            has_sha8 = _has_sha8_in_filename(path)
+            if not allow_missing_sha8 and not has_sha8:
                 stats["rejected_no_sha8"] += 1
-                stats["entries"].append((sha8, "no_sha8"))
+                stats["entries"].append((sha8, "no_sha8", None))
                 continue
 
             # Gate 4: no conflict
             if sha8 in items:
                 stats["rejected_conflict"] += 1
-                stats["entries"].append((sha8, "conflict"))
+                stats["entries"].append((sha8, "conflict", None))
                 continue
 
             # Gate 5: file stable
             if not _is_file_stable(path):
                 stats["rejected_unstable"] += 1
-                stats["entries"].append((sha8, "unstable"))
+                stats["entries"].append((sha8, "unstable", None))
                 continue
 
+            # Assess identity confidence
+            confidence = _assess_identity_confidence(path, meta, has_sha8)
+
             # All gates passed
+            stats["would_restore"] += 1
+
             if apply:
                 if 0 < limit <= restored_count:
                     break
-                # Clean up dangling metadata before restoring
+                # Build restored entry: strip dangling metadata
                 restored_meta = {k: v for k, v in meta.items()
                                  if k not in ("dangling", "dangling_reason", "dangling_at")}
                 restored_meta["restored_at"] = now
+                restored_meta["identity_confidence"] = confidence
+
+                # Identity scar: explicit warning for low-confidence restores
+                if not has_sha8:
+                    restored_meta["identity_warning"] = "sha8_not_in_filename"
+                    restored_meta["resurrected_without_visual_proof"] = True
+
+                if note:
+                    restored_meta["resurrect_note"] = note
+
                 items[sha8] = restored_meta
                 keys_to_restore.append(sha8)
                 restored_count += 1
                 stats["restored"] += 1
-                stats["entries"].append((sha8, "restored"))
+                stats[f"restored_{confidence}"] += 1
+                stats["entries"].append((sha8, "restored", confidence))
             else:
-                stats["entries"].append((sha8, "eligible"))
+                stats["entries"].append((sha8, "eligible", confidence))
 
         # Remove restored entries from bucket
         for k in keys_to_restore:
@@ -299,7 +373,7 @@ def resurrect_dangling(
         if not dangling_items:
             idx.pop("dangling_items", None)
 
-        _persist_history(meta_info, stats, now, apply)
+        _persist_history(meta_info, stats, now, apply, note)
         _atomic_write_json(index_path, idx)
 
     return stats
@@ -310,13 +384,18 @@ def _persist_history(
     stats: Dict[str, Any],
     now: str,
     apply: bool,
+    note: str = "",
 ) -> None:
     """Append to resurrect_history ring buffer."""
     history = meta_info.get("resurrect_history", [])
-    history.append({
+    entry: Dict[str, Any] = {
         "at": now,
         "candidates": stats["candidates"],
+        "would_restore": stats["would_restore"],
         "restored": stats["restored"],
+        "restored_high": stats["restored_high"],
+        "restored_medium": stats["restored_medium"],
+        "restored_low": stats["restored_low"],
         "rejected_missing_file": stats["rejected_missing_file"],
         "rejected_outside_root": stats["rejected_outside_root"],
         "rejected_no_sha8": stats["rejected_no_sha8"],
@@ -325,8 +404,11 @@ def _persist_history(
         "rejected_permission": stats["rejected_permission"],
         "apply": apply,
         "env": _env_fingerprint(),
-    })
-    meta_info["resurrect_history"] = history[-10:]
+    }
+    if note:
+        entry["note"] = note
+    history.append(entry)
+    meta_info["resurrect_history"] = history[-HISTORY_RING_SIZE:]
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +432,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--allow-missing-sha8", action="store_true",
         help="Allow restoring entries without sha8 in filename",
     )
+    parser.add_argument(
+        "--note", default="",
+        help="Operator note (persisted in restored entry + history)",
+    )
     args = parser.parse_args(argv)
 
     state_dir = Path(args.state_dir)
@@ -360,16 +446,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  mode: {'APPLY' if args.apply else 'DRY-RUN'}"
           f"{f' (limit={args.limit})' if args.limit > 0 else ''}"
           f"{' +allow-missing-sha8' if args.allow_missing_sha8 else ''}")
+    if args.note:
+        print(f"  note: {args.note}")
 
     stats = resurrect_dangling(
         index_path=index_path,
         apply=args.apply,
         limit=args.limit,
         allow_missing_sha8=args.allow_missing_sha8,
+        note=args.note,
     )
 
     print(f"\n  Candidates (in bucket): {stats['candidates']}")
+    if stats["would_restore"] > 0:
+        print(f"  Would restore: {stats['would_restore']}")
     print(f"  Restored: {stats['restored']}")
+    if stats["restored"] > 0:
+        print(f"    high confidence: {stats['restored_high']}")
+        if stats["restored_medium"] > 0:
+            print(f"    medium confidence: {stats['restored_medium']}")
+        if stats["restored_low"] > 0:
+            print(f"    LOW confidence: {stats['restored_low']}")
     if stats["rejected_missing_file"] > 0:
         print(f"  Rejected (missing file): {stats['rejected_missing_file']}")
     if stats["rejected_outside_root"] > 0:
@@ -389,14 +486,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     if eligible:
         label = "Restored" if args.apply else "Eligible for restore"
         print(f"\n  {label}:")
-        for sha8, status in eligible[:10]:
-            print(f"    - {sha8}: {status}")
+        for sha8, status, conf in eligible[:10]:
+            conf_label = f" [{conf}]" if conf else ""
+            print(f"    - {sha8}: {status}{conf_label}")
         if len(eligible) > 10:
             print(f"    ... ({len(eligible) - 10} more)")
 
     if rejected:
         print(f"\n  Rejected:")
-        for sha8, reason in rejected[:10]:
+        for sha8, reason, _ in rejected[:10]:
             print(f"    - {sha8}: {reason}")
         if len(rejected) > 10:
             print(f"    ... ({len(rejected) - 10} more)")

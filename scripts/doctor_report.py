@@ -555,6 +555,142 @@ def build_refresh_banner(state_dir: Path, last_n: int = 3) -> str:
 
 
 # ---------------------------------------------------------------------------
+# NOC Snapshot — top-of-report "at a glance" for operators
+# ---------------------------------------------------------------------------
+
+def build_noc_snapshot(
+    state_dir: Path,
+    summaries: List[JobSummary],
+    details: Dict[str, Any],
+    qc_rows: Optional[List[TimelineRow]] = None,
+) -> str:
+    """Build a NOC-style snapshot for the top of any report.
+
+    Shows the 5 things an operator needs at 3am:
+      1. QC verdict (PASS/WARN/CRITICAL)
+      2. Missing patient zero
+      3. Cost / credits
+      4. Worst delta + total drift
+      5. Identity health (low-confidence items)
+      6. Last refresh summary
+    """
+    lines = ["=== NOC SNAPSHOT ==="]
+
+    # --- QC verdict ---
+    missing = details.get("total_missing_videos", 0)
+    if qc_rows:
+        probed = [r for r in qc_rows if r.probe_duration_sec > 0]
+        max_delta = max((abs(r.delta_sec) for r in probed), default=0.0) if probed else 0.0
+        cum_drift = abs(probed[-1].cum_drift_sec) if probed else 0.0
+        if max_delta > 1.0 or cum_drift > 1.0 or missing > 0:
+            verdict = "CRITICAL"
+        elif max_delta > 0.5 or cum_drift > 0.5:
+            verdict = "WARNING"
+        else:
+            verdict = "PASS"
+    elif missing > 0:
+        verdict = "CRITICAL"
+    else:
+        verdict = "PASS"
+
+    lines.append(f"  Verdict: {verdict}")
+
+    # --- Missing patient zero ---
+    if qc_rows:
+        missing_rows = [r for r in qc_rows if r.status == "MISSING"]
+        if missing_rows:
+            lines.append(f"  Missing: {len(missing_rows)} | Patient Zero: {missing_rows[0].segment_id}")
+        else:
+            lines.append("  Missing: 0")
+    else:
+        lines.append(f"  Missing: {missing}")
+
+    # --- Credits ---
+    needed = details.get("total_credits_needed", 0)
+    saved = details.get("total_credits_saved", 0)
+    lines.append(f"  Credits: {needed} needed | {saved} saved")
+
+    # --- Drift ---
+    if qc_rows:
+        probed = [r for r in qc_rows if r.probe_duration_sec > 0]
+        if probed:
+            worst = max(probed, key=lambda r: abs(r.delta_sec))
+            lines.append(
+                f"  Drift: worst={worst.delta_sec:+.3f}s ({worst.segment_id})"
+                f" | cumulative={probed[-1].cum_drift_sec:+.3f}s"
+            )
+
+    # --- Identity health ---
+    index_path = state_dir / "video" / "index.json"
+    idx = _read_json(index_path, default={"items": {}})
+    items = idx.get("items", {})
+    low_confidence = sum(
+        1 for v in items.values()
+        if isinstance(v, dict) and v.get("identity_confidence") == "low"
+    )
+    resurrected = sum(
+        1 for v in items.values()
+        if isinstance(v, dict) and v.get("resurrected_without_visual_proof")
+    )
+    dangling_count = sum(
+        1 for v in items.values()
+        if isinstance(v, dict) and v.get("dangling")
+    )
+    dangling_bucket = len(idx.get("dangling_items", {}))
+
+    identity_parts = [f"items={len(items)}"]
+    if low_confidence > 0:
+        identity_parts.append(f"low_confidence={low_confidence}")
+    if resurrected > 0:
+        identity_parts.append(f"resurrected_no_proof={resurrected}")
+    if dangling_count > 0:
+        identity_parts.append(f"dangling_flagged={dangling_count}")
+    if dangling_bucket > 0:
+        identity_parts.append(f"in_bucket={dangling_bucket}")
+    lines.append(f"  Identity: {' | '.join(identity_parts)}")
+
+    # --- Last refresh ---
+    meta = idx.get("meta_info", {})
+    refresh_hist = meta.get("refresh_history", [])
+    if refresh_hist:
+        last = refresh_hist[-1]
+        lines.append(
+            f"  Last Refresh: enriched={last.get('enriched', 0)}"
+            f" failed={last.get('failed_probe', 0)}"
+            f" unstable={last.get('skipped_unstable', 0)}"
+            f" at={last.get('at', '?')[:19]}"
+        )
+    else:
+        lines.append("  Last Refresh: none yet")
+
+    # --- Last repair ---
+    repair_hist = meta.get("repair_history", [])
+    if repair_hist:
+        last_r = repair_hist[-1]
+        lines.append(
+            f"  Last Repair: dangling={last_r.get('dangling_found', 0)}"
+            f" at={last_r.get('at', '?')[:19]}"
+        )
+    else:
+        lines.append("  Last Repair: none yet")
+
+    # --- Last cleanup ---
+    cleanup_hist = meta.get("cleanup_history", [])
+    if cleanup_hist:
+        last_c = cleanup_hist[-1]
+        lines.append(
+            f"  Last Cleanup: orphans={last_c.get('orphans_found', 0)}"
+            f" moved={last_c.get('moved', 0)}"
+            f" at={last_c.get('at', '?')[:19]}"
+        )
+    else:
+        lines.append("  Last Cleanup: none yet")
+
+    lines.append("=" * 24)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Orphan search (delegates to dzine_handoff if available, else inline)
 # ---------------------------------------------------------------------------
 
@@ -740,6 +876,19 @@ def _run_report(args, state_dir: Path) -> int:
         if args.qc:
             args.timeline = True
             args.include_probe = True
+
+        # Build QC rows early for NOC snapshot (if applicable)
+        qc_rows = None
+        if args.preflight or args.qc:
+            all_refs = details.get("all_refs", [])
+            if all_refs:
+                qc_rows = build_timeline(all_refs, include_probe=True)
+
+        # NOC Snapshot at the top (when preflight or qc)
+        if args.preflight or args.qc:
+            snapshot = build_noc_snapshot(state_dir, summaries, details, qc_rows)
+            print(snapshot)
+            print()
 
         print_report(summaries, details, financial)
 

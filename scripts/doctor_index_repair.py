@@ -151,6 +151,17 @@ def _env_fingerprint() -> Dict[str, str]:
 # Repair logic
 # ---------------------------------------------------------------------------
 
+def _is_valid_path_value(raw_path: str) -> bool:
+    """Check if raw_path is a semantically valid path (not junk)."""
+    if not raw_path or not raw_path.strip():
+        return False
+    stripped = raw_path.strip()
+    # Reject obviously broken values
+    if stripped in (".", "/", "..", "//", "None", "null", "undefined"):
+        return False
+    return True
+
+
 def repair_dangling(
     index_path: Path = DEFAULT_INDEX_PATH,
     apply: bool = False,
@@ -160,10 +171,17 @@ def repair_dangling(
     """Detect and handle dangling index entries.
 
     Classification of dangling reasons:
-      - missing_path:      entry has no "path" field
-      - missing_file:      path resolves but file doesn't exist (double-checked)
-      - permission_denied:  file may exist but stat() fails (don't touch)
-      - outside_root:      path resolves outside state_root (suspicious)
+      - missing_path:       entry has no "path" field at all
+      - invalid_path_value: path field is junk (".", "/", empty string, etc.)
+      - missing_file:       path resolves but file doesn't exist (double-checked)
+      - permission_denied:  file may exist but stat() fails (env problem, don't touch)
+      - outside_root:       path resolves outside state_root (suspicious)
+      - storage_unavailable: state_root itself is inaccessible (abort repair)
+
+    Persistence tracking:
+      - dangling_seen_count: incremented on each scan where item is still dangling
+      - dangling_last_seen_at: timestamp of most recent detection
+      - Items only become bucket-eligible after seen_count >= threshold
 
     Args:
         index_path: Path to index.json.
@@ -179,9 +197,11 @@ def repair_dangling(
         "checked": 0,
         "dangling_found": 0,
         "dangling_missing_path": 0,
+        "dangling_invalid_path": 0,
         "dangling_missing_file": 0,
         "dangling_permission_denied": 0,
         "dangling_outside_root": 0,
+        "storage_unavailable": False,
         "apply": apply,
         "entries": [],
     }
@@ -199,6 +219,19 @@ def repair_dangling(
         else:
             meta_info["state_root"] = str(state_root)
 
+        # Storage guard: if state_root is inaccessible, abort
+        try:
+            if not state_root.exists():
+                stats["storage_unavailable"] = True
+                _persist_repair_history(meta_info, stats, now, apply, move_to_bucket)
+                _atomic_write_json(index_path, idx)
+                return stats
+        except (PermissionError, OSError):
+            stats["storage_unavailable"] = True
+            _persist_repair_history(meta_info, stats, now, apply, move_to_bucket)
+            _atomic_write_json(index_path, idx)
+            return stats
+
         keys_to_remove: List[str] = []
 
         for sha8, meta in list(items.items()):
@@ -209,9 +242,12 @@ def repair_dangling(
             raw_path = meta.get("path")
             reason = None
 
-            if not raw_path:
+            if raw_path is None:
                 reason = "missing_path"
                 stats["dangling_missing_path"] += 1
+            elif not _is_valid_path_value(raw_path):
+                reason = "invalid_path_value"
+                stats["dangling_invalid_path"] += 1
             else:
                 p = Path(raw_path).expanduser()
                 # Resolve relative paths via state_root
@@ -244,13 +280,26 @@ def repair_dangling(
                             stats["dangling_missing_file"] += 1
 
             if reason is None:
+                # File is healthy — clear any previous dangling flags
+                if meta.get("dangling"):
+                    meta.pop("dangling", None)
+                    meta.pop("dangling_reason", None)
+                    meta.pop("dangling_at", None)
+                    meta.pop("dangling_seen_count", None)
+                    meta.pop("dangling_last_seen_at", None)
                 continue
 
-            # permission_denied is informational — never remove these
-            if reason == "permission_denied":
-                meta["dangling"] = True
-                meta["dangling_reason"] = reason
+            # Track persistence: increment seen_count
+            prev_count = meta.get("dangling_seen_count", 0)
+            meta["dangling"] = True
+            meta["dangling_reason"] = reason
+            meta["dangling_last_seen_at"] = now
+            meta["dangling_seen_count"] = prev_count + 1
+            if "dangling_at" not in meta:
                 meta["dangling_at"] = now
+
+            # permission_denied is informational — never remove
+            if reason == "permission_denied":
                 stats["dangling_found"] += 1
                 stats["entries"].append((sha8, reason))
                 continue
@@ -264,37 +313,45 @@ def repair_dangling(
                     bucket[sha8] = {
                         **meta,
                         "dangling_reason": reason,
-                        "dangling_at": now,
+                        "dangling_at": meta.get("dangling_at", now),
+                        "dangling_seen_count": meta["dangling_seen_count"],
                     }
                 keys_to_remove.append(sha8)
-            else:
-                meta["dangling"] = True
-                meta["dangling_reason"] = reason
-                meta["dangling_at"] = now
 
         # Remove after iteration
         for k in keys_to_remove:
             items.pop(k, None)
 
-        # Persist repair_history with env fingerprint
-        history = meta_info.get("repair_history", [])
-        history.append({
-            "at": now,
-            "checked": stats["checked"],
-            "dangling_found": stats["dangling_found"],
-            "dangling_missing_path": stats["dangling_missing_path"],
-            "dangling_missing_file": stats["dangling_missing_file"],
-            "dangling_permission_denied": stats["dangling_permission_denied"],
-            "dangling_outside_root": stats["dangling_outside_root"],
-            "apply": apply,
-            "mode": "move_to_bucket" if move_to_bucket else "delete",
-            "env": _env_fingerprint(),
-        })
-        meta_info["repair_history"] = history[-10:]
-
+        _persist_repair_history(meta_info, stats, now, apply, move_to_bucket)
         _atomic_write_json(index_path, idx)
 
     return stats
+
+
+def _persist_repair_history(
+    meta_info: dict,
+    stats: Dict[str, Any],
+    now: str,
+    apply: bool,
+    move_to_bucket: bool = True,
+) -> None:
+    """Append to repair_history ring buffer."""
+    history = meta_info.get("repair_history", [])
+    history.append({
+        "at": now,
+        "checked": stats["checked"],
+        "dangling_found": stats["dangling_found"],
+        "dangling_missing_path": stats["dangling_missing_path"],
+        "dangling_invalid_path": stats.get("dangling_invalid_path", 0),
+        "dangling_missing_file": stats["dangling_missing_file"],
+        "dangling_permission_denied": stats["dangling_permission_denied"],
+        "dangling_outside_root": stats["dangling_outside_root"],
+        "storage_unavailable": stats["storage_unavailable"],
+        "apply": apply,
+        "mode": "move_to_bucket" if move_to_bucket else "delete",
+        "env": _env_fingerprint(),
+    })
+    meta_info["repair_history"] = history[-10:]
 
 
 # ---------------------------------------------------------------------------
@@ -330,10 +387,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         move_to_bucket=not args.delete,
     )
 
+    if stats["storage_unavailable"]:
+        print("\n  ABORT: state_root is inaccessible (storage_unavailable)")
+        print("  Check mounts, drives, and permissions before running repair.")
+        return 2
+
     print(f"\n  Checked: {stats['checked']}")
     print(f"  Dangling found: {stats['dangling_found']}")
     if stats["dangling_missing_path"] > 0:
         print(f"    missing_path: {stats['dangling_missing_path']}")
+    if stats["dangling_invalid_path"] > 0:
+        print(f"    invalid_path_value: {stats['dangling_invalid_path']}")
     if stats["dangling_missing_file"] > 0:
         print(f"    missing_file: {stats['dangling_missing_file']}")
     if stats["dangling_permission_denied"] > 0:

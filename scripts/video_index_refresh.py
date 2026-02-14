@@ -313,6 +313,10 @@ def refresh_index(
         # Anchor state root from index_path layout (state/video/index.json -> state/)
         state_root = index_path.parent.parent.resolve()
 
+        # Schema version: set on first write, allows future migration
+        if "schema_version" not in idx:
+            idx["schema_version"] = 2
+
         # Persist state_root in meta_info (layout-agnostic on future reads)
         meta_info = idx.setdefault("meta_info", {})
         root_was_set = False

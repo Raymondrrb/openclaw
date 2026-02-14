@@ -9111,7 +9111,7 @@ class TestDanglingIndexRepair(unittest.TestCase):
             vid = Path(td) / "video"
             vid.mkdir()
             idx_path = vid / "index.json"
-            # Create index with an entry pointing to non-existent file
+            # Create index with entries: missing file, no path key, invalid path
             idx_path.write_text(json.dumps({
                 "items": {
                     "aabbccdd": {
@@ -9119,16 +9119,20 @@ class TestDanglingIndexRepair(unittest.TestCase):
                         "duration": 5.0,
                     },
                     "11223344": {
-                        "path": "",  # missing_path
                         "duration": 3.0,
+                    },
+                    "55667788": {
+                        "path": "",
+                        "duration": 2.0,
                     },
                 },
                 "meta_info": {},
             }))
             stats = repair_dangling(index_path=idx_path, apply=False, double_check_sleep=0)
-            self.assertEqual(stats["dangling_found"], 2)
+            self.assertEqual(stats["dangling_found"], 3)
             self.assertEqual(stats["dangling_missing_file"], 1)
             self.assertEqual(stats["dangling_missing_path"], 1)
+            self.assertEqual(stats["dangling_invalid_path"], 1)
             # Items should still be in place (dry-run)
             idx = _load_index(idx_path)
             self.assertIn("aabbccdd", idx["items"])
@@ -9428,6 +9432,7 @@ class TestDanglingIndexResurrect(unittest.TestCase):
             idx_path, _ = self._make_index_with_dangling(td, create_file=True)
             stats = resurrect_dangling(index_path=idx_path)
             self.assertEqual(stats["candidates"], 1)
+            self.assertEqual(stats["would_restore"], 1)
             self.assertEqual(stats["restored"], 0)
             # Item should still be in dangling_items
             idx = _load_index(idx_path)
@@ -9447,6 +9452,7 @@ class TestDanglingIndexResurrect(unittest.TestCase):
             # dangling metadata stripped
             self.assertNotIn("dangling_reason", idx["items"]["aabbccdd"])
             self.assertIn("restored_at", idx["items"]["aabbccdd"])
+            self.assertEqual(idx["items"]["aabbccdd"]["identity_confidence"], "high")
             # bucket should be cleaned up
             self.assertNotIn("dangling_items", idx)
 
@@ -9559,6 +9565,10 @@ class TestDanglingIndexResurrect(unittest.TestCase):
             history = idx["meta_info"].get("resurrect_history", [])
             self.assertEqual(len(history), 1)
             self.assertIn("candidates", history[0])
+            self.assertIn("would_restore", history[0])
+            self.assertIn("restored_high", history[0])
+            self.assertIn("restored_medium", history[0])
+            self.assertIn("restored_low", history[0])
             self.assertIn("env", history[0])
 
     def test_empty_bucket(self):
@@ -9590,6 +9600,435 @@ class TestDanglingIndexResurrect(unittest.TestCase):
             idx_path, _ = self._make_index_with_dangling(td, create_file=True)
             rc = resurrect_main(["--state-dir", str(td), "--apply"])
             self.assertEqual(rc, 0)
+
+
+# ---------------------------------------------------------------------------
+# Repair: storage unavailable, invalid_path, seen_count, cleared flags
+# ---------------------------------------------------------------------------
+
+class TestRepairStorageAndClassification(unittest.TestCase):
+    """Tests for storage guard, invalid_path_value, seen_count, flag clearing."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_storage_unavailable_aborts(self):
+        """Repair aborts when state_root is inaccessible."""
+        self._add_scripts_path()
+        from doctor_index_repair import repair_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            # Point state_root to a non-existent directory
+            idx_path.write_text(json.dumps({
+                "items": {
+                    "aabbccdd": {"path": "/some/file.mp4"},
+                },
+                "meta_info": {"state_root": "/nonexistent/root/dir"},
+            }))
+            stats = repair_dangling(index_path=idx_path, double_check_sleep=0)
+            self.assertTrue(stats["storage_unavailable"])
+            self.assertEqual(stats["checked"], 0)
+            # History should still be persisted
+            idx = _load_index(idx_path)
+            history = idx["meta_info"]["repair_history"]
+            self.assertTrue(history[-1]["storage_unavailable"])
+
+    def test_invalid_path_value_classified(self):
+        """Junk path values get invalid_path_value classification."""
+        self._add_scripts_path()
+        from doctor_index_repair import repair_dangling
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({
+                "items": {
+                    "aa000001": {"path": ""},
+                    "aa000002": {"path": "."},
+                    "aa000003": {"path": "/"},
+                    "aa000004": {"path": "None"},
+                    "aa000005": {"path": "  "},
+                },
+                "meta_info": {},
+            }))
+            stats = repair_dangling(index_path=idx_path, double_check_sleep=0)
+            self.assertEqual(stats["dangling_invalid_path"], 5)
+            self.assertEqual(stats["dangling_missing_path"], 0)
+
+    def test_dangling_seen_count_increments(self):
+        """dangling_seen_count increments on repeated scans."""
+        self._add_scripts_path()
+        from doctor_index_repair import repair_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({
+                "items": {
+                    "aabbccdd": {"path": str(vid / "gone.mp4")},
+                },
+                "meta_info": {},
+            }))
+            # First scan
+            repair_dangling(index_path=idx_path, apply=False, double_check_sleep=0)
+            idx = _load_index(idx_path)
+            self.assertEqual(idx["items"]["aabbccdd"]["dangling_seen_count"], 1)
+            self.assertIn("dangling_at", idx["items"]["aabbccdd"])
+            first_at = idx["items"]["aabbccdd"]["dangling_at"]
+            # Second scan
+            repair_dangling(index_path=idx_path, apply=False, double_check_sleep=0)
+            idx = _load_index(idx_path)
+            self.assertEqual(idx["items"]["aabbccdd"]["dangling_seen_count"], 2)
+            # dangling_at should NOT change (first seen timestamp preserved)
+            self.assertEqual(idx["items"]["aabbccdd"]["dangling_at"], first_at)
+
+    def test_healthy_item_clears_dangling_flags(self):
+        """Item that becomes healthy gets dangling flags cleared."""
+        self._add_scripts_path()
+        from doctor_index_repair import repair_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            final = vid / "final"
+            final.mkdir(parents=True)
+            idx_path = vid / "index.json"
+            f = final / "V_R1_s1_aabbccdd.mp4"
+            f.write_bytes(b"x" * 100)
+            # Start with stale dangling flags
+            idx_path.write_text(json.dumps({
+                "items": {
+                    "aabbccdd": {
+                        "path": str(f),
+                        "dangling": True,
+                        "dangling_reason": "missing_file",
+                        "dangling_at": "2025-01-01T00:00:00",
+                        "dangling_seen_count": 3,
+                        "dangling_last_seen_at": "2025-01-02T00:00:00",
+                    },
+                },
+                "meta_info": {},
+            }))
+            repair_dangling(index_path=idx_path, double_check_sleep=0)
+            idx = _load_index(idx_path)
+            entry = idx["items"]["aabbccdd"]
+            self.assertNotIn("dangling", entry)
+            self.assertNotIn("dangling_reason", entry)
+            self.assertNotIn("dangling_at", entry)
+            self.assertNotIn("dangling_seen_count", entry)
+            self.assertNotIn("dangling_last_seen_at", entry)
+
+    def test_cli_storage_unavailable_returns_2(self):
+        """CLI returns exit code 2 on storage_unavailable."""
+        self._add_scripts_path()
+        from doctor_index_repair import main as repair_main
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({
+                "items": {},
+                "meta_info": {"state_root": "/nonexistent/root/dir"},
+            }))
+            rc = repair_main(["--state-dir", str(td)])
+            self.assertEqual(rc, 2)
+
+
+# ---------------------------------------------------------------------------
+# Resurrect: identity confidence, --note, scar
+# ---------------------------------------------------------------------------
+
+class TestResurrectIdentityConfidence(unittest.TestCase):
+    """Tests for identity confidence in resurrect."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_high_confidence_with_sha8(self):
+        """Entries with sha8 in filename get HIGH confidence."""
+        self._add_scripts_path()
+        from doctor_index_resurrect import resurrect_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            final = vid / "final"
+            final.mkdir(parents=True)
+            idx_path = vid / "index.json"
+            f = final / "V_R1_s1_aabbccdd.mp4"
+            f.write_bytes(b"x" * 500)
+            idx_path.write_text(json.dumps({
+                "items": {},
+                "dangling_items": {
+                    "aabbccdd": {
+                        "path": str(f),
+                        "dangling_reason": "missing_file",
+                    },
+                },
+                "meta_info": {"state_root": str(Path(td).resolve())},
+            }))
+            stats = resurrect_dangling(index_path=idx_path, apply=True)
+            self.assertEqual(stats["restored"], 1)
+            self.assertEqual(stats["restored_high"], 1)
+            idx = _load_index(idx_path)
+            entry = idx["items"]["aabbccdd"]
+            self.assertEqual(entry["identity_confidence"], "high")
+            # No identity warning for high confidence
+            self.assertNotIn("identity_warning", entry)
+            self.assertNotIn("resurrected_without_visual_proof", entry)
+
+    def test_medium_confidence_fingerprint_match(self):
+        """No sha8 but size+mtime match → MEDIUM confidence."""
+        self._add_scripts_path()
+        from doctor_index_resurrect import resurrect_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            final = vid / "final"
+            final.mkdir(parents=True)
+            idx_path = vid / "index.json"
+            f = final / "legacy_video.mp4"  # no sha8
+            f.write_bytes(b"x" * 500)
+            st = f.stat()
+            idx_path.write_text(json.dumps({
+                "items": {},
+                "dangling_items": {
+                    "aabbccdd": {
+                        "path": str(f),
+                        "dangling_reason": "missing_file",
+                        "file_bytes": st.st_size,
+                        "file_mtime_ns": st.st_mtime_ns,
+                    },
+                },
+                "meta_info": {"state_root": str(Path(td).resolve())},
+            }))
+            stats = resurrect_dangling(
+                index_path=idx_path, apply=True, allow_missing_sha8=True,
+            )
+            self.assertEqual(stats["restored"], 1)
+            self.assertEqual(stats["restored_medium"], 1)
+            idx = _load_index(idx_path)
+            entry = idx["items"]["aabbccdd"]
+            self.assertEqual(entry["identity_confidence"], "medium")
+            self.assertIn("identity_warning", entry)
+            self.assertTrue(entry.get("resurrected_without_visual_proof"))
+
+    def test_low_confidence_no_fingerprint(self):
+        """No sha8 and no fingerprint match → LOW confidence."""
+        self._add_scripts_path()
+        from doctor_index_resurrect import resurrect_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            final = vid / "final"
+            final.mkdir(parents=True)
+            idx_path = vid / "index.json"
+            f = final / "legacy_video.mp4"
+            f.write_bytes(b"x" * 500)
+            idx_path.write_text(json.dumps({
+                "items": {},
+                "dangling_items": {
+                    "aabbccdd": {
+                        "path": str(f),
+                        "dangling_reason": "missing_file",
+                        # No file_bytes/file_mtime_ns → no fingerprint match
+                    },
+                },
+                "meta_info": {"state_root": str(Path(td).resolve())},
+            }))
+            stats = resurrect_dangling(
+                index_path=idx_path, apply=True, allow_missing_sha8=True,
+            )
+            self.assertEqual(stats["restored"], 1)
+            self.assertEqual(stats["restored_low"], 1)
+            idx = _load_index(idx_path)
+            entry = idx["items"]["aabbccdd"]
+            self.assertEqual(entry["identity_confidence"], "low")
+            self.assertTrue(entry.get("resurrected_without_visual_proof"))
+
+    def test_note_persisted_in_entry_and_history(self):
+        """--note is persisted in restored entry and history."""
+        self._add_scripts_path()
+        from doctor_index_resurrect import resurrect_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            final = vid / "final"
+            final.mkdir(parents=True)
+            idx_path = vid / "index.json"
+            f = final / "V_R1_s1_aabbccdd.mp4"
+            f.write_bytes(b"x" * 500)
+            idx_path.write_text(json.dumps({
+                "items": {},
+                "dangling_items": {
+                    "aabbccdd": {
+                        "path": str(f),
+                        "dangling_reason": "missing_file",
+                    },
+                },
+                "meta_info": {"state_root": str(Path(td).resolve())},
+            }))
+            stats = resurrect_dangling(
+                index_path=idx_path, apply=True, note="drive reattached",
+            )
+            self.assertEqual(stats["restored"], 1)
+            idx = _load_index(idx_path)
+            self.assertEqual(idx["items"]["aabbccdd"]["resurrect_note"], "drive reattached")
+            history = idx["meta_info"]["resurrect_history"][-1]
+            self.assertEqual(history["note"], "drive reattached")
+
+    def test_would_restore_counter_in_dry_run(self):
+        """Dry-run sets would_restore count correctly."""
+        self._add_scripts_path()
+        from doctor_index_resurrect import resurrect_dangling
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            final = vid / "final"
+            final.mkdir(parents=True)
+            idx_path = vid / "index.json"
+            f = final / "V_R1_s1_aabbccdd.mp4"
+            f.write_bytes(b"x" * 500)
+            idx_path.write_text(json.dumps({
+                "items": {},
+                "dangling_items": {
+                    "aabbccdd": {
+                        "path": str(f),
+                        "dangling_reason": "missing_file",
+                    },
+                },
+                "meta_info": {"state_root": str(Path(td).resolve())},
+            }))
+            stats = resurrect_dangling(index_path=idx_path, apply=False)
+            self.assertEqual(stats["would_restore"], 1)
+            self.assertEqual(stats["restored"], 0)
+
+    def test_confidence_breakdown_in_history(self):
+        """Resurrect history has confidence breakdown."""
+        self._add_scripts_path()
+        from doctor_index_resurrect import resurrect_dangling, _load_index
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            final = vid / "final"
+            final.mkdir(parents=True)
+            idx_path = vid / "index.json"
+            f = final / "V_R1_s1_aabbccdd.mp4"
+            f.write_bytes(b"x" * 500)
+            idx_path.write_text(json.dumps({
+                "items": {},
+                "dangling_items": {
+                    "aabbccdd": {
+                        "path": str(f),
+                        "dangling_reason": "missing_file",
+                    },
+                },
+                "meta_info": {"state_root": str(Path(td).resolve())},
+            }))
+            resurrect_dangling(index_path=idx_path, apply=True)
+            idx = _load_index(idx_path)
+            history = idx["meta_info"]["resurrect_history"][-1]
+            self.assertIn("restored_high", history)
+            self.assertIn("restored_medium", history)
+            self.assertIn("restored_low", history)
+            self.assertEqual(history["restored_high"], 1)
+
+
+# ---------------------------------------------------------------------------
+# Schema version
+# ---------------------------------------------------------------------------
+
+class TestSchemaVersion(unittest.TestCase):
+    """Test that refresh stamps index with schema_version."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_schema_version_set_on_new_index(self):
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            good_meta = {
+                "format": {"duration": "5.0", "bit_rate": "2000000"},
+                "streams": [{"codec_type": "video", "codec_name": "h264"}],
+            }
+            with mock.patch("video_index_refresh._ffprobe_json", return_value=good_meta):
+                refresh_index(final_dir=final, index_path=idx_path, force=True)
+            idx = _load_index(idx_path)
+            self.assertEqual(idx.get("schema_version"), 2)
+
+    def test_schema_version_preserved_on_existing_index(self):
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            # Pre-existing index with schema_version
+            idx_path.write_text(json.dumps({
+                "items": {}, "meta_info": {}, "schema_version": 2,
+            }))
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            good_meta = {
+                "format": {"duration": "5.0", "bit_rate": "2000000"},
+                "streams": [{"codec_type": "video", "codec_name": "h264"}],
+            }
+            with mock.patch("video_index_refresh._ffprobe_json", return_value=good_meta):
+                refresh_index(final_dir=final, index_path=idx_path, force=True)
+            idx = _load_index(idx_path)
+            self.assertEqual(idx.get("schema_version"), 2)
+
+
+# ---------------------------------------------------------------------------
+# Policy constants
+# ---------------------------------------------------------------------------
+
+class TestPolicyConstants(unittest.TestCase):
+    """Test that _policy.py constants are importable and consistent."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_policy_importable(self):
+        self._add_scripts_path()
+        from _policy import (
+            STABILITY_SLEEP_SEC, PROBE_RETRY_COUNT, PROBE_RETRY_BACKOFF_SEC,
+            REPAIR_DOUBLE_CHECK_SLEEP_SEC, CONFIDENCE_HIGH, CONFIDENCE_MEDIUM,
+            CONFIDENCE_LOW, INDEX_SCHEMA_VERSION, HISTORY_RING_SIZE,
+        )
+        self.assertIsInstance(STABILITY_SLEEP_SEC, (int, float))
+        self.assertIsInstance(PROBE_RETRY_COUNT, int)
+        self.assertEqual(CONFIDENCE_HIGH, "high")
+        self.assertEqual(CONFIDENCE_MEDIUM, "medium")
+        self.assertEqual(CONFIDENCE_LOW, "low")
+        self.assertEqual(INDEX_SCHEMA_VERSION, 2)
+        self.assertGreater(HISTORY_RING_SIZE, 0)
+
+    def test_resurrect_uses_policy_constants(self):
+        """Resurrect imports confidence constants from _policy."""
+        self._add_scripts_path()
+        from _policy import CONFIDENCE_HIGH
+        from doctor_index_resurrect import _assess_identity_confidence
+        # Verify the function returns the same string constant
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "V_R1_s1_aabbccdd.mp4"
+            f.write_bytes(b"x" * 100)
+            result = _assess_identity_confidence(f, {}, has_sha8=True)
+            self.assertEqual(result, CONFIDENCE_HIGH)
 
 
 if __name__ == "__main__":
