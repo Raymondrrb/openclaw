@@ -221,6 +221,48 @@ def evaluate_products(products_dir: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def count_products_with_visuals(products_dir: Path) -> tuple:
+    """Count products that have a truth visual (broll or source image).
+
+    Returns (total, with_visual, first_missing_detail).
+    """
+    products_json = products_dir / "products.json"
+    if not products_json.exists():
+        return (0, 0, None)
+
+    data = json.loads(products_json.read_text(encoding="utf-8"))
+    items = data.get("items", [])
+    total = len(items)
+    with_visual = 0
+    first_missing = None
+
+    for item in items:
+        rank = item.get("rank", 0)
+        asin = item.get("asin", "")
+        pdir = products_dir / f"p{rank:02d}"
+
+        # Check for broll
+        broll_dir = pdir / "broll"
+        has_broll = broll_dir.is_dir() and any(
+            f.suffix.lower() == ".mp4" for f in broll_dir.iterdir()
+        ) if broll_dir.is_dir() else False
+
+        # Check for source image
+        src_dir = pdir / "source_images"
+        has_image = False
+        if src_dir.is_dir():
+            has_image = any(
+                f.name.startswith("01_main") for f in src_dir.iterdir() if f.is_file()
+            )
+
+        if has_broll or has_image:
+            with_visual += 1
+        elif first_missing is None:
+            first_missing = f"p{rank:02d} no 01_main.* (asin={asin})"
+
+    return (total, with_visual, first_missing)
+
+
 def decide_status(
     visual_qc: str,
     identity_confidence: str,
@@ -230,6 +272,7 @@ def decide_status(
     has_render_config: bool = False,
     has_products: bool = False,
     products_fidelity: str = "PENDING",
+    products_visual_count: tuple = (0, 0, None),
 ) -> str:
     """Deterministic status from inputs. No side effects."""
     if not has_script:
@@ -241,14 +284,28 @@ def decide_status(
     if products_fidelity == "BLOCKED":
         return "BLOCKED"
 
-    # All required for READY_FOR_RENDER
+    # All core assets required for READY_FOR_RENDER
     all_present = has_script and has_audio and has_frame
-    if all_present and visual_qc == "PASS":
-        return "READY_FOR_RENDER"
+    if not all_present:
+        if not has_audio or not has_frame:
+            return "WAITING_ASSETS"
+        return "INCOMPLETE"
 
-    if not has_audio or not has_frame:
+    if visual_qc != "PASS":
+        return "INCOMPLETE"
+
+    # Products gate: if products exist, at least 4/5 must have truth visuals
+    total, with_visual, _ = products_visual_count
+    if has_products and total > 0:
+        min_required = max(1, total - 1)  # 4/5 for Top-5
+        if with_visual < min_required:
+            return "WAITING_ASSETS"
+
+    # Render config gate: must exist for READY
+    if has_products and not has_render_config:
         return "WAITING_ASSETS"
-    return "INCOMPLETE"
+
+    return "READY_FOR_RENDER"
 
 
 # ---------------------------------------------------------------------------
@@ -375,8 +432,17 @@ def handoff(
     if products_block:
         products_fidelity = products_block["fidelity"]["result"]
 
+    # Count products with truth visuals
+    products_visual_count = (0, 0, None)
+    if has_products:
+        products_visual_count = count_products_with_visuals(products_dir)
+
     # Stability score
     stability_score = compute_stability_score(fallback_level, attempts)
+
+    # Check for existing render config in run_dir
+    existing_render = run_dir / "05_render_config.json"
+    effective_has_render = has_render_config or existing_render.exists()
 
     # Status decision
     status = decide_status(
@@ -385,10 +451,29 @@ def handoff(
         has_script=True,
         has_audio=has_audio,
         has_frame=has_frame,
-        has_render_config=has_render_config,
+        has_render_config=effective_has_render,
         has_products=has_products,
         products_fidelity=products_fidelity,
+        products_visual_count=products_visual_count,
     )
+
+    # Build patient_zero (first blocking issue)
+    patient_zero = None
+    if status != "READY_FOR_RENDER":
+        if identity_confidence == "NONE":
+            patient_zero = {"code": "IDENTITY_NONE", "detail": "identity confidence is NONE"}
+        elif visual_qc == "FAIL":
+            patient_zero = {"code": "VISUAL_QC_FAIL", "detail": visual_fail_reason or "visual QC failed"}
+        elif products_fidelity == "BLOCKED":
+            patient_zero = {"code": "PRODUCT_FIDELITY_BLOCKED", "detail": "product fidelity FAIL"}
+        elif not has_audio:
+            patient_zero = {"code": "MISSING_AUDIO", "detail": "02_audio.wav not provided"}
+        elif not has_frame:
+            patient_zero = {"code": "MISSING_FRAME", "detail": "03_frame.png not provided"}
+        elif has_products and products_visual_count[2]:
+            patient_zero = {"code": "MISSING_PRODUCT_IMAGE", "detail": products_visual_count[2]}
+        elif has_products and not effective_has_render:
+            patient_zero = {"code": "MISSING_RENDER_CONFIG", "detail": "05_render_config.json not found"}
 
     created_at = utc_now_iso()
 
@@ -458,6 +543,10 @@ def handoff(
     # Add products block if present
     if products_block:
         manifest["products"] = products_block
+
+    # Add patient_zero if not ready
+    if patient_zero:
+        manifest["patient_zero"] = patient_zero
 
     atomic_write_json(run_dir / "00_manifest.json", manifest)
 

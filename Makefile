@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism prompts prompts-verify run-handoff run-status products-fetch products-fetch-dry
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism prompts prompts-verify run-handoff run-status products-fetch products-fetch-dry render-config run-cleanup run-cleanup-apply
 
 # --- Morning routine ---
 doctor:
@@ -245,6 +245,21 @@ products-fetch:
 
 products-fetch-dry:
 	python3 -m rayvault.product_asset_fetch --run-dir state/runs/$(RUN_ID) --dry-run
+
+# --- Render config generation ---
+render-config:
+	python3 -m rayvault.render_config_generate --run-dir state/runs/$(RUN_ID) --min-truth-products 4
+
+# --- Run cleanup (post-publish purge) ---
+run-cleanup:
+	python3 -m rayvault.cleanup_run --run-dir state/runs/$(RUN_ID)
+
+run-cleanup-apply:
+	@if [ "$(CONFIRM)" != "YES" ]; then \
+		echo "Use: make run-cleanup-apply RUN_ID=... CONFIRM=YES"; \
+		exit 2; \
+	fi
+	python3 -m rayvault.cleanup_run --run-dir state/runs/$(RUN_ID) --apply --delete-final-video
 
 # --- Maintenance (safe + apply) ---
 # SAFE MODE: refresh + dry-run reports. Does not remove or modify anything.

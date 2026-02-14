@@ -11290,5 +11290,557 @@ class TestProductBrollContract(unittest.TestCase):
         self.assertEqual(stb["cta"], "Link in description")
 
 
+# ── cleanup_run tests ────────────────────────────────────────────────────────
+
+class TestCleanupRun(unittest.TestCase):
+    """Tests for rayvault.cleanup_run — selective post-publish purge."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "run"
+        self.run_dir.mkdir()
+        # Minimal manifest
+        self._write_json(self.run_dir / "00_manifest.json", {
+            "schema_version": "1.1", "run_id": "TEST", "status": "PUBLISHED",
+        })
+        # Heavy assets
+        (self.run_dir / "02_audio.wav").write_bytes(b"\x00" * 5000)
+        (self.run_dir / "03_frame.png").write_bytes(b"\x00" * 3000)
+        # Products
+        products = self.run_dir / "products"
+        for rank in (1, 2):
+            pdir = products / f"p{rank:02d}"
+            src = pdir / "source_images"
+            broll = pdir / "broll"
+            src.mkdir(parents=True)
+            broll.mkdir(parents=True)
+            (src / "01_main.jpg").write_bytes(b"\xff\xd8" * 500)
+            (src / "02_alt.jpg").write_bytes(b"\xff\xd8" * 300)
+            (broll / "clip.mp4").write_bytes(b"\x00" * 2000)
+            self._write_json(pdir / "qc.json", {"product_fidelity_result": "PASS"})
+            self._write_json(pdir / "product.json", {"rank": rank, "asin": "B0X"})
+        # Publish dir
+        pub = self.run_dir / "publish"
+        pub.mkdir()
+        (pub / "video_final.mp4").write_bytes(b"\x00" * 10000)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _write_json(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+
+    def _write_receipt(self, status="UPLOADED"):
+        self._write_json(
+            self.run_dir / "publish" / "upload_receipt.json",
+            {"status": status, "url": "https://youtube.com/watch?v=test"},
+        )
+
+    def test_refuses_without_receipt(self):
+        from rayvault.cleanup_run import cleanup
+        ok, info = cleanup(self.run_dir)
+        self.assertFalse(ok)
+        self.assertEqual(info, "missing_or_not_uploaded_receipt")
+
+    def test_refuses_non_uploaded_receipt(self):
+        self._write_receipt("PENDING")
+        from rayvault.cleanup_run import cleanup
+        ok, info = cleanup(self.run_dir)
+        self.assertFalse(ok)
+        self.assertEqual(info, "missing_or_not_uploaded_receipt")
+
+    def test_force_bypasses_receipt(self):
+        from rayvault.cleanup_run import cleanup
+        ok, info = cleanup(self.run_dir, force=True)
+        self.assertTrue(ok)
+        self.assertGreater(info["targets"], 0)
+
+    def test_refuses_missing_manifest(self):
+        (self.run_dir / "00_manifest.json").unlink()
+        from rayvault.cleanup_run import cleanup
+        ok, info = cleanup(self.run_dir, force=True)
+        self.assertFalse(ok)
+        self.assertEqual(info, "missing_manifest")
+
+    def test_refuses_missing_run_dir(self):
+        from rayvault.cleanup_run import cleanup
+        ok, info = cleanup(Path(self.td) / "nope", force=True)
+        self.assertFalse(ok)
+        self.assertEqual(info, "missing_run_dir")
+
+    def test_refuses_too_new(self):
+        self._write_receipt()
+        from rayvault.cleanup_run import cleanup
+        ok, info = cleanup(self.run_dir, min_age_hours=999.0)
+        self.assertFalse(ok)
+        self.assertEqual(info, "too_new_refuse")
+
+    def test_dry_run_does_not_delete(self):
+        self._write_receipt()
+        from rayvault.cleanup_run import cleanup
+        ok, info = cleanup(self.run_dir, apply=False)
+        self.assertTrue(ok)
+        self.assertFalse(info["applied"])
+        # Files still exist
+        self.assertTrue((self.run_dir / "02_audio.wav").exists())
+        self.assertTrue((self.run_dir / "03_frame.png").exists())
+
+    def test_apply_deletes_heavy_assets(self):
+        self._write_receipt()
+        from rayvault.cleanup_run import cleanup
+        ok, info = cleanup(self.run_dir, apply=True)
+        self.assertTrue(ok)
+        self.assertTrue(info["applied"])
+        self.assertGreater(info["deleted"], 0)
+        # Heavy files gone
+        self.assertFalse((self.run_dir / "02_audio.wav").exists())
+        self.assertFalse((self.run_dir / "03_frame.png").exists())
+        # Source images gone
+        self.assertFalse((self.run_dir / "products" / "p01" / "source_images").exists())
+        # B-roll gone
+        self.assertFalse((self.run_dir / "products" / "p01" / "broll").exists())
+
+    def test_apply_keeps_metadata(self):
+        self._write_receipt()
+        from rayvault.cleanup_run import cleanup
+        cleanup(self.run_dir, apply=True)
+        # Manifest still exists
+        self.assertTrue((self.run_dir / "00_manifest.json").exists())
+        # Product metadata still exists
+        self.assertTrue((self.run_dir / "products" / "p01" / "product.json").exists())
+        self.assertTrue((self.run_dir / "products" / "p01" / "qc.json").exists())
+
+    def test_keep_main_image(self):
+        self._write_receipt()
+        from rayvault.cleanup_run import cleanup
+        cleanup(self.run_dir, apply=True, keep_main_image=True)
+        # 01_main.jpg preserved
+        self.assertTrue(
+            (self.run_dir / "products" / "p01" / "source_images" / "01_main.jpg").exists()
+        )
+        # 02_alt.jpg deleted
+        self.assertFalse(
+            (self.run_dir / "products" / "p01" / "source_images" / "02_alt.jpg").exists()
+        )
+
+    def test_delete_final_video(self):
+        self._write_receipt()
+        from rayvault.cleanup_run import cleanup
+        cleanup(self.run_dir, apply=True, delete_final_video=True)
+        self.assertFalse((self.run_dir / "publish" / "video_final.mp4").exists())
+        # Receipt preserved
+        self.assertTrue((self.run_dir / "publish" / "upload_receipt.json").exists())
+
+    def test_no_delete_final_without_flag(self):
+        self._write_receipt()
+        from rayvault.cleanup_run import cleanup
+        cleanup(self.run_dir, apply=True, delete_final_video=False)
+        self.assertTrue((self.run_dir / "publish" / "video_final.mp4").exists())
+
+    def test_cleanup_history_written(self):
+        self._write_receipt()
+        from rayvault.cleanup_run import cleanup
+        cleanup(self.run_dir, apply=True)
+        manifest = json.loads((self.run_dir / "00_manifest.json").read_text())
+        self.assertIn("housekeeping", manifest)
+        hist = manifest["housekeeping"]["cleanup_history"]
+        self.assertEqual(len(hist), 1)
+        self.assertTrue(hist[0]["applied"])
+        self.assertGreater(hist[0]["bytes_freed_est"], 0)
+
+    def test_cleanup_history_ring_buffer(self):
+        self._write_receipt()
+        from rayvault.cleanup_run import cleanup
+        for _ in range(12):
+            cleanup(self.run_dir, apply=False)
+        manifest = json.loads((self.run_dir / "00_manifest.json").read_text())
+        self.assertEqual(len(manifest["housekeeping"]["cleanup_history"]), 10)
+
+    def test_cli_dry_run(self):
+        self._write_receipt()
+        from rayvault.cleanup_run import main as cl_main
+        rc = cl_main(["--run-dir", str(self.run_dir)])
+        self.assertEqual(rc, 0)
+
+    def test_cli_refused(self):
+        from rayvault.cleanup_run import main as cl_main
+        rc = cl_main(["--run-dir", str(self.run_dir)])
+        self.assertEqual(rc, 2)
+
+
+# ── render_config_generate tests ─────────────────────────────────────────────
+
+class TestRenderConfigGenerate(unittest.TestCase):
+    """Tests for rayvault.render_config_generate — timeline + product truth."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.run_dir = Path(self.td) / "run"
+        self.run_dir.mkdir()
+        # Script
+        (self.run_dir / "01_script.txt").write_text(
+            "Welcome to today's top 5 products. " * 20
+        )
+        # Manifest
+        (self.run_dir / "00_manifest.json").write_text(json.dumps({
+            "schema_version": "1.1", "run_id": "TEST", "status": "INCOMPLETE",
+        }))
+        # Products
+        products_dir = self.run_dir / "products"
+        products_dir.mkdir()
+        items = []
+        for rank in range(1, 6):
+            items.append({"rank": rank, "asin": f"B0TEST{rank}", "title": f"Product {rank}"})
+            pdir = products_dir / f"p{rank:02d}"
+            src = pdir / "source_images"
+            src.mkdir(parents=True)
+            (pdir / "broll").mkdir()
+            (src / "01_main.jpg").write_bytes(b"\xff\xd8" * 500)
+            (pdir / "qc.json").write_text(json.dumps({
+                "product_fidelity_result": "PASS", "broll_method": "KEN_BURNS",
+            }))
+        (products_dir / "products.json").write_text(json.dumps({"items": items}))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_generates_render_config(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        self.assertTrue((self.run_dir / "05_render_config.json").exists())
+
+    def test_config_version(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        self.assertEqual(result["config"]["version"], "1.1")
+
+    def test_config_has_canvas(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        c = result["config"]["canvas"]
+        self.assertEqual(c["w"], 1920)
+        self.assertEqual(c["h"], 1080)
+        self.assertEqual(c["fps"], 30)
+
+    def test_config_has_audio(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        a = result["config"]["audio"]
+        self.assertEqual(a["normalize_lufs"], -14.0)
+        self.assertTrue(a["limiter"])
+
+    def test_config_has_ray_frame(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        ray = result["config"]["ray"]
+        self.assertEqual(ray["frame_path"], "03_frame.png")
+        box = ray["face_safe_box_norm"]
+        for k in ("x", "y", "w", "h"):
+            self.assertIn(k, box)
+
+    def test_segments_intro_products_outro(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        segs = result["config"]["segments"]
+        types = [s["type"] for s in segs]
+        self.assertEqual(types[0], "intro")
+        self.assertEqual(types[-1], "outro")
+        product_segs = [s for s in segs if s["type"] == "product"]
+        self.assertEqual(len(product_segs), 5)
+
+    def test_fidelity_score_100_all_images(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        self.assertEqual(result["fidelity_score"], 100)
+        self.assertFalse(result["needs_manual_review"])
+
+    def test_fidelity_score_drops_with_skip(self):
+        """Remove source image from p03 → fidelity drops."""
+        import shutil
+        shutil.rmtree(self.run_dir / "products" / "p03" / "source_images")
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        self.assertEqual(result["fidelity_score"], 80)  # 4/5 = 80
+        self.assertFalse(result["needs_manual_review"])  # 80 >= 80
+
+    def test_fidelity_below_80_needs_review(self):
+        """Remove source images from p03 and p04 → needs review."""
+        import shutil
+        shutil.rmtree(self.run_dir / "products" / "p03" / "source_images")
+        shutil.rmtree(self.run_dir / "products" / "p04" / "source_images")
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        self.assertEqual(result["fidelity_score"], 60)  # 3/5 = 60
+        self.assertTrue(result["needs_manual_review"])
+
+    def test_patient_zero_set_on_skip(self):
+        import shutil
+        shutil.rmtree(self.run_dir / "products" / "p02" / "source_images")
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        pz = result["patient_zero"]
+        self.assertIsNotNone(pz)
+        self.assertEqual(pz["code"], "MISSING_PRODUCT_IMAGE")
+        self.assertIn("p02", pz["detail"])
+
+    def test_patient_zero_none_when_all_good(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        self.assertIsNone(result["patient_zero"])
+
+    def test_visual_mode_ken_burns_from_image(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        seg1 = [s for s in result["config"]["segments"] if s.get("rank") == 1][0]
+        self.assertEqual(seg1["visual"]["mode"], "KEN_BURNS")
+        self.assertIn("source_images", seg1["visual"]["source"])
+
+    def test_visual_mode_broll_preferred(self):
+        """If approved.mp4 exists, BROLL_VIDEO takes priority."""
+        (self.run_dir / "products" / "p01" / "broll" / "approved.mp4").write_bytes(b"\x00" * 100)
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        seg1 = [s for s in result["config"]["segments"] if s.get("rank") == 1][0]
+        self.assertEqual(seg1["visual"]["mode"], "BROLL_VIDEO")
+
+    def test_visual_mode_skip_no_image(self):
+        import shutil
+        shutil.rmtree(self.run_dir / "products" / "p01" / "source_images")
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        seg1 = [s for s in result["config"]["segments"] if s.get("rank") == 1][0]
+        self.assertEqual(seg1["visual"]["mode"], "SKIP")
+
+    def test_manifest_updated_with_render(self):
+        from rayvault.render_config_generate import generate_render_config
+        generate_render_config(self.run_dir)
+        manifest = json.loads((self.run_dir / "00_manifest.json").read_text())
+        self.assertIn("render", manifest)
+        self.assertEqual(manifest["render"]["products_fidelity_score"], 100)
+        self.assertIn("render_config_sha1", manifest["render"])
+
+    def test_missing_script_raises(self):
+        (self.run_dir / "01_script.txt").unlink()
+        from rayvault.render_config_generate import generate_render_config
+        with self.assertRaises(FileNotFoundError):
+            generate_render_config(self.run_dir)
+
+    def test_no_products_still_generates(self):
+        """Run without products.json still produces valid config."""
+        import shutil
+        shutil.rmtree(self.run_dir / "products")
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        segs = result["config"]["segments"]
+        self.assertEqual(len(segs), 2)  # intro + outro only
+
+    def test_cli_success(self):
+        from rayvault.render_config_generate import main as rcg_main
+        rc = rcg_main(["--run-dir", str(self.run_dir)])
+        self.assertEqual(rc, 0)
+
+    def test_cli_missing_dir(self):
+        from rayvault.render_config_generate import main as rcg_main
+        rc = rcg_main(["--run-dir", str(Path(self.td) / "nope")])
+        self.assertEqual(rc, 2)
+
+    def test_qc_skip_overrides_image(self):
+        """QC broll_method=SKIP forces SKIP even if image exists."""
+        (self.run_dir / "products" / "p01" / "qc.json").write_text(json.dumps({
+            "product_fidelity_result": "FAIL", "broll_method": "SKIP",
+        }))
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        seg1 = [s for s in result["config"]["segments"] if s.get("rank") == 1][0]
+        self.assertEqual(seg1["visual"]["mode"], "SKIP")
+
+    def test_still_only_mode(self):
+        """QC broll_method=STILL_ONLY uses main image as still."""
+        (self.run_dir / "products" / "p01" / "qc.json").write_text(json.dumps({
+            "product_fidelity_result": "PASS", "broll_method": "STILL_ONLY",
+        }))
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        seg1 = [s for s in result["config"]["segments"] if s.get("rank") == 1][0]
+        self.assertEqual(seg1["visual"]["mode"], "STILL_ONLY")
+        self.assertIn("source_images", seg1["visual"]["source"])
+
+    def test_strict_approved_mp4_only(self):
+        """Random mp4 in broll/ is NOT picked; only approved.mp4."""
+        (self.run_dir / "products" / "p01" / "broll" / "random_junk.mp4").write_bytes(b"\x00" * 100)
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        seg1 = [s for s in result["config"]["segments"] if s.get("rank") == 1][0]
+        # Should be KEN_BURNS from source image, NOT BROLL_VIDEO
+        self.assertEqual(seg1["visual"]["mode"], "KEN_BURNS")
+
+    def test_config_has_products_block(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        p = result["config"]["products"]
+        self.assertEqual(p["expected"], 5)
+        self.assertEqual(p["truth_visuals_used"], 5)
+        self.assertEqual(p["fidelity_score"], 100)
+        self.assertEqual(p["min_truth_required"], 4)
+
+    def test_config_has_audio_duration(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        a = result["config"]["audio"]
+        self.assertIn("duration_sec", a)
+        self.assertGreater(a["duration_sec"], 0)
+
+    def test_require_audio_raises_when_missing(self):
+        from rayvault.render_config_generate import generate_render_config
+        with self.assertRaises(FileNotFoundError):
+            generate_render_config(self.run_dir, require_audio=True)
+
+    def test_timeline_timestamps_monotonic(self):
+        from rayvault.render_config_generate import generate_render_config
+        result = generate_render_config(self.run_dir)
+        segs = result["config"]["segments"]
+        for i, seg in enumerate(segs):
+            self.assertLess(seg["t0"], seg["t1"])
+            if i > 0:
+                self.assertGreaterEqual(seg["t0"], segs[i - 1]["t0"])
+
+
+# ── handoff strict product gates tests ───────────────────────────────────────
+
+class TestHandoffProductGates(unittest.TestCase):
+    """Tests for strict product + render_config gates in handoff_run.py."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.state_dir = Path(self.td) / "state"
+        self.state_dir.mkdir()
+        self.prompts_dir = Path(self.td) / "prompts"
+        self.prompts_dir.mkdir()
+        (self.prompts_dir / "OFFICE_V1.txt").write_text("Test prompt")
+        self.script = Path(self.td) / "script.txt"
+        self.script.write_text("Test script")
+        self.audio = Path(self.td) / "audio.wav"
+        self.audio.write_bytes(b"RIFF" + b"\x00" * 100)
+        self.frame = Path(self.td) / "frame.png"
+        self.frame.write_bytes(b"\x89PNG" + b"\x00" * 100)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _make_products(self, n=5, with_images=True):
+        """Create products.json and product directories."""
+        pj_path = Path(self.td) / "products.json"
+        items = [{"rank": i, "asin": f"B0P{i}", "title": f"Prod {i}"} for i in range(1, n + 1)]
+        pj_path.write_text(json.dumps({"items": items}))
+        return pj_path
+
+    def _add_product_images(self, run_id, ranks):
+        """Add source images to product directories inside run dir."""
+        for rank in ranks:
+            src = self.state_dir / "runs" / run_id / "products" / f"p{rank:02d}" / "source_images"
+            src.mkdir(parents=True, exist_ok=True)
+            (src / "01_main.jpg").write_bytes(b"\xff" * 3000)
+
+    def _add_render_config(self, run_id):
+        rc = self.state_dir / "runs" / run_id / "05_render_config.json"
+        rc.parent.mkdir(parents=True, exist_ok=True)
+        rc.write_text(json.dumps({"version": "1.0"}))
+
+    def _handoff(self, run_id="RUN_GATE_01", **kwargs):
+        from rayvault.handoff_run import handoff
+        defaults = dict(
+            run_id=run_id,
+            script_path=self.script,
+            audio_path=self.audio,
+            frame_path=self.frame,
+            prompt_id="OFFICE_V1",
+            seed=101,
+            fallback_level=0,
+            attempts=1,
+            identity_confidence="HIGH",
+            identity_reason="verified_visual_identity",
+            visual_qc="PASS",
+            state_dir=self.state_dir,
+            prompts_dir=self.prompts_dir,
+        )
+        defaults.update(kwargs)
+        return handoff(**defaults)
+
+    def test_ready_without_products(self):
+        """No products at all → READY (products are optional)."""
+        m = self._handoff(run_id="RUN_G1")
+        self.assertEqual(m["status"], "READY_FOR_RENDER")
+
+    def test_products_without_images_waiting(self):
+        """Products exist but no source images → WAITING_ASSETS."""
+        pj = self._make_products(5)
+        m = self._handoff(run_id="RUN_G2", products_json_path=pj)
+        self.assertEqual(m["status"], "WAITING_ASSETS")
+
+    def test_products_4_of_5_images_and_render_config_ready(self):
+        """4/5 products have images + render_config → READY."""
+        pj = self._make_products(5)
+        m = self._handoff(run_id="RUN_G3", products_json_path=pj)
+        # Now add images for 4 of 5 products
+        self._add_product_images("RUN_G3", [1, 2, 3, 4])
+        self._add_render_config("RUN_G3")
+        # Re-run handoff with force
+        m2 = self._handoff(run_id="RUN_G3", products_json_path=pj, force=True)
+        self.assertEqual(m2["status"], "READY_FOR_RENDER")
+
+    def test_products_3_of_5_images_waiting(self):
+        """3/5 products have images → WAITING_ASSETS (needs 4/5)."""
+        pj = self._make_products(5)
+        self._handoff(run_id="RUN_G4", products_json_path=pj)
+        self._add_product_images("RUN_G4", [1, 2, 3])
+        self._add_render_config("RUN_G4")
+        m = self._handoff(run_id="RUN_G4", products_json_path=pj, force=True)
+        self.assertEqual(m["status"], "WAITING_ASSETS")
+
+    def test_products_no_render_config_waiting(self):
+        """All product images but no render_config → WAITING_ASSETS."""
+        pj = self._make_products(5)
+        self._handoff(run_id="RUN_G5", products_json_path=pj)
+        self._add_product_images("RUN_G5", [1, 2, 3, 4, 5])
+        m = self._handoff(run_id="RUN_G5", products_json_path=pj, force=True)
+        self.assertEqual(m["status"], "WAITING_ASSETS")
+
+    def test_patient_zero_missing_image(self):
+        """patient_zero reports first missing product image."""
+        pj = self._make_products(5)
+        m = self._handoff(run_id="RUN_G6", products_json_path=pj)
+        self.assertIn("patient_zero", m)
+        self.assertEqual(m["patient_zero"]["code"], "MISSING_PRODUCT_IMAGE")
+
+    def test_patient_zero_missing_audio(self):
+        m = self._handoff(run_id="RUN_G7", audio_path=None)
+        self.assertIn("patient_zero", m)
+        self.assertEqual(m["patient_zero"]["code"], "MISSING_AUDIO")
+
+    def test_patient_zero_missing_frame(self):
+        m = self._handoff(run_id="RUN_G8", frame_path=None)
+        self.assertIn("patient_zero", m)
+        self.assertEqual(m["patient_zero"]["code"], "MISSING_FRAME")
+
+    def test_patient_zero_none_when_ready(self):
+        m = self._handoff(run_id="RUN_G9")
+        self.assertNotIn("patient_zero", m)
+
+    def test_patient_zero_identity_none(self):
+        m = self._handoff(run_id="RUN_G10", identity_confidence="NONE")
+        self.assertIn("patient_zero", m)
+        self.assertEqual(m["patient_zero"]["code"], "IDENTITY_NONE")
+
+    def test_patient_zero_visual_qc_fail(self):
+        m = self._handoff(run_id="RUN_G11", visual_qc="FAIL",
+                          visual_fail_reason="teeth_visible")
+        self.assertIn("patient_zero", m)
+        self.assertEqual(m["patient_zero"]["code"], "VISUAL_QC_FAIL")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
