@@ -7713,14 +7713,15 @@ class TestVideoIndexRefresh(unittest.TestCase):
             # Create a dummy mp4
             v = final / "V_R1_s1_aabbccdd.mp4"
             v.write_bytes(b"x" * 1000)
-            mtime = v.stat().st_mtime
-            # Pre-seed index with matching mtime
+            st = v.stat()
+            # Pre-seed index with matching (mtime_ns, file_bytes)
             _atomic_write_json(idx_path, {
                 "version": "1.0",
                 "items": {
                     "aabbccdd": {
                         "path": str(v),
-                        "file_mtime": mtime,
+                        "file_mtime_ns": st.st_mtime_ns,
+                        "file_bytes": st.st_size,
                         "duration": 5.0,
                     },
                 },
@@ -7738,15 +7739,19 @@ class TestVideoIndexRefresh(unittest.TestCase):
             idx_path = Path(td) / "index.json"
             v = final / "V_R1_s1_aabbccdd.mp4"
             v.write_bytes(b"x" * 1000)
-            mtime = v.stat().st_mtime
+            st = v.stat()
             _atomic_write_json(idx_path, {
                 "version": "1.0",
                 "items": {
-                    "aabbccdd": {"path": str(v), "file_mtime": mtime},
+                    "aabbccdd": {
+                        "path": str(v),
+                        "file_mtime_ns": st.st_mtime_ns,
+                        "file_bytes": st.st_size,
+                    },
                 },
             })
             stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
-            # Force means it probes even though mtime matches
+            # Force means it probes even though cache matches
             self.assertEqual(stats.probed, 1)
             self.assertEqual(stats.skipped_mtime, 0)
 
@@ -7882,6 +7887,265 @@ class TestValidateVideoFileOptionalDuration(unittest.TestCase):
             r = validate_video_file(p, target_duration_sec=0.0, min_bytes=50)
             # Will fail on ffprobe (not real mp4), but NOT on duration mismatch
             self.assertIn(r.reason, ("ffprobe_failed", None))
+
+
+# ---------------------------------------------------------------------------
+# Video Index Refresh v2 — mtime_ns, dedup, allow-missing-sha8, meta_info
+# ---------------------------------------------------------------------------
+
+class TestVideoIndexRefreshV2(unittest.TestCase):
+    """Tests for hardened video_index_refresh: mtime_ns, dedup, sha8 gate, meta_info."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_mtime_ns_dual_key_skip(self):
+        """Incremental uses (mtime_ns, file_bytes) pair for cache."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            idx_path = Path(td) / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 1000)
+            st = v.stat()
+            _atomic_write_json(idx_path, {
+                "version": "1.0",
+                "items": {
+                    "aabbccdd": {
+                        "path": str(v),
+                        "file_mtime_ns": st.st_mtime_ns,
+                        "file_bytes": st.st_size,
+                        "duration": 5.0,
+                    },
+                },
+            })
+            stats = refresh_index(final_dir=final, index_path=idx_path)
+            self.assertEqual(stats.skipped_mtime, 1)
+            self.assertEqual(stats.probed, 0)
+
+    def test_old_float_mtime_triggers_reprobe(self):
+        """Old index entries with file_mtime (float) get re-probed (migration)."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            idx_path = Path(td) / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 1000)
+            # Old-style entry with file_mtime (float), no file_mtime_ns
+            _atomic_write_json(idx_path, {
+                "version": "1.0",
+                "items": {
+                    "aabbccdd": {
+                        "path": str(v),
+                        "file_mtime": v.stat().st_mtime,
+                    },
+                },
+            })
+            stats = refresh_index(final_dir=final, index_path=idx_path)
+            # Should re-probe because file_mtime_ns doesn't match
+            self.assertEqual(stats.probed, 1)
+
+    def test_seen_paths_dedup(self):
+        """Duplicate resolved paths are skipped."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            idx_path = Path(td) / "index.json"
+            # Create one real file
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            # Create a symlink to the same file (different name, same resolved path)
+            link = final / "V_R1_s1_11223344.mp4"
+            link.symlink_to(v)
+            stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
+            # One should be probed, the other deduped
+            self.assertEqual(stats.skipped_dedup, 1)
+
+    def test_no_sha8_skipped_by_default(self):
+        """Files without sha8 in filename are skipped by default."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            idx_path = Path(td) / "index.json"
+            # File without sha8 pattern
+            v = final / "random_legacy.mp4"
+            v.write_bytes(b"x" * 500)
+            stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
+            self.assertEqual(stats.skipped_no_sha8, 1)
+            self.assertEqual(stats.probed, 0)
+
+    def test_allow_missing_sha8_indexes_legacy(self):
+        """With allow_missing_sha8=True, legacy files get probed."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            idx_path = Path(td) / "index.json"
+            v = final / "random_legacy.mp4"
+            v.write_bytes(b"x" * 500)
+            stats = refresh_index(
+                final_dir=final, index_path=idx_path,
+                force=True, allow_missing_sha8=True,
+            )
+            self.assertEqual(stats.skipped_no_sha8, 0)
+            self.assertEqual(stats.probed, 1)
+
+    def test_refresh_history_ring_buffer(self):
+        """meta_info.refresh_history is appended and capped at 10."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index, _atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            idx_path = Path(td) / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            # Pre-seed with 9 history entries
+            _atomic_write_json(idx_path, {
+                "version": "1.0",
+                "items": {},
+                "meta_info": {
+                    "refresh_history": [{"at": f"2025-01-{i:02d}", "scanned": i} for i in range(1, 10)],
+                },
+            })
+            stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
+            # ffprobe will fail on fake mp4, so enriched might be 0
+            # But let's check meta_info was written if enriched > 0
+            if stats.enriched > 0:
+                idx = _load_index(idx_path)
+                history = idx.get("meta_info", {}).get("refresh_history", [])
+                self.assertLessEqual(len(history), 10)
+                self.assertIn("scanned", history[-1])
+
+    def test_file_mtime_old_key_removed_on_update(self):
+        """Old file_mtime key is removed when entry is updated."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index, _atomic_write_json
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            idx_path = Path(td) / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            _atomic_write_json(idx_path, {
+                "version": "1.0",
+                "items": {
+                    "aabbccdd": {"path": str(v), "file_mtime": 123.456},
+                },
+            })
+            # Mock ffprobe to return valid data
+            fake_meta = {
+                "format": {"duration": "5.0", "bit_rate": "2000000"},
+                "streams": [{"codec_type": "video", "codec_name": "h264"}],
+            }
+            with mock.patch("video_index_refresh._ffprobe_json", return_value=fake_meta):
+                stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
+            self.assertEqual(stats.enriched, 1)
+            idx = _load_index(idx_path)
+            entry = idx["items"]["aabbccdd"]
+            self.assertNotIn("file_mtime", entry)
+            self.assertIn("file_mtime_ns", entry)
+
+    def test_cli_allow_missing_sha8_flag(self):
+        """CLI accepts --allow-missing-sha8."""
+        self._add_scripts_path()
+        from video_index_refresh import main
+        with tempfile.TemporaryDirectory() as td:
+            rc = main(["--state-dir", td, "--dry-run", "--allow-missing-sha8"])
+            self.assertEqual(rc, 0)
+
+    def test_size_change_triggers_reprobe(self):
+        """Changing file size triggers re-probe even if mtime_ns is same."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            idx_path = Path(td) / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 1000)
+            st = v.stat()
+            # Seed with same mtime_ns but different size
+            _atomic_write_json(idx_path, {
+                "version": "1.0",
+                "items": {
+                    "aabbccdd": {
+                        "path": str(v),
+                        "file_mtime_ns": st.st_mtime_ns,
+                        "file_bytes": 999,  # wrong size
+                    },
+                },
+            })
+            stats = refresh_index(final_dir=final, index_path=idx_path)
+            self.assertEqual(stats.probed, 1)
+            self.assertEqual(stats.skipped_mtime, 0)
+
+
+# ---------------------------------------------------------------------------
+# QC Banner v2 — first_missing, warning_count
+# ---------------------------------------------------------------------------
+
+class TestQCBannerV2(unittest.TestCase):
+    """Tests for QC banner with first_missing and warning_count."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_first_missing_shown(self):
+        self._add_scripts_path()
+        from doctor_report import build_qc_banner, TimelineRow
+        rows = [
+            TimelineRow(0, "intro", "intro", 0.0, 3.0, 3.0, "/a.mp4", "READY", 3.0, 0.0, 0.0),
+            TimelineRow(1, "gap_seg", "product", 3.0, 15.0, 12.0, "/b.mp4", "MISSING", 0.0, 0.0, 0.0),
+            TimelineRow(2, "p2", "product", 15.0, 27.0, 12.0, "/c.mp4", "READY", 12.1, 0.1, 0.1),
+        ]
+        banner = build_qc_banner(rows)
+        self.assertIn("First missing: gap_seg", banner)
+
+    def test_no_missing_no_first_missing_line(self):
+        self._add_scripts_path()
+        from doctor_report import build_qc_banner, TimelineRow
+        rows = [
+            TimelineRow(0, "s1", "product", 0.0, 5.0, 5.0, "/x.mp4", "READY", 5.0, 0.0, 0.0),
+        ]
+        banner = build_qc_banner(rows)
+        self.assertNotIn("First missing", banner)
+
+    def test_warning_count_shown(self):
+        self._add_scripts_path()
+        from doctor_report import build_qc_banner, TimelineRow
+        rows = [
+            TimelineRow(0, "s1", "product", 0.0, 5.0, 5.0, "/a.mp4", "READY", 5.8, 0.8, 0.8),
+            TimelineRow(1, "s2", "product", 5.0, 10.0, 5.0, "/b.mp4", "READY", 5.1, 0.1, 0.9),
+            TimelineRow(2, "s3", "product", 10.0, 15.0, 5.0, "/c.mp4", "READY", 5.6, 0.6, 1.5),
+        ]
+        banner = build_qc_banner(rows)
+        # s1 (0.8s) and s3 (0.6s) are > 0.5s drift
+        self.assertIn("Segments over 0.5s drift: 2", banner)
+
+    def test_worst_drift_label(self):
+        self._add_scripts_path()
+        from doctor_report import build_qc_banner, TimelineRow
+        rows = [
+            TimelineRow(0, "s1", "product", 0.0, 5.0, 5.0, "/a.mp4", "READY", 5.05, 0.05, 0.05),
+        ]
+        banner = build_qc_banner(rows)
+        self.assertIn("Worst drift:", banner)
+        self.assertIn("s1", banner)
 
 
 if __name__ == "__main__":

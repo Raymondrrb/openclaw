@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc maintenance maintenance-apply
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status maintenance maintenance-apply
 
 # --- Morning routine ---
 doctor:
@@ -129,6 +129,10 @@ clean-orphans-apply:
 # --- QC (timeline + drift banner) ---
 qc:
 	python3 scripts/doctor_report.py --state-dir state --qc
+
+# --- Status (quick health check: preflight + QC in one shot) ---
+status:
+	python3 scripts/doctor_report.py --state-dir state --preflight --qc --no-bitrate-gate
 
 # --- Maintenance (safe + apply) ---
 # SAFE MODE: refresh + dry-run reports. Does not remove or modify anything.

@@ -469,11 +469,23 @@ def build_qc_banner(rows: List[TimelineRow]) -> str:
     total_ready = sum(1 for r in rows if r.status == "READY")
     total_missing = sum(1 for r in rows if r.status == "MISSING")
 
+    # Warning count: segments with drift > 0.5s
+    warning_count = sum(1 for r in probed if abs(r.delta_sec) > _QC_WARN_DRIFT_SEC)
+
+    # First missing segment (in timeline order)
+    missing_rows = [r for r in rows if r.status == "MISSING"]
+    first_missing = missing_rows[0].segment_id if missing_rows else None
+
     lines = [
         f"QC Banner: {len(rows)} segments | {total_ready} READY | {total_missing} MISSING",
-        f"  Max segment drift: {max_delta_row.delta_sec:+.3f}s ({max_delta_row.segment_id})",
-        f"  Cumulative drift:  {probed[-1].cum_drift_sec:+.3f}s",
     ]
+    if first_missing:
+        lines.append(f"  First missing: {first_missing}")
+    lines.extend([
+        f"  Worst drift: {max_delta_row.delta_sec:+.3f}s ({max_delta_row.segment_id})",
+        f"  Cumulative drift:  {probed[-1].cum_drift_sec:+.3f}s",
+        f"  Segments over {_QC_WARN_DRIFT_SEC}s drift: {warning_count}",
+    ])
 
     if max_delta_abs > _QC_CRITICAL_DRIFT_SEC or cum_drift_abs > _QC_CRITICAL_DRIFT_SEC:
         lines.append("  Status: CRITICAL — drift exceeds 1.0s, timeline will be off")

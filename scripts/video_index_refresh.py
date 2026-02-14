@@ -3,18 +3,22 @@
 
 Scans all .mp4 files in state/video/final/, validates each with ffprobe,
 and upserts enriched metadata into the video index. Incremental by default:
-only re-probes files whose mtime changed since last refresh.
+only re-probes files whose (mtime_ns, file_size) pair changed since last refresh.
 
 Features:
-  - Incremental refresh via file mtime (skips unchanged files)
-  - --force: re-probe everything regardless of mtime
+  - Incremental refresh via (mtime_ns, file_size) dual key (deterministic)
+  - --force: re-probe everything regardless of cache
+  - --allow-missing-sha8: index legacy files without sha8 in filename
   - SHA8 validation: checks filename contains the indexed sha8
+  - Dedup: resolved-path dedup prevents double-indexing
   - Enriches: duration, bitrate, video_codec, audio_codec, file_bytes
   - Correct refreshed_at: UTC ISO timestamp (not file mtime)
+  - refresh_history: ring buffer of last 10 refreshes in meta_info
 
 Usage:
     python3 scripts/video_index_refresh.py
     python3 scripts/video_index_refresh.py --force
+    python3 scripts/video_index_refresh.py --allow-missing-sha8
     python3 scripts/video_index_refresh.py --state-dir state --dry-run
 
 Exit codes:
@@ -161,6 +165,8 @@ class RefreshStats:
     scanned: int = 0
     probed: int = 0
     skipped_mtime: int = 0
+    skipped_dedup: int = 0
+    skipped_no_sha8: int = 0
     enriched: int = 0
     failed_probe: int = 0
     sha8_mismatch: int = 0
@@ -171,17 +177,19 @@ def refresh_index(
     index_path: Path = DEFAULT_INDEX_PATH,
     force: bool = False,
     dry_run: bool = False,
+    allow_missing_sha8: bool = False,
 ) -> RefreshStats:
     """Refresh video index by re-probing files in final_dir.
 
-    Incremental by default: only re-probes files whose mtime changed
-    since the last recorded file_mtime in the index entry.
+    Incremental by default: only re-probes files whose (mtime_ns, file_size)
+    pair changed since the last recorded values in the index entry.
 
     Args:
         final_dir: Directory containing final .mp4 files.
         index_path: Path to index.json.
-        force: If True, re-probe all files regardless of mtime.
+        force: If True, re-probe all files regardless of cache.
         dry_run: If True, don't write the index.
+        allow_missing_sha8: If True, index files without sha8 in filename.
 
     Returns:
         RefreshStats with counts of actions taken.
@@ -196,11 +204,26 @@ def refresh_index(
     mp4_files = sorted(final_dir.glob("*.mp4"))
     stats.scanned = len(mp4_files)
 
+    seen_paths: set = set()
+
     for fp in mp4_files:
+        # Guard: skip non-files (symlinks to dirs, broken paths, etc.)
         if not fp.is_file():
             continue
 
+        # Dedup: skip if we've already processed this resolved path
+        resolved = str(fp.resolve())
+        if resolved in seen_paths:
+            stats.skipped_dedup += 1
+            continue
+        seen_paths.add(resolved)
+
         sha8 = _infer_sha8_from_filename(fp)
+
+        # Gate: reject files without sha8 unless --allow-missing-sha8
+        if not sha8 and not allow_missing_sha8:
+            stats.skipped_no_sha8 += 1
+            continue
 
         # SHA8 validation: if file has sha8 in name and it's already indexed
         # under a different sha8, flag mismatch
@@ -212,12 +235,18 @@ def refresh_index(
         # Determine the index key
         key = sha8 if sha8 else fp.stem
 
-        # Incremental check: skip if file mtime hasn't changed
+        # Incremental check: (mtime_ns, file_size) dual key
+        # Using mtime_ns avoids float precision thrash on macOS/APFS
         existing = items.get(key, {})
-        current_mtime = fp.stat().st_mtime
-        if not force and existing.get("file_mtime") == current_mtime:
-            stats.skipped_mtime += 1
-            continue
+        st = fp.stat()
+        current_mtime_ns = st.st_mtime_ns
+        current_size = st.st_size
+
+        if not force:
+            if (existing.get("file_mtime_ns") == current_mtime_ns
+                    and existing.get("file_bytes") == current_size):
+                stats.skipped_mtime += 1
+                continue
 
         # Probe
         stats.probed += 1
@@ -231,6 +260,7 @@ def refresh_index(
 
         # Build enriched entry (merge with existing, don't overwrite user fields)
         entry = {**existing}
+        entry.pop("file_mtime", None)  # migrate from old float key
         entry.update({
             "path": str(fp),
             "run_id": existing.get("run_id") or run_id,
@@ -239,8 +269,8 @@ def refresh_index(
             "bitrate_bps": probe_data["bitrate_bps"],
             "video_codec": probe_data["video_codec"],
             "audio_codec": probe_data["audio_codec"],
-            "file_bytes": fp.stat().st_size,
-            "file_mtime": current_mtime,
+            "file_bytes": current_size,
+            "file_mtime_ns": current_mtime_ns,
             "refreshed_at": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -248,6 +278,18 @@ def refresh_index(
         stats.enriched += 1
 
     if not dry_run and stats.enriched > 0:
+        # Append to refresh_history ring buffer (last 10)
+        meta_info = idx.get("meta_info", {})
+        history = meta_info.get("refresh_history", [])
+        history.append({
+            "at": datetime.now(timezone.utc).isoformat(),
+            "scanned": stats.scanned,
+            "enriched": stats.enriched,
+            "force": force,
+            "allow_missing_sha8": allow_missing_sha8,
+        })
+        meta_info["refresh_history"] = history[-10:]
+        idx["meta_info"] = meta_info
         _atomic_write_json(index_path, idx)
 
     return stats
@@ -270,6 +312,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--dry-run", action="store_true",
         help="Probe but don't write the index",
     )
+    parser.add_argument(
+        "--allow-missing-sha8", action="store_true",
+        help="Index legacy files without sha8 in filename",
+    )
     args = parser.parse_args(argv)
 
     state_dir = Path(args.state_dir)
@@ -280,18 +326,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  final_dir: {final_dir}")
     print(f"  index: {index_path}")
     print(f"  mode: {'FORCE' if args.force else 'incremental'}"
-          f"{' (DRY-RUN)' if args.dry_run else ''}")
+          f"{' (DRY-RUN)' if args.dry_run else ''}"
+          f"{' +allow-missing-sha8' if args.allow_missing_sha8 else ''}")
 
     stats = refresh_index(
         final_dir=final_dir,
         index_path=index_path,
         force=args.force,
         dry_run=args.dry_run,
+        allow_missing_sha8=args.allow_missing_sha8,
     )
 
     print(f"\n  Scanned: {stats.scanned}")
     print(f"  Probed: {stats.probed}")
-    print(f"  Skipped (mtime unchanged): {stats.skipped_mtime}")
+    print(f"  Skipped (unchanged): {stats.skipped_mtime}")
+    if stats.skipped_dedup > 0:
+        print(f"  Skipped (dedup): {stats.skipped_dedup}")
+    if stats.skipped_no_sha8 > 0:
+        print(f"  Skipped (no sha8): {stats.skipped_no_sha8}")
     print(f"  Enriched: {stats.enriched}")
     if stats.failed_probe > 0:
         print(f"  Failed probe: {stats.failed_probe}")
