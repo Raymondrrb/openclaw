@@ -15169,6 +15169,7 @@ class TestResolveCapabilities(unittest.TestCase):
             "can_set_render_settings", "can_start_render",
             "can_get_render_status", "can_add_track",
             "resolve_version", "resolve_name",
+            "available_luts", "fusion_templates",
         }
         self.assertEqual(set(d.keys()), expected_keys)
 
@@ -15206,6 +15207,75 @@ class TestResolveBridgeDisconnected(unittest.TestCase):
         bridge = ResolveBridge()
         bridge.disconnect()
         self.assertFalse(bridge.connected)
+
+
+class TestResolveVersionFormat(unittest.TestCase):
+    """Test version formatting and plugin inventory."""
+
+    def test_format_version_list(self):
+        from rayvault.resolve_bridge import _format_version
+        self.assertEqual(_format_version([20, 3, 1, 6, ""]), "20.3.1.6")
+
+    def test_format_version_list_no_empty(self):
+        from rayvault.resolve_bridge import _format_version
+        self.assertEqual(_format_version([20, 3, 1]), "20.3.1")
+
+    def test_format_version_string(self):
+        from rayvault.resolve_bridge import _format_version
+        self.assertEqual(_format_version("20.3.1"), "20.3.1")
+
+    def test_format_version_empty_list(self):
+        from rayvault.resolve_bridge import _format_version
+        self.assertEqual(_format_version([]), "unknown")
+
+    def test_format_version_none_elements(self):
+        from rayvault.resolve_bridge import _format_version
+        self.assertEqual(_format_version([20, None, 3]), "20.3")
+
+
+class TestResolveLutDiscovery(unittest.TestCase):
+    """Test LUT and Fusion template discovery."""
+
+    def test_discover_luts_from_temp_dir(self):
+        from rayvault.resolve_bridge import discover_luts
+        with tempfile.TemporaryDirectory() as td:
+            # Create fake LUT files
+            cat = Path(td) / "Film Looks"
+            cat.mkdir()
+            (cat / "Bleach Bypass.cube").write_text("# fake")
+            (cat / "Day4Nite.3dl").write_text("# fake")
+            Path(td, "basic.cube").write_text("# fake")
+
+            luts = discover_luts(extra_dirs=[td])
+            # Should find files relative to the extra dir
+            found = [l for l in luts if "Bleach" in l or "Day4Nite" in l or l == "basic.cube"]
+            self.assertGreaterEqual(len(found), 3)
+
+    def test_discover_luts_empty_dir(self):
+        from rayvault.resolve_bridge import discover_luts
+        with tempfile.TemporaryDirectory() as td:
+            luts = discover_luts(extra_dirs=[td])
+            # Only system LUTs (if any) — no crash
+            self.assertIsInstance(luts, list)
+
+    def test_discover_fusion_templates_from_temp_dir(self):
+        from rayvault.resolve_bridge import discover_fusion_templates
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "Lower Third.drfx").write_text("# fake")
+            (Path(td) / "Transition.setting").write_text("# fake")
+
+            templates = discover_fusion_templates(extra_dirs=[td])
+            names = [t for t in templates if "Lower Third" in t or "Transition" in t]
+            self.assertEqual(len(names), 2)
+
+    def test_caps_include_inventory_fields(self):
+        from rayvault.resolve_bridge import ResolveCapabilities
+        caps = ResolveCapabilities()
+        d = caps.to_dict()
+        self.assertIn("available_luts", d)
+        self.assertIn("fusion_templates", d)
+        self.assertIsInstance(d["available_luts"], list)
+        self.assertIsInstance(d["fusion_templates"], list)
 
 
 # ============================================================================

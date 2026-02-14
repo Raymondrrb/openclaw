@@ -87,6 +87,8 @@ class ResolveCapabilities:
     can_add_track: bool = False
     resolve_version: str = "unknown"
     resolve_name: str = "unknown"
+    available_luts: List[str] = field(default_factory=list)
+    fusion_templates: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -102,7 +104,82 @@ class ResolveCapabilities:
             "can_add_track": self.can_add_track,
             "resolve_version": self.resolve_version,
             "resolve_name": self.resolve_name,
+            "available_luts": self.available_luts,
+            "fusion_templates": self.fusion_templates,
         }
+
+
+# ---------------------------------------------------------------------------
+# Version formatting
+# ---------------------------------------------------------------------------
+
+
+def _format_version(ver) -> str:
+    """Format Resolve version (may be list like [20, 3, 1, 6, ''] or string)."""
+    if isinstance(ver, (list, tuple)):
+        parts = [str(x) for x in ver if x != "" and x is not None]
+        return ".".join(parts) if parts else "unknown"
+    return str(ver)
+
+
+# ---------------------------------------------------------------------------
+# Plugin/LUT inventory
+# ---------------------------------------------------------------------------
+
+_LUT_BASE_DIRS = [
+    "/Library/Application Support/Blackmagic Design/DaVinci Resolve/LUT",
+    str(Path.home() / "Library/Application Support/Blackmagic Design/DaVinci Resolve/LUT"),
+]
+
+_FUSION_TEMPLATE_DIRS = [
+    str(Path.home() / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Templates/Edit"),
+]
+
+
+def discover_luts(extra_dirs: Optional[List[str]] = None) -> List[str]:
+    """Discover available LUT files (.cube, .3dl, .dat, .olut).
+
+    Returns sorted list of relative paths (category/name).
+    """
+    luts: List[str] = []
+    search_dirs = list(_LUT_BASE_DIRS)
+    if extra_dirs:
+        search_dirs.extend(extra_dirs)
+
+    for base in search_dirs:
+        base_path = Path(base)
+        if not base_path.is_dir():
+            continue
+        for ext in ("*.cube", "*.3dl", "*.dat", "*.olut"):
+            for f in base_path.rglob(ext):
+                rel = str(f.relative_to(base_path))
+                if rel not in luts:
+                    luts.append(rel)
+    luts.sort()
+    return luts
+
+
+def discover_fusion_templates(extra_dirs: Optional[List[str]] = None) -> List[str]:
+    """Discover available Fusion templates (.drfx, .setting).
+
+    Returns sorted list of template filenames.
+    """
+    templates: List[str] = []
+    search_dirs = list(_FUSION_TEMPLATE_DIRS)
+    if extra_dirs:
+        search_dirs.extend(extra_dirs)
+
+    for base in search_dirs:
+        base_path = Path(base)
+        if not base_path.is_dir():
+            continue
+        for ext in ("*.drfx", "*.setting"):
+            for f in base_path.rglob(ext):
+                name = f.name
+                if name not in templates:
+                    templates.append(name)
+    templates.sort()
+    return templates
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +267,7 @@ class ResolveBridge:
         try:
             ver = self._resolve.GetVersion()
             if ver:
-                self.caps.resolve_version = str(ver)
+                self.caps.resolve_version = _format_version(ver)
             name = self._resolve.GetProductName()
             if name:
                 self.caps.resolve_name = str(name)
@@ -220,6 +297,11 @@ class ResolveBridge:
         # Other capabilities are tested when actually used
         # (creating timelines, importing media, etc.)
         # We'll update caps as we go.
+
+        # Inventory: LUTs and Fusion templates available on disk
+        self.caps.available_luts = discover_luts()
+        self.caps.fusion_templates = discover_fusion_templates()
+
         return self.caps
 
     def disconnect(self) -> None:
