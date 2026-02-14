@@ -451,6 +451,224 @@ class TestHedgeAnnotations(unittest.TestCase):
                 self.assertEqual(ann["hedge_level"], "firm")
 
 
+class TestNormalizeClaimKey(unittest.TestCase):
+    """Tests for claim key normalization."""
+
+    def test_camel_case(self):
+        from lib.circuit_breaker import normalize_claim_key
+        self.assertEqual(normalize_claim_key("batteryLife"), "battery_life")
+
+    def test_title_case_spaces(self):
+        from lib.circuit_breaker import normalize_claim_key
+        self.assertEqual(normalize_claim_key("Battery Life"), "battery_life")
+
+    def test_upper_snake(self):
+        from lib.circuit_breaker import normalize_claim_key
+        self.assertEqual(normalize_claim_key("BATTERY-LIFE"), "battery_life")
+
+    def test_already_normalized(self):
+        from lib.circuit_breaker import normalize_claim_key
+        self.assertEqual(normalize_claim_key("price_claim"), "price_claim")
+
+    def test_mixed(self):
+        from lib.circuit_breaker import normalize_claim_key
+        self.assertEqual(normalize_claim_key("CoreSpecs.v2"), "core_specs_v2")
+
+
+class TestMPCWeightedMean(unittest.TestCase):
+    """Tests for weighted_mean computation."""
+
+    def test_equal_weights(self):
+        from lib.circuit_breaker import weighted_mean
+        self.assertAlmostEqual(weighted_mean([0.8, 0.6], [1.0, 1.0]), 0.7)
+
+    def test_empty(self):
+        from lib.circuit_breaker import weighted_mean
+        self.assertEqual(weighted_mean([], []), 0.0)
+
+    def test_single_value(self):
+        from lib.circuit_breaker import weighted_mean
+        self.assertAlmostEqual(weighted_mean([0.9], [1.0]), 0.9)
+
+    def test_zero_weights(self):
+        from lib.circuit_breaker import weighted_mean
+        self.assertEqual(weighted_mean([0.5, 0.5], [0.0, 0.0]), 0.0)
+
+
+class TestComputeMPCByClaim(unittest.TestCase):
+    """Tests for MPC top-N per claim computation."""
+
+    def test_top_n_filtering(self):
+        from lib.circuit_breaker import compute_mpc_by_claim, EvidenceItem, MPCConfig
+        cfg = MPCConfig(top_n=2)
+        evidence = [
+            EvidenceItem("price", 0.9, trust_tier=4),
+            EvidenceItem("price", 0.7, trust_tier=3),
+            EvidenceItem("price", 0.3, trust_tier=2),  # should be excluded (top_n=2)
+        ]
+        mpc = compute_mpc_by_claim(evidence, cfg)
+        # Top 2: 0.9 and 0.7 → mean = 0.8
+        self.assertAlmostEqual(mpc["price"], 0.8)
+
+    def test_multiple_claims(self):
+        from lib.circuit_breaker import compute_mpc_by_claim, EvidenceItem, MPCConfig
+        cfg = MPCConfig(top_n=3)
+        evidence = [
+            EvidenceItem("price", 0.9, trust_tier=4),
+            EvidenceItem("voltage", 0.6, trust_tier=3),
+            EvidenceItem("voltage", 0.8, trust_tier=4),
+        ]
+        mpc = compute_mpc_by_claim(evidence, cfg)
+        self.assertAlmostEqual(mpc["price"], 0.9)
+        self.assertAlmostEqual(mpc["voltage"], 0.7)  # (0.8+0.6)/2
+
+
+class TestClassifyMPCDecision(unittest.TestCase):
+    """Tests for 4-level MPC decision classification."""
+
+    def test_all_strong_proceeds(self):
+        from lib.circuit_breaker import classify_mpc_decision, MPCConfig
+        cfg = MPCConfig()
+        mpc = {"price": 0.9, "voltage": 0.85, "compatibility": 0.8, "core_specs": 0.75}
+        decision, weak = classify_mpc_decision(mpc, cfg)
+        self.assertEqual(decision, "proceed")
+        self.assertEqual(len(weak), 0)
+
+    def test_critical_weak_gates(self):
+        from lib.circuit_breaker import classify_mpc_decision, MPCConfig
+        cfg = MPCConfig(silver_min=0.5)
+        mpc = {"price": 0.3, "voltage": 0.9}
+        decision, weak = classify_mpc_decision(mpc, cfg)
+        self.assertEqual(decision, "gate")
+        self.assertTrue(any("price" in w for w in weak))
+
+    def test_non_critical_weak_warns(self):
+        from lib.circuit_breaker import classify_mpc_decision, MPCConfig
+        cfg = MPCConfig(silver_min=0.5, critical_claims=["price"])
+        mpc = {"price": 0.8, "shipping": 0.3}
+        decision, weak = classify_mpc_decision(mpc, cfg)
+        self.assertEqual(decision, "proceed_warn")
+        self.assertTrue(any("shipping" in w for w in weak))
+
+
+class TestRunCircuitBreaker(unittest.TestCase):
+    """Tests for the full MPC circuit breaker entrypoint."""
+
+    def _now_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def test_strong_evidence_proceeds(self):
+        from lib.circuit_breaker import run_circuit_breaker
+        evidence = [
+            {"claim_type": "price", "confidence": 0.9, "fetched_at": self._now_iso(), "trust_tier": 4},
+            {"claim_type": "voltage", "confidence": 0.85, "fetched_at": self._now_iso(), "trust_tier": 4},
+            {"claim_type": "compatibility", "confidence": 0.8, "fetched_at": self._now_iso(), "trust_tier": 3},
+            {"claim_type": "core_specs", "confidence": 0.75, "fetched_at": self._now_iso(), "trust_tier": 3},
+        ]
+        result = run_circuit_breaker("R1", "final_script", evidence)
+        self.assertEqual(result.decision, "proceed")
+        self.assertFalse(result.should_gate)
+        self.assertFalse(result.used_refetch)
+
+    def test_weak_critical_gates(self):
+        from lib.circuit_breaker import run_circuit_breaker, MPCConfig
+        cfg = MPCConfig(allow_auto_refetch=False)
+        evidence = [
+            {"claim_type": "price", "confidence": 0.2, "fetched_at": self._now_iso(), "trust_tier": 2},
+        ]
+        result = run_circuit_breaker("R1", "final_script", evidence, cfg=cfg)
+        self.assertEqual(result.decision, "gate")
+        self.assertTrue(result.should_gate)
+        self.assertIn("price", result.message)
+
+    def test_auto_refetch_heals(self):
+        from lib.circuit_breaker import run_circuit_breaker, MPCConfig
+        cfg = MPCConfig(silver_min=0.5, allow_auto_refetch=True)
+        old = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        now = self._now_iso()
+
+        weak_evidence = [
+            {"claim_type": "price", "confidence": 0.3, "fetched_at": old, "trust_tier": 4},
+        ]
+
+        def refetch():
+            return [
+                {"claim_type": "price", "confidence": 0.9, "fetched_at": now, "trust_tier": 4},
+                {"claim_type": "voltage", "confidence": 0.85, "fetched_at": now, "trust_tier": 4},
+                {"claim_type": "compatibility", "confidence": 0.8, "fetched_at": now, "trust_tier": 3},
+                {"claim_type": "core_specs", "confidence": 0.75, "fetched_at": now, "trust_tier": 3},
+            ]
+
+        result = run_circuit_breaker("R1", "script", weak_evidence, cfg=cfg, refetch_fn=refetch)
+        self.assertNotEqual(result.decision, "gate")
+        self.assertTrue(result.used_refetch)
+
+    def test_telegram_send_called_on_gate(self):
+        from lib.circuit_breaker import run_circuit_breaker, MPCConfig
+        cfg = MPCConfig(allow_auto_refetch=False)
+        messages = []
+        evidence = [
+            {"claim_type": "price", "confidence": 0.1, "fetched_at": self._now_iso(), "trust_tier": 2},
+        ]
+        result = run_circuit_breaker(
+            "R1", "script", evidence,
+            cfg=cfg, telegram_send_fn=messages.append,
+        )
+        self.assertEqual(result.decision, "gate")
+        self.assertEqual(len(messages), 1)
+        self.assertIn("Circuit Breaker", messages[0])
+
+    def test_mpc_result_snapshot(self):
+        from lib.circuit_breaker import run_circuit_breaker
+        evidence = [
+            {"claim_type": "price", "confidence": 0.9, "fetched_at": self._now_iso(), "trust_tier": 4},
+        ]
+        result = run_circuit_breaker("R1", "t", evidence)
+        snap = result.to_snapshot()
+        self.assertIn("decision", snap)
+        self.assertIn("mpc_by_claim", snap)
+        json_str = json.dumps(snap)
+        self.assertIn("decision", json_str)
+
+    def test_no_refetch_on_low_trust(self):
+        from lib.circuit_breaker import run_circuit_breaker, MPCConfig
+        cfg = MPCConfig(allow_auto_refetch=True)
+        refetch_called = []
+
+        def refetch():
+            refetch_called.append(True)
+            return [{"claim_type": "price", "confidence": 0.9, "fetched_at": datetime.now(timezone.utc).isoformat(), "trust_tier": 4}]
+
+        # All evidence is low trust (tier 2) and NOT expired → refetch won't help
+        evidence = [
+            {"claim_type": "price", "confidence": 0.2, "fetched_at": datetime.now(timezone.utc).isoformat(), "trust_tier": 2},
+        ]
+        result = run_circuit_breaker("R1", "t", evidence, cfg=cfg, refetch_fn=refetch)
+        self.assertEqual(result.decision, "gate")
+        self.assertEqual(len(refetch_called), 0)
+
+
+class TestRenderGateMessage(unittest.TestCase):
+    """Tests for Telegram gate message rendering."""
+
+    def test_message_format(self):
+        from lib.circuit_breaker import render_gate_message
+        msg = render_gate_message(
+            "RAY-99", "final_script",
+            {"price": 0.3, "voltage": 0.9},
+            ["price: 0.30"],
+        )
+        self.assertIn("RAY-99", msg)
+        self.assertIn("price: 0.30", msg)
+        self.assertIn("Refetch", msg)
+        self.assertIn("Abort", msg)
+
+    def test_message_with_no_weak_points(self):
+        from lib.circuit_breaker import render_gate_message
+        msg = render_gate_message("R1", "t", {"price": 0.3}, [])
+        self.assertIn("price", msg)
+
+
 class TestCBResultSnapshot(unittest.TestCase):
 
     def test_snapshot_serializable(self):

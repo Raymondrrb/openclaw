@@ -1,6 +1,8 @@
 """Circuit Breaker — gates pipeline on evidence confidence (RayviewsLab calibration).
 
-Simple, debuggable, linear scoring. No complex MPC formulas.
+Two evaluation modes:
+  1. Per-claim best-confidence (original) — fast, used by evaluate_evidence()
+  2. MPC weighted mean top-N (v2) — richer, used by run_circuit_breaker()
 
 Three tiers, aligned with what actually destroys credibility for 30+ audience:
 
@@ -15,6 +17,13 @@ Rule: only Tier A claims can trip the circuit breaker.
 Score per claim = best confidence from evidence items (0.0-1.0).
 Gate threshold: any Tier A claim below 0.6 → pause run.
 
+MPC mode (v2):
+    - Per claim_type: take top-N evidence by score, compute weighted mean
+    - 4-level decision: proceed / proceed_warn / gate / abort
+    - Claim weights for risk: price=1.0, stock=1.0, specs=0.7, shipping=0.4
+    - Auto-refetch only when weakness is staleness, not low trust
+    - Pre-rendered Telegram gate message
+
 Token optimization built-in:
     - Price: always refresh (TTL 12h)
     - Specs: refresh only if hash changed or TTL > 120d
@@ -24,13 +33,17 @@ Stdlib only.
 
 Usage:
     from lib.circuit_breaker import evaluate_evidence, CBResult
+    from lib.circuit_breaker import run_circuit_breaker, MPCConfig, MPCResult
 
+    # Original mode
     result = evaluate_evidence(evidence_items)
     if result.should_gate:
         print(result.gate_reason)
-    elif result.alerts:
-        for a in result.alerts:
-            print(f"ALERT: {a}")
+
+    # MPC mode (v2)
+    mpc_result = run_circuit_breaker("RUN-1", "final_script", evidence_items)
+    if mpc_result.decision == "gate":
+        print(mpc_result.message)
 """
 
 from __future__ import annotations
@@ -684,3 +697,356 @@ def compute_fingerprint(
 
 # Need json for compute_fingerprint
 import json
+
+
+# ---------------------------------------------------------------------------
+# Claim key normalization
+# ---------------------------------------------------------------------------
+
+def normalize_claim_key(key: str) -> str:
+    """Normalize claim keys to lower_snake_case.
+
+    Handles common variants from Amazon/parse:
+      "Battery Life" → "battery_life"
+      "batteryLife"  → "battery_life"
+      "BATTERY-LIFE" → "battery_life"
+    """
+    import re
+    # Insert underscore before uppercase letters (camelCase → camel_Case)
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+    # Replace hyphens, spaces, dots with underscores
+    s = re.sub(r"[-\s.]+", "_", s)
+    # Collapse multiple underscores
+    s = re.sub(r"_+", "_", s)
+    return s.strip("_").lower()
+
+
+# ---------------------------------------------------------------------------
+# MPC (Mean Per Claim) — v2 circuit breaker with top-N weighted mean
+# ---------------------------------------------------------------------------
+
+Decision = str  # "proceed" | "proceed_warn" | "gate" | "abort"
+
+
+@dataclass
+class MPCConfig:
+    """Configuration for MPC-based circuit breaker."""
+    # Score thresholds (0-1 scale, mapped from original 0-20 to 0-1)
+    gold_min: float = 0.75       # above this = gold (proceed)
+    silver_min: float = 0.50     # above this = silver (proceed_warn if non-critical)
+
+    # Top-N evidence per claim_type to consider
+    top_n: int = 3
+
+    # Claim weights (risk multiplier)
+    claim_weights: dict[str, float] = field(default_factory=lambda: {
+        "price": 1.0,
+        "voltage": 1.0,
+        "compatibility": 1.0,
+        "core_specs": 0.9,
+        "stock_claim": 1.0,
+        "availability": 0.5,
+        "shipping": 0.4,
+        "promo_badge": 0.6,
+        "review_sentiment": 0.5,
+        "reviews_consensus": 0.5,
+        "specs_claim": 0.7,
+        "shipping_claim": 0.4,
+    })
+
+    # Critical claims: if they fail silver_min → gate
+    critical_claims: list[str] = field(default_factory=lambda: [
+        "price", "voltage", "compatibility", "core_specs", "stock_claim",
+    ])
+
+    # Auto-refetch settings
+    allow_auto_refetch: bool = True
+    auto_refetch_max_attempts: int = 1
+
+    def weight_for(self, claim_type: str) -> float:
+        """Get weight for a claim type, default 0.3 for unknown."""
+        return self.claim_weights.get(claim_type, 0.3)
+
+
+@dataclass
+class MPCResult:
+    """Result of MPC-based circuit breaker evaluation."""
+    decision: Decision
+    mpc_by_claim: dict[str, float]
+    weak_points: list[str]
+    used_refetch: bool
+    message: str
+
+    @property
+    def should_gate(self) -> bool:
+        """Backwards-compatible: gate or abort = should_gate."""
+        return self.decision in ("gate", "abort")
+
+    def to_snapshot(self) -> dict:
+        """Serialize for context_snapshot storage."""
+        return {
+            "decision": self.decision,
+            "mpc_by_claim": {k: round(v, 3) for k, v in self.mpc_by_claim.items()},
+            "weak_points": self.weak_points,
+            "used_refetch": self.used_refetch,
+        }
+
+
+# ---------------------------------------------------------------------------
+# MPC math
+# ---------------------------------------------------------------------------
+
+def weighted_mean(values: list[float], weights: list[float]) -> float:
+    """Weighted mean of values. Returns 0.0 if empty or zero total weight."""
+    if not values:
+        return 0.0
+    wsum = sum(weights)
+    if wsum <= 0:
+        return 0.0
+    return sum(v * w for v, w in zip(values, weights)) / wsum
+
+
+def compute_mpc_by_claim(
+    evidence: list[EvidenceItem],
+    cfg: MPCConfig,
+) -> dict[str, float]:
+    """Compute MPC (Mean Per Claim) using top-N evidence per claim type.
+
+    For each claim_type:
+      1. Sort evidence by confidence DESC
+      2. Take top-N items
+      3. Compute weighted mean (equal weights within claim)
+
+    This measures the "best available base" — weak fallback evidence
+    doesn't drag down the average.
+    """
+    by_claim: dict[str, list[EvidenceItem]] = {}
+    for e in evidence:
+        ct = normalize_claim_key(e.claim_type) if e.claim_type else ""
+        if ct:
+            by_claim.setdefault(ct, []).append(e)
+
+    mpc: dict[str, float] = {}
+    for claim, items in by_claim.items():
+        items_sorted = sorted(items, key=lambda x: x.confidence, reverse=True)
+        top = items_sorted[:cfg.top_n]
+        scores = [x.confidence for x in top]
+        weights = [1.0] * len(scores)
+        mpc[claim] = round(weighted_mean(scores, weights), 4)
+
+    return mpc
+
+
+def classify_mpc_decision(
+    mpc_by_claim: dict[str, float],
+    cfg: MPCConfig,
+) -> tuple[Decision, list[str]]:
+    """Classify MPC scores into a 4-level decision.
+
+    Rules:
+      - Any critical claim <= silver_min → "gate"
+      - Any non-critical claim <= silver_min → "proceed_warn"
+      - All claims above gold_min → "proceed"
+      - Otherwise → "proceed" (strong enough)
+    """
+    critical_weak: list[str] = []
+    for c in cfg.critical_claims:
+        if c in mpc_by_claim and mpc_by_claim[c] <= cfg.silver_min:
+            critical_weak.append(f"{c}: {mpc_by_claim[c]:.2f}")
+
+    if critical_weak:
+        return "gate", critical_weak
+
+    warnings: list[str] = []
+    for claim, v in mpc_by_claim.items():
+        if v <= cfg.silver_min:
+            warnings.append(f"{claim}: {v:.2f}")
+
+    if warnings:
+        return "proceed_warn", warnings
+
+    return "proceed", []
+
+
+# ---------------------------------------------------------------------------
+# Auto-refetch eligibility (MPC version)
+# ---------------------------------------------------------------------------
+
+def can_mpc_auto_refetch(evidence: list[EvidenceItem]) -> bool:
+    """Auto-refetch is useful when weakness is staleness, not low trust.
+
+    Rules:
+      - If evidence is empty → allow (nothing found, refetch might help)
+      - If any item is expired → allow (fresh data might fix it)
+      - If ALL weak items are low trust (tier <=2) → don't (refetch gets same low quality)
+    """
+    if not evidence:
+        return True
+    any_expired = any(e.is_expired() for e in evidence)
+    all_low_trust = all(e.trust_tier <= 2 for e in evidence)
+    return any_expired and not all_low_trust
+
+
+# ---------------------------------------------------------------------------
+# Telegram gate message rendering
+# ---------------------------------------------------------------------------
+
+def render_gate_message(
+    run_id: str,
+    task: str,
+    mpc_by_claim: dict[str, float],
+    weak_points: list[str],
+) -> str:
+    """Render a scannable Telegram gate message."""
+    lines = [
+        "Circuit Breaker Triggered (Low Confidence)",
+        f"Run: {run_id} | Task: {task}",
+        "",
+        "Weak Points:",
+    ]
+    if weak_points:
+        for w in weak_points:
+            lines.append(f"  {w}")
+    else:
+        for k, v in sorted(mpc_by_claim.items()):
+            lines.append(f"  {k}: Avg Score {v:.2f}")
+
+    lines.extend([
+        "",
+        "MPC Scores:",
+    ])
+    for k, v in sorted(mpc_by_claim.items()):
+        lines.append(f"  {k}: {v:.2f}")
+
+    lines.extend([
+        "",
+        "Options:",
+        "  Refetch: Try to collect fresh evidence once.",
+        "  Ignore: Proceed with weak data (higher risk).",
+        "  Abort: Stop this run.",
+    ])
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# MPC public entrypoint
+# ---------------------------------------------------------------------------
+
+def run_circuit_breaker(
+    run_id: str,
+    task: str,
+    evidence: list[EvidenceItem] | list[dict],
+    *,
+    cfg: MPCConfig | None = None,
+    refetch_fn: Callable[[], list[EvidenceItem] | list[dict]] | None = None,
+    telegram_send_fn: Callable[[str], None] | None = None,
+) -> MPCResult:
+    """MPC-based circuit breaker with auto-refetch and Telegram gate.
+
+    Flow:
+      1. Normalize evidence → compute MPC per claim → classify decision
+      2. If gate + auto-refetch eligible: refetch once, re-evaluate
+      3. If still gate: render Telegram message, send if callback provided
+      4. Return MPCResult with decision + diagnostics
+
+    Args:
+        run_id: Pipeline run identifier.
+        task: Current task/phase name.
+        evidence: List of EvidenceItem or dicts.
+        cfg: Optional MPCConfig (defaults to standard weights).
+        refetch_fn: Optional callback that re-fetches evidence.
+        telegram_send_fn: Optional callback to send gate message.
+
+    Returns:
+        MPCResult with decision, mpc_by_claim, weak_points, message.
+    """
+    from typing import Callable  # noqa: F811
+
+    if cfg is None:
+        cfg = MPCConfig()
+
+    # Normalize dicts to EvidenceItem
+    items: list[EvidenceItem] = []
+    for e in evidence:
+        if isinstance(e, dict):
+            items.append(EvidenceItem(
+                claim_type=e.get("claim_type", ""),
+                confidence=float(e.get("confidence", 0)),
+                source_url=e.get("source_url", ""),
+                source_name=e.get("source_name", ""),
+                fetched_at=e.get("fetched_at", ""),
+                trust_tier=int(e.get("trust_tier", 3)),
+                value=e.get("value"),
+                claim_id=e.get("claim_id", ""),
+            ))
+        else:
+            items.append(e)
+
+    used_refetch = False
+
+    # First evaluation
+    mpc = compute_mpc_by_claim(items, cfg)
+    decision, weak_points = classify_mpc_decision(mpc, cfg)
+
+    # Auto-refetch if gate and eligible
+    if decision == "gate" and cfg.allow_auto_refetch and refetch_fn and can_mpc_auto_refetch(items):
+        for _ in range(cfg.auto_refetch_max_attempts):
+            try:
+                fresh_raw = refetch_fn()
+            except Exception:
+                break
+            used_refetch = True
+            # Normalize fresh evidence
+            fresh: list[EvidenceItem] = []
+            for e in fresh_raw:
+                if isinstance(e, dict):
+                    fresh.append(EvidenceItem(
+                        claim_type=e.get("claim_type", ""),
+                        confidence=float(e.get("confidence", 0)),
+                        source_url=e.get("source_url", ""),
+                        source_name=e.get("source_name", ""),
+                        fetched_at=e.get("fetched_at", ""),
+                        trust_tier=int(e.get("trust_tier", 3)),
+                        value=e.get("value"),
+                    ))
+                else:
+                    fresh.append(e)
+
+            mpc2 = compute_mpc_by_claim(fresh, cfg)
+            decision2, weak2 = classify_mpc_decision(mpc2, cfg)
+            if decision2 != "gate":
+                msg = (
+                    f"Auto-refetch healed confidence.\n"
+                    f"Run: {run_id} | Task: {task}\n"
+                    f"Decision: {decision2}\n"
+                    f"MPC: {mpc2}"
+                )
+                return MPCResult(decision2, mpc2, weak2, used_refetch, msg)
+            # Still weak — update for final return
+            items = fresh
+            mpc = mpc2
+            decision, weak_points = decision2, weak2
+
+    # Build final message
+    if decision == "gate":
+        msg = render_gate_message(run_id, task, mpc, weak_points)
+        if telegram_send_fn:
+            try:
+                telegram_send_fn(msg)
+            except Exception:
+                pass
+    elif decision == "proceed_warn":
+        msg = (
+            f"Proceeding with warnings.\n"
+            f"Run: {run_id} | Task: {task}\n"
+            f"Weak: {', '.join(weak_points)}\n"
+            f"MPC: {mpc}"
+        )
+    else:
+        msg = f"Proceed.\nRun: {run_id} | Task: {task}\nMPC: {mpc}"
+
+    return MPCResult(decision, mpc, weak_points, used_refetch, msg)
+
+
+# Import Callable for type hint in run_circuit_breaker
+from typing import Callable  # noqa: E402
