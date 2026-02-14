@@ -340,6 +340,31 @@ def gate_davinci_required(manifest: Dict[str, Any]) -> GateResult:
     )
 
 
+def gate_pacing(run_dir: Path) -> GateResult:
+    """Gate: editorial pacing must be OK (no long static segments)."""
+    rc_path = run_dir / "05_render_config.json"
+    if not rc_path.exists():
+        return GateResult("pacing", True, "no render_config (skipped)")
+    try:
+        rc = read_json(rc_path)
+        pacing = rc.get("pacing", {})
+        if not pacing:
+            return GateResult("pacing", True, "no pacing block (skipped)")
+        if not pacing.get("ok", True):
+            errors = pacing.get("errors", [])
+            return GateResult(
+                "pacing", False,
+                f"EDITORIAL_LOW_VARIETY: {'; '.join(errors)}"
+            )
+        warnings = pacing.get("warnings", [])
+        detail = "pacing OK"
+        if warnings:
+            detail += f" (warnings: {'; '.join(warnings)})"
+        return GateResult("pacing", True, detail)
+    except Exception as e:
+        return GateResult("pacing", True, f"pacing check error: {e}")
+
+
 def gate_claims_validation(manifest: Dict[str, Any]) -> GateResult:
     claims = manifest.get("claims_validation", {})
     status = claims.get("status", "")
@@ -421,6 +446,9 @@ def validate_run(
     # Gate 12: DaVinci required (blocks shadow-only renders from upload)
     if require_video:
         gates.append(gate_davinci_required(manifest))
+
+    # Gate 13: Pacing (editorial quality — long static segments blocked)
+    gates.append(gate_pacing(run_dir))
 
     verdict = _build_verdict(run_id, gates)
 

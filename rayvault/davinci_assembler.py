@@ -59,7 +59,27 @@ LUFS_TARGET = -14.0
 LUFS_TOLERANCE = 1.5
 TRUE_PEAK_MAX = -0.5
 
+# Disk thresholds
+MIN_CACHE_FREE_GB = 80
+MIN_EXPORT_HEADROOM_MULTIPLIER = 2
+MIN_EXPORT_HEADROOM_BASE_GB = 20
+
+# Black frame detection
+BLACK_LUMA_THRESHOLD = 16  # pixel value 0-255; below = black
+BLACK_FRAME_MIN_RATIO = 0.95  # 95%+ dark pixels = black frame
+RED_CHANNEL_DOMINANCE = 0.6  # R / (R+G+B) > 60% = "offline" red
+
+# Render states (for manifest tracking)
+RS_STARTED = "RENDER_STARTED"
+RS_STALLED = "RENDER_STALLED"
+RS_RECOVERING = "RENDER_RECOVERING"
+RS_FAILED_HARD = "RENDER_FAILED_HARD"
+RS_RENDERED_OK = "RENDERED_OK"
+
 TEMPLATE_PROJECT_NAME = "RayVault_Template_v1"
+
+# macOS Resolve cache path
+RESOLVE_CACHE_DIR_MACOS = Path.home() / "Library" / "Application Support" / "Blackmagic Design" / "DaVinci Resolve"
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +181,230 @@ def measure_loudness(path: Path) -> Optional[Dict[str, float]]:
 
 
 # ---------------------------------------------------------------------------
+# Disk space check
+# ---------------------------------------------------------------------------
+
+
+def check_disk_space(
+    export_dir: Path,
+    estimated_output_gb: float = 2.0,
+    cache_dir: Optional[Path] = None,
+    min_cache_gb: float = MIN_CACHE_FREE_GB,
+) -> Dict[str, Any]:
+    """Check free disk space for export and Resolve cache.
+
+    Returns {ok, export_free_gb, cache_free_gb, errors}.
+    """
+    import shutil
+    result: Dict[str, Any] = {"ok": True, "errors": []}
+
+    # Export drive
+    try:
+        usage = shutil.disk_usage(str(export_dir))
+        free_gb = usage.free / (1024 ** 3)
+        result["export_free_gb"] = round(free_gb, 2)
+        needed = estimated_output_gb * MIN_EXPORT_HEADROOM_MULTIPLIER + MIN_EXPORT_HEADROOM_BASE_GB
+        if free_gb < needed:
+            result["ok"] = False
+            result["errors"].append(
+                f"EXPORT_DISK_LOW: {free_gb:.1f}GB free, need {needed:.1f}GB"
+            )
+    except OSError as e:
+        result["export_free_gb"] = None
+        result["errors"].append(f"EXPORT_DISK_CHECK_FAIL: {e}")
+        result["ok"] = False
+
+    # Cache drive (macOS default)
+    if cache_dir is None:
+        cache_dir = RESOLVE_CACHE_DIR_MACOS
+    try:
+        if cache_dir.exists():
+            usage = shutil.disk_usage(str(cache_dir))
+            free_gb = usage.free / (1024 ** 3)
+            result["cache_free_gb"] = round(free_gb, 2)
+            if free_gb < min_cache_gb:
+                result["ok"] = False
+                result["errors"].append(
+                    f"CACHE_DISK_LOW: {free_gb:.1f}GB free, need {min_cache_gb:.0f}GB"
+                )
+        else:
+            result["cache_free_gb"] = None
+            result["warnings"] = [f"Cache dir not found: {cache_dir}"]
+    except OSError as e:
+        result["cache_free_gb"] = None
+        result["errors"].append(f"CACHE_DISK_CHECK_FAIL: {e}")
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Black frame / media offline detection
+# ---------------------------------------------------------------------------
+
+
+def detect_black_frames(
+    video_path: Path,
+    segments: Optional[List[Dict[str, Any]]] = None,
+    black_threshold: float = BLACK_LUMA_THRESHOLD,
+) -> Dict[str, Any]:
+    """Detect black frames and media offline (red) via ffmpeg.
+
+    Strategy:
+      1. Run blackdetect filter on whole video (cheap, reliable)
+      2. If segments provided, sample 1 frame at start + 1 at mid per segment
+         and check for dominant red (media offline indicator)
+
+    Returns {ok, black_ranges, offline_suspects, sampled_frames}.
+    """
+    result: Dict[str, Any] = {
+        "ok": True,
+        "black_ranges": [],
+        "offline_suspects": [],
+        "sampled_count": 0,
+    }
+
+    if not video_path.exists():
+        return {"ok": False, "error": "VIDEO_NOT_FOUND"}
+
+    # --- Phase 1: blackdetect filter ---
+    try:
+        cmd = [
+            "ffmpeg", "-i", str(video_path),
+            "-vf", f"blackdetect=d=0.3:pix_th={black_threshold / 255:.3f}",
+            "-an", "-f", "null", "-",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        for line in proc.stderr.splitlines():
+            if "black_start:" in line:
+                # Parse: [blackdetect @ 0x...] black_start:5.0 black_end:5.5 black_duration:0.5
+                parts = {}
+                for token in line.split():
+                    if ":" in token and token[0].isalpha():
+                        k, v = token.split(":", 1)
+                        try:
+                            parts[k] = float(v)
+                        except ValueError:
+                            pass
+                if "black_start" in parts:
+                    result["black_ranges"].append({
+                        "start": parts.get("black_start", 0),
+                        "end": parts.get("black_end", 0),
+                        "duration": parts.get("black_duration", 0),
+                    })
+    except Exception:
+        pass
+
+    # Flag if any black range > 0.5s that isn't at the very start/end
+    for br in result["black_ranges"]:
+        if br["duration"] > 0.5 and br["start"] > 1.0:
+            result["ok"] = False
+
+    # --- Phase 2: per-segment red (offline) detection ---
+    if segments:
+        for seg in segments:
+            t0 = seg.get("t0", 0)
+            t1 = seg.get("t1", t0 + 1)
+            mid = (t0 + t1) / 2
+
+            for ts in (t0 + 0.1, mid):
+                red_ratio = _sample_frame_red_ratio(video_path, ts)
+                result["sampled_count"] += 1
+                if red_ratio is not None and red_ratio > RED_CHANNEL_DOMINANCE:
+                    result["offline_suspects"].append({
+                        "timestamp": round(ts, 2),
+                        "segment_id": seg.get("id", ""),
+                        "red_ratio": round(red_ratio, 3),
+                    })
+                    result["ok"] = False
+
+    return result
+
+
+def _sample_frame_red_ratio(video_path: Path, timestamp: float) -> Optional[float]:
+    """Extract a single frame and compute R/(R+G+B) ratio.
+
+    Uses ffmpeg to extract raw RGB data, then computes channel averages.
+    Returns None on failure.
+    """
+    try:
+        cmd = [
+            "ffmpeg", "-ss", str(timestamp), "-i", str(video_path),
+            "-vframes", "1", "-f", "rawvideo", "-pix_fmt", "rgb24",
+            "-loglevel", "quiet", "-",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, timeout=15)
+        if proc.returncode != 0 or len(proc.stdout) < 3:
+            return None
+
+        data = proc.stdout
+        n_pixels = len(data) // 3
+        if n_pixels == 0:
+            return None
+
+        # Sum channels
+        r_sum = sum(data[i] for i in range(0, len(data), 3))
+        g_sum = sum(data[i] for i in range(1, len(data), 3))
+        b_sum = sum(data[i] for i in range(2, len(data), 3))
+
+        total = r_sum + g_sum + b_sum
+        if total == 0:
+            return 0.0
+        return r_sum / total
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Caffeinate (prevent macOS sleep during render)
+# ---------------------------------------------------------------------------
+
+
+def _start_caffeinate() -> Optional[subprocess.Popen]:
+    """Start caffeinate to prevent sleep during render. Returns process handle."""
+    try:
+        return subprocess.Popen(
+            ["caffeinate", "-dimsu"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return None
+
+
+def _stop_caffeinate(proc: Optional[subprocess.Popen]) -> None:
+    """Terminate caffeinate process."""
+    if proc:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Manifest render state updates
+# ---------------------------------------------------------------------------
+
+
+def _update_render_state(
+    manifest_path: Path, state: str, extra: Optional[Dict[str, Any]] = None
+) -> None:
+    """Update manifest render.state for observability."""
+    try:
+        m = read_json(manifest_path)
+        r = m.setdefault("render", {})
+        r["state"] = state
+        r["state_updated_at_utc"] = utc_now_iso()
+        if extra:
+            r.update(extra)
+        atomic_write_json(manifest_path, m)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Gates
 # ---------------------------------------------------------------------------
 
@@ -198,6 +442,19 @@ def gate_resolve_connection() -> Tuple[GateResult, Optional[Any]]:
             errors=["RESOLVE_NOT_RUNNING: Cannot connect to DaVinci Resolve (is it open?)"],
         ), None
     return GateResult(ok=True), bridge
+
+
+def gate_disk_space(
+    run_dir: Path, estimated_output_gb: float = 2.0
+) -> Tuple[GateResult, Dict[str, Any]]:
+    """Gate C: sufficient disk space on export + cache drives."""
+    disk = check_disk_space(
+        run_dir / "publish",
+        estimated_output_gb=estimated_output_gb,
+    )
+    if disk["ok"]:
+        return GateResult(ok=True, warnings=disk.get("warnings", [])), disk
+    return GateResult(ok=False, errors=disk["errors"]), disk
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +741,11 @@ def assemble(
         except Exception:
             pass
 
+    # --- Gate C: disk space ---
+    dg, disk_metrics = gate_disk_space(run_dir)
+    if not dg.ok:
+        return AssembleResult(ok=False, status="BLOCKED", errors=dg.errors)
+
     # Dry-run: just validate
     if not apply:
         elapsed = time.monotonic() - t_start
@@ -493,8 +755,10 @@ def assemble(
             engine_used="davinci", inputs_hash=inputs_hash,
             duration_sec=audio_duration,
             elapsed_sec=round(elapsed, 2),
-            warnings=fg.warnings,
+            warnings=fg.warnings + dg.warnings,
         )
+
+    manifest_path = run_dir / "00_manifest.json"
 
     # --- Gate B: Resolve connection ---
     rg, bridge = gate_resolve_connection()
@@ -679,7 +943,15 @@ def assemble(
             errors=["Failed to add render job to queue"],
         )
 
+    # Start caffeinate to prevent sleep during render
+    caff_proc = _start_caffeinate()
+
+    # Mark render started in manifest
+    _update_render_state(manifest_path, RS_STARTED, {"inputs_hash": inputs_hash})
+
     if not bridge.start_rendering():
+        _stop_caffeinate(caff_proc)
+        _update_render_state(manifest_path, RS_FAILED_HARD)
         bridge.save_project()
         bridge.disconnect()
         return AssembleResult(
@@ -692,10 +964,15 @@ def assemble(
     # --- Watchdog ---
     watch = watch_render(bridge, final_output)
 
+    _stop_caffeinate(caff_proc)
     bridge.save_project()
     bridge.disconnect()
 
     if not watch["ok"]:
+        # Mark stall/timeout in manifest
+        state = RS_STALLED if watch.get("stalled") else RS_FAILED_HARD
+        _update_render_state(manifest_path, state)
+
         elapsed = time.monotonic() - t_start
 
         # Stall or timeout — try shadow render
@@ -716,6 +993,22 @@ def assemble(
 
     # --- Post-render verification ---
     verify = verify_output(final_output, audio_duration, output_settings.get("fps", 30))
+
+    # --- Black frame / offline detection ---
+    visual_check = detect_black_frames(final_output, segments)
+    if not visual_check.get("ok", True):
+        verify.ok = False
+        for br in visual_check.get("black_ranges", []):
+            if br["duration"] > 0.5 and br["start"] > 1.0:
+                verify.errors.append(
+                    f"BLACK_FRAME: {br['start']:.1f}-{br['end']:.1f}s "
+                    f"({br['duration']:.1f}s)"
+                )
+        for suspect in visual_check.get("offline_suspects", []):
+            verify.errors.append(
+                f"MEDIA_OFFLINE_SUSPECT: seg={suspect['segment_id']} "
+                f"t={suspect['timestamp']}s red_ratio={suspect['red_ratio']}"
+            )
 
     elapsed = time.monotonic() - t_start
     output_sha1 = sha1_file(final_output) if final_output.exists() else None
@@ -751,6 +1044,15 @@ def assemble(
             "lufs_integrated": verify.lufs_integrated,
             "true_peak": verify.true_peak,
         },
+        "visual_integrity": {
+            "black_ranges": visual_check.get("black_ranges", []),
+            "offline_suspects": visual_check.get("offline_suspects", []),
+            "sampled_count": visual_check.get("sampled_count", 0),
+        },
+        "disk_metrics": {
+            "export_free_gb": disk_metrics.get("export_free_gb"),
+            "cache_free_gb": disk_metrics.get("cache_free_gb"),
+        },
         "verify_ok": verify.ok,
         "verify_errors": verify.errors,
         "verify_warnings": verify.warnings,
@@ -759,7 +1061,9 @@ def assemble(
     atomic_write_json(run_dir / "publish" / "render_receipt.json", receipt)
 
     # --- Update manifest ---
-    manifest_path = run_dir / "00_manifest.json"
+    final_state = RS_RENDERED_OK if verify.ok else RS_FAILED_HARD
+    _update_render_state(manifest_path, final_state)
+
     if manifest_path.exists():
         m = read_json(manifest_path)
         r = m.setdefault("render", {})

@@ -274,6 +274,76 @@ def generate_timeline(
 
 
 # ---------------------------------------------------------------------------
+# Pacing validation (editorial quality gate)
+# ---------------------------------------------------------------------------
+
+MAX_STATIC_SECONDS = 18.0  # No segment may exceed this without visual change
+MIN_SEGMENT_TYPE_VARIETY = 2  # At least N distinct visual modes across segments
+
+
+def validate_pacing(
+    segments: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Validate editorial pacing rules.
+
+    Rules:
+      1. No segment longer than MAX_STATIC_SECONDS for static content
+         (KEN_BURNS with motion is exempt — it counts as visual change)
+      2. At least MIN_SEGMENT_TYPE_VARIETY distinct visual types across
+         product segments (broll/image/card diversity)
+
+    Returns {ok, warnings, errors}.
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    # Rule 1: max static duration
+    for seg in segments:
+        seg_type = seg.get("type", "")
+        if seg_type in ("intro", "outro"):
+            continue  # intro/outro have fixed short durations
+
+        duration = seg.get("t1", 0) - seg.get("t0", 0)
+        visual = seg.get("visual", {})
+        mode = visual.get("mode", "SKIP")
+
+        # KEN_BURNS and BROLL_VIDEO have inherent motion — exempt
+        if mode in ("KEN_BURNS", "BROLL_VIDEO"):
+            continue
+
+        # Static modes: STILL_ONLY, SKIP
+        if duration > MAX_STATIC_SECONDS:
+            errors.append(
+                f"LONG_STATIC: {seg.get('id', '?')} is {duration:.1f}s "
+                f"with mode={mode} (max={MAX_STATIC_SECONDS}s)"
+            )
+
+    # Rule 2: visual type variety across product segments
+    product_modes = set()
+    for seg in segments:
+        if seg.get("type") == "product":
+            visual = seg.get("visual", {})
+            mode = visual.get("mode", "SKIP")
+            if mode != "SKIP":
+                product_modes.add(mode)
+
+    if len(product_modes) < MIN_SEGMENT_TYPE_VARIETY and len(segments) > 3:
+        warnings.append(
+            f"LOW_VARIETY: only {len(product_modes)} visual type(s) "
+            f"({', '.join(sorted(product_modes)) or 'none'}), "
+            f"recommend at least {MIN_SEGMENT_TYPE_VARIETY}"
+        )
+
+    return {
+        "ok": len(errors) == 0,
+        "pacing_ok": len(errors) == 0,
+        "variety_warning": len(warnings) > 0,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Core generation
 # ---------------------------------------------------------------------------
 
@@ -372,6 +442,9 @@ def generate_render_config(
     # Build timeline
     segments = generate_timeline(product_visuals, audio_duration)
 
+    # Validate pacing
+    pacing = validate_pacing(segments)
+
     # Assemble config
     config = {
         "version": RENDER_CONFIG_VERSION,
@@ -392,6 +465,13 @@ def generate_render_config(
             "min_truth_required": min_truth_products,
         },
         "segments": segments,
+        "pacing": {
+            "ok": pacing["pacing_ok"],
+            "variety_warning": pacing["variety_warning"],
+            "max_static_seconds": MAX_STATIC_SECONDS,
+            "errors": pacing["errors"],
+            "warnings": pacing["warnings"],
+        },
     }
 
     # Write render config atomically
@@ -420,6 +500,7 @@ def generate_render_config(
         "fidelity_score": fidelity_score,
         "needs_manual_review": needs_manual_review,
         "patient_zero": patient_zero,
+        "pacing": pacing,
     }
 
 

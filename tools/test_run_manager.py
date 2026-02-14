@@ -15524,5 +15524,274 @@ class TestGateDaVinciRequired(unittest.TestCase):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ============================================================================
+# Pacing validation tests
+# ============================================================================
+
+
+class TestPacingValidation(unittest.TestCase):
+    """Tests for render_config_generate pacing validation."""
+
+    def test_pacing_ok_with_motion(self):
+        from rayvault.render_config_generate import validate_pacing
+        segments = [
+            {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+            {"id": "s1", "type": "product", "t0": 2, "t1": 22,
+             "visual": {"mode": "KEN_BURNS"}},  # 20s but has motion
+            {"id": "s2", "type": "product", "t0": 22, "t1": 32,
+             "visual": {"mode": "BROLL_VIDEO"}},
+            {"id": "s3", "type": "outro", "t0": 32, "t1": 34},
+        ]
+        result = validate_pacing(segments)
+        self.assertTrue(result["ok"])
+
+    def test_pacing_fails_long_static(self):
+        from rayvault.render_config_generate import validate_pacing
+        segments = [
+            {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+            {"id": "s1", "type": "product", "t0": 2, "t1": 25,
+             "visual": {"mode": "STILL_ONLY"}},  # 23s static!
+            {"id": "s2", "type": "outro", "t0": 25, "t1": 27},
+        ]
+        result = validate_pacing(segments)
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("LONG_STATIC" in e for e in result["errors"]))
+
+    def test_pacing_skip_segments_flagged(self):
+        from rayvault.render_config_generate import validate_pacing
+        segments = [
+            {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+            {"id": "s1", "type": "product", "t0": 2, "t1": 22,
+             "visual": {"mode": "SKIP"}},  # 20s static SKIP
+            {"id": "s2", "type": "outro", "t0": 22, "t1": 24},
+        ]
+        result = validate_pacing(segments)
+        self.assertFalse(result["ok"])
+
+    def test_pacing_variety_warning(self):
+        from rayvault.render_config_generate import validate_pacing
+        segments = [
+            {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+            {"id": "s1", "type": "product", "t0": 2, "t1": 6,
+             "visual": {"mode": "KEN_BURNS"}},
+            {"id": "s2", "type": "product", "t0": 6, "t1": 10,
+             "visual": {"mode": "KEN_BURNS"}},
+            {"id": "s3", "type": "product", "t0": 10, "t1": 14,
+             "visual": {"mode": "KEN_BURNS"}},
+            {"id": "s4", "type": "outro", "t0": 14, "t1": 16},
+        ]
+        result = validate_pacing(segments)
+        self.assertTrue(result["ok"])  # No long static — pacing OK
+        self.assertTrue(result["variety_warning"])  # But only 1 type
+
+    def test_pacing_no_variety_warning_with_mixed(self):
+        from rayvault.render_config_generate import validate_pacing
+        segments = [
+            {"id": "s0", "type": "intro", "t0": 0, "t1": 2},
+            {"id": "s1", "type": "product", "t0": 2, "t1": 6,
+             "visual": {"mode": "KEN_BURNS"}},
+            {"id": "s2", "type": "product", "t0": 6, "t1": 10,
+             "visual": {"mode": "BROLL_VIDEO"}},
+            {"id": "s3", "type": "outro", "t0": 10, "t1": 12},
+        ]
+        result = validate_pacing(segments)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["variety_warning"])
+
+    def test_pacing_in_render_config(self):
+        """Pacing block should appear in generated render config."""
+        from rayvault.render_config_generate import generate_render_config
+        tmp = tempfile.mkdtemp()
+        run_dir = Path(tmp) / "RUN_PACE"
+        run_dir.mkdir(parents=True)
+        (run_dir / "products").mkdir()
+        (run_dir / "01_script.txt").write_text("This is a test script for pacing.")
+        result = generate_render_config(run_dir)
+        self.assertIn("pacing", result["config"])
+        self.assertIn("ok", result["config"]["pacing"])
+        self.assertIn("pacing", result)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ============================================================================
+# Black frame detection tests
+# ============================================================================
+
+
+class TestBlackFrameDetection(unittest.TestCase):
+    """Tests for black frame / offline detection logic."""
+
+    def test_detect_missing_video(self):
+        from rayvault.davinci_assembler import detect_black_frames
+        result = detect_black_frames(Path("/nonexistent.mp4"))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("error"), "VIDEO_NOT_FOUND")
+
+    def test_sample_frame_red_ratio_nonexistent(self):
+        from rayvault.davinci_assembler import _sample_frame_red_ratio
+        ratio = _sample_frame_red_ratio(Path("/nonexistent.mp4"), 1.0)
+        self.assertIsNone(ratio)
+
+
+# ============================================================================
+# Disk space check tests
+# ============================================================================
+
+
+class TestDiskSpaceCheck(unittest.TestCase):
+    """Tests for disk space checking."""
+
+    def test_check_existing_dir(self):
+        from rayvault.davinci_assembler import check_disk_space
+        tmp = tempfile.mkdtemp()
+        result = check_disk_space(Path(tmp))
+        self.assertIn("export_free_gb", result)
+        self.assertIsNotNone(result["export_free_gb"])
+        self.assertGreater(result["export_free_gb"], 0)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_check_nonexistent_cache_dir(self):
+        from rayvault.davinci_assembler import check_disk_space
+        tmp = tempfile.mkdtemp()
+        result = check_disk_space(
+            Path(tmp), cache_dir=Path("/nonexistent/cache/dir"),
+        )
+        self.assertIsNone(result.get("cache_free_gb"))
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_gate_disk_space_passes(self):
+        from rayvault.davinci_assembler import gate_disk_space
+        tmp = tempfile.mkdtemp()
+        run_dir = Path(tmp) / "run"
+        (run_dir / "publish").mkdir(parents=True)
+        gate, metrics = gate_disk_space(run_dir, estimated_output_gb=0.001)
+        # Should pass unless system has <20GB free
+        self.assertIn("export_free_gb", metrics)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ============================================================================
+# Render states tests
+# ============================================================================
+
+
+class TestRenderStates(unittest.TestCase):
+    """Test manifest render state updates."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.manifest_path = Path(self.tmp) / "00_manifest.json"
+        with open(self.manifest_path, "w") as f:
+            json.dump({"run_id": "TEST"}, f)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_update_render_state(self):
+        from rayvault.davinci_assembler import _update_render_state, RS_STARTED
+        _update_render_state(self.manifest_path, RS_STARTED)
+        with open(self.manifest_path) as f:
+            m = json.load(f)
+        self.assertEqual(m["render"]["state"], "RENDER_STARTED")
+        self.assertIn("state_updated_at_utc", m["render"])
+
+    def test_update_render_state_with_extra(self):
+        from rayvault.davinci_assembler import _update_render_state, RS_STALLED
+        _update_render_state(self.manifest_path, RS_STALLED, {"retry": 1})
+        with open(self.manifest_path) as f:
+            m = json.load(f)
+        self.assertEqual(m["render"]["state"], "RENDER_STALLED")
+        self.assertEqual(m["render"]["retry"], 1)
+
+    def test_render_states_constants(self):
+        from rayvault.davinci_assembler import (
+            RS_STARTED, RS_STALLED, RS_RECOVERING,
+            RS_FAILED_HARD, RS_RENDERED_OK,
+        )
+        self.assertEqual(RS_STARTED, "RENDER_STARTED")
+        self.assertEqual(RS_STALLED, "RENDER_STALLED")
+        self.assertEqual(RS_RECOVERING, "RENDER_RECOVERING")
+        self.assertEqual(RS_FAILED_HARD, "RENDER_FAILED_HARD")
+        self.assertEqual(RS_RENDERED_OK, "RENDERED_OK")
+
+
+# ============================================================================
+# Caffeinate tests
+# ============================================================================
+
+
+class TestCaffeinate(unittest.TestCase):
+    """Test caffeinate integration."""
+
+    def test_start_and_stop(self):
+        from rayvault.davinci_assembler import _start_caffeinate, _stop_caffeinate
+        proc = _start_caffeinate()
+        if proc is not None:  # Only works on macOS
+            self.assertIsNotNone(proc.pid)
+            _stop_caffeinate(proc)
+            proc.wait(timeout=5)
+            self.assertIsNotNone(proc.returncode)
+
+    def test_stop_none_is_safe(self):
+        from rayvault.davinci_assembler import _stop_caffeinate
+        _stop_caffeinate(None)  # Should not raise
+
+
+# ============================================================================
+# Final Validator — pacing gate tests
+# ============================================================================
+
+
+class TestGatePacing(unittest.TestCase):
+    """Test the pacing gate in final_validator."""
+
+    def test_pass_when_pacing_ok(self):
+        from rayvault.final_validator import gate_pacing
+        tmp = tempfile.mkdtemp()
+        run_dir = Path(tmp)
+        rc = {
+            "segments": [],
+            "pacing": {"ok": True, "variety_warning": False,
+                       "errors": [], "warnings": []},
+        }
+        with open(run_dir / "05_render_config.json", "w") as f:
+            json.dump(rc, f)
+        g = gate_pacing(run_dir)
+        self.assertTrue(g.passed)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_fail_when_pacing_bad(self):
+        from rayvault.final_validator import gate_pacing
+        tmp = tempfile.mkdtemp()
+        run_dir = Path(tmp)
+        rc = {
+            "segments": [],
+            "pacing": {"ok": False, "variety_warning": True,
+                       "errors": ["LONG_STATIC: seg_001 is 25s"],
+                       "warnings": []},
+        }
+        with open(run_dir / "05_render_config.json", "w") as f:
+            json.dump(rc, f)
+        g = gate_pacing(run_dir)
+        self.assertFalse(g.passed)
+        self.assertIn("EDITORIAL_LOW_VARIETY", g.detail)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_skip_when_no_config(self):
+        from rayvault.final_validator import gate_pacing
+        tmp = tempfile.mkdtemp()
+        g = gate_pacing(Path(tmp))
+        self.assertTrue(g.passed)
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
