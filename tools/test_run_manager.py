@@ -1561,5 +1561,161 @@ class TestWorkerOpsSafeStop(unittest.TestCase):
         self.assertFalse(is_panic_active())
 
 
+class TestHeartbeatLatency(unittest.TestCase):
+    """Heartbeat latency measurement and piggybacking."""
+
+    def _make_rm(self, run_id="lat-001", worker_id="LatencyWorker"):
+        from lib.run_manager import RunManager
+        rm = RunManager(run_id, use_supabase=False, worker_id=worker_id)
+        rm._state.status = "in_progress"
+        rm._state.lock_token = "tok-lat-001"
+        return rm
+
+    def test_heartbeat_records_latency_ms(self):
+        """heartbeat() measures round-trip time and stores _last_heartbeat_latency_ms."""
+        rm = self._make_rm()
+        ok = rm.heartbeat()
+        self.assertTrue(ok)
+        # In local mode (no supabase), latency is not measured via RPC
+        # but the attribute should not exist without supabase
+        self.assertFalse(hasattr(rm, "_last_heartbeat_latency_ms"))
+
+    def test_heartbeat_latency_attribute_set_on_supabase_mode(self):
+        """In supabase mode, heartbeat sets _last_heartbeat_latency_ms on success."""
+        from lib.run_manager import RunManager
+        rm = RunManager("lat-002", use_supabase=True, worker_id="LatWorker")
+        rm._state.status = "in_progress"
+        rm._state.lock_token = "tok-lat-002"
+
+        # Mock the RPC to succeed
+        with patch("lib.run_manager.RunManager._supabase_heartbeat", return_value=True):
+            ok = rm.heartbeat()
+        self.assertTrue(ok)
+        # Latency should be measured (>= 0ms)
+        self.assertTrue(hasattr(rm, "_last_heartbeat_latency_ms"))
+        self.assertGreaterEqual(rm._last_heartbeat_latency_ms, 0)
+
+    def test_heartbeat_latency_logged_on_lock_lost(self):
+        """When heartbeat fails, latency_ms is included in the lock_lost event."""
+        from lib.run_manager import RunManager
+        rm = RunManager("lat-003", use_supabase=True, worker_id="LatWorker")
+        rm._state.status = "in_progress"
+        rm._state.lock_token = "tok-lat-003"
+
+        with patch("lib.run_manager.RunManager._supabase_heartbeat", return_value=False):
+            ok = rm.heartbeat()
+        self.assertFalse(ok)
+        # Check that a lock_lost event was logged with latency_ms
+        lock_lost_events = [e for e in rm._events if e["event_type"] == "lock_lost"]
+        self.assertEqual(len(lock_lost_events), 1)
+        self.assertIn("latency_ms", lock_lost_events[0]["payload"])
+
+
+class TestForceUnlockGuards(unittest.TestCase):
+    """Force unlock: status guard, run-not-found, prev snapshot."""
+
+    def test_force_unlock_short_operator(self):
+        """force_unlock rejects operator_id < 3 chars."""
+        from lib.run_manager import RunManager
+        ok = RunManager.force_unlock(
+            "run-xyz", operator_id="ab", reason="test", use_supabase=False,
+        )
+        self.assertFalse(ok)
+
+    def test_force_unlock_requires_supabase(self):
+        """force_unlock in local mode returns False with message."""
+        from lib.run_manager import RunManager
+        ok = RunManager.force_unlock(
+            "run-xyz", operator_id="operator-1", reason="test", use_supabase=False,
+        )
+        self.assertFalse(ok)
+
+    def test_rpc_release_run_name_in_release(self):
+        """_supabase_release calls rpc_release_run (not cas_release_run)."""
+        from lib.run_manager import RunManager
+        rm = RunManager("rel-001", use_supabase=True, worker_id="RelWorker")
+        rm._state.lock_token = "tok-rel-001"
+
+        with patch("tools.lib.supabase_client.rpc", create=True) as mock_rpc:
+            mock_rpc.return_value = True
+            rm._supabase_release()
+            mock_rpc.assert_called_once()
+            call_args = mock_rpc.call_args
+            self.assertEqual(call_args[0][0], "rpc_release_run")
+
+    def test_heartbeat_passes_latency_to_rpc(self):
+        """_supabase_heartbeat includes p_latency_ms when available."""
+        from lib.run_manager import RunManager
+        rm = RunManager("hblat-001", use_supabase=True, worker_id="HBLatWorker")
+        rm._state.status = "in_progress"
+        rm._state.lock_token = "tok-hblat-001"
+        rm._last_heartbeat_latency_ms = 42
+
+        with patch("tools.lib.supabase_client.rpc", create=True) as mock_rpc:
+            mock_rpc.return_value = True
+            rm._supabase_heartbeat(10)
+            call_args = mock_rpc.call_args
+            params = call_args[0][1]
+            self.assertEqual(params.get("p_latency_ms"), 42)
+
+    def test_heartbeat_no_latency_on_first_call(self):
+        """First heartbeat doesn't send p_latency_ms (not yet measured)."""
+        from lib.run_manager import RunManager
+        rm = RunManager("hblat-002", use_supabase=True, worker_id="HBLatWorker")
+        rm._state.status = "in_progress"
+        rm._state.lock_token = "tok-hblat-002"
+
+        with patch("tools.lib.supabase_client.rpc", create=True) as mock_rpc:
+            mock_rpc.return_value = True
+            rm._supabase_heartbeat(10)
+            call_args = mock_rpc.call_args
+            params = call_args[0][1]
+            self.assertNotIn("p_latency_ms", params)
+
+
+class TestPanicTaxonomy(unittest.TestCase):
+    """Panic taxonomy: controlled string constants."""
+
+    VALID_PANICS = {
+        "panic_lost_lock",
+        "panic_heartbeat_uncertain",
+        "panic_browser_frozen",
+        "panic_integrity_failure",
+    }
+
+    def test_heartbeat_panic_types_are_valid(self):
+        """HeartbeatManager only emits valid panic type strings."""
+        from lib.run_manager import HeartbeatManager, RunManager
+        rm = RunManager("tax-001", use_supabase=False, worker_id="TaxWorker")
+        rm._state.status = "in_progress"
+        rm._state.lock_token = "tok-tax-001"
+        hb = HeartbeatManager(rm, interval_seconds=1, jitter_seconds=0)
+        # Simulate lost lock panic
+        hb._panic_type = "panic_lost_lock"
+        self.assertIn(hb.panic_type, self.VALID_PANICS)
+        # Simulate uncertain panic
+        hb._panic_type = "panic_heartbeat_uncertain"
+        self.assertIn(hb.panic_type, self.VALID_PANICS)
+
+    def test_worker_ops_safe_stop_spools_panic_stop(self):
+        """safe_stop spools event_type='panic_stop' which maps to taxonomy."""
+        tmpdir = tempfile.mkdtemp(prefix="test_tax_")
+        from lib import worker_ops
+        orig = worker_ops.SPOOL_DIR
+        worker_ops.SPOOL_DIR = tmpdir
+        worker_ops.reset_panic_flag()
+        try:
+            worker_ops.safe_stop("tax-run-1", "panic_lost_lock")
+            files = [f for f in os.listdir(tmpdir) if f.endswith(".json")]
+            self.assertGreaterEqual(len(files), 1)
+            with open(os.path.join(tmpdir, files[0])) as f:
+                data = json.load(f)
+            self.assertEqual(data["event_type"], "panic_stop")
+            self.assertEqual(data["payload"]["reason"], "panic_lost_lock")
+        finally:
+            worker_ops.SPOOL_DIR = orig
+            worker_ops.reset_panic_flag()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

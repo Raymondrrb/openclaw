@@ -659,6 +659,7 @@ class RunManager:
         """Renew the lease for the current lock. Call every 2-3 minutes.
 
         Only succeeds if worker_id + lock_token match.
+        Measures round-trip latency and sends it to the RPC for dashboard alerting.
         Returns True if lease was renewed.
         """
         if not self._state.lock_token:
@@ -667,13 +668,20 @@ class RunManager:
         lease_minutes = self._clamp_lease(lease_minutes)
 
         if self._use_supabase:
+            t0 = time.monotonic()
             success = self._supabase_heartbeat(lease_minutes)
-            if not success:
+            latency_ms = int((time.monotonic() - t0) * 1000)
+
+            if success:
+                # Send latency on next heartbeat (piggyback)
+                self._last_heartbeat_latency_ms = latency_ms
+            else:
                 # Lock lost — log event for forensics
                 self._log_event("lock_lost", {
                     "worker_id": self._state.worker_id,
                     "run_id": self._state.run_id,
                     "lock_token": self._state.lock_token,
+                    "latency_ms": latency_ms,
                     "reason": "heartbeat rejected (token mismatch or status change)",
                 })
                 return False
@@ -926,15 +934,23 @@ class RunManager:
                 return False
 
     def _supabase_heartbeat(self, lease_minutes: int) -> bool:
-        """Renew lease via Supabase RPC (cas_heartbeat_run)."""
+        """Renew lease via Supabase RPC (cas_heartbeat_run).
+
+        Sends p_latency_ms from the previous heartbeat round-trip
+        (piggybacked — we can't measure our own response before sending).
+        """
+        latency = getattr(self, "_last_heartbeat_latency_ms", None)
         try:
             from tools.lib.supabase_client import rpc
-            result = rpc("cas_heartbeat_run", {
+            params = {
                 "p_run_id": self._state.run_id,
                 "p_worker_id": self._state.worker_id,
                 "p_lock_token": self._state.lock_token,
                 "p_lease_minutes": lease_minutes,
-            })
+            }
+            if latency is not None:
+                params["p_latency_ms"] = latency
+            result = rpc("cas_heartbeat_run", params)
             return bool(result)
         except Exception:
             try:
@@ -957,10 +973,10 @@ class RunManager:
                 return False
 
     def _supabase_release(self) -> None:
-        """Release lock via Supabase RPC (cas_release_run)."""
+        """Release lock via Supabase RPC (rpc_release_run)."""
         try:
             from tools.lib.supabase_client import rpc
-            rpc("cas_release_run", {
+            rpc("rpc_release_run", {
                 "p_run_id": self._state.run_id,
                 "p_worker_id": self._state.worker_id,
                 "p_lock_token": self._state.lock_token,
