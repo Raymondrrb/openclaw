@@ -210,7 +210,7 @@ def _infer_run_and_segment(p: Path) -> Tuple[str, str]:
 def _is_under_root(p: Path, root: Path) -> bool:
     """Check if resolved path is under root directory."""
     try:
-        p.resolve().relative_to(root.resolve())
+        p.expanduser().resolve().relative_to(root.expanduser().resolve())
         return True
     except ValueError:
         return False
@@ -248,9 +248,11 @@ class RefreshStats:
     skipped_dedup: int = 0
     skipped_no_sha8: int = 0
     skipped_outside_root: int = 0
+    skipped_not_file: int = 0
     skipped_unstable: int = 0
     enriched: int = 0
     failed_probe: int = 0
+    retried_probe: int = 0
     item_error: int = 0
     sha8_mismatch: int = 0
 
@@ -330,9 +332,12 @@ def refresh_index(
                 "skipped_dedup": stats.skipped_dedup,
                 "skipped_no_sha8": stats.skipped_no_sha8,
                 "skipped_outside_root": stats.skipped_outside_root,
+                "skipped_not_file": stats.skipped_not_file,
                 "skipped_unstable": stats.skipped_unstable,
+                "retried_probe": stats.retried_probe,
                 "item_error": stats.item_error,
                 "sha8_mismatch": stats.sha8_mismatch,
+                "total_items": len(items),
                 "did_change": did_change,
                 "force": force,
                 "allow_missing_sha8": allow_missing_sha8,
@@ -359,6 +364,7 @@ def _process_one_file(
     """
     # Guard: skip non-files
     if not fp.is_file():
+        stats.skipped_not_file += 1
         return
 
     # Guard: reject files outside state root
@@ -408,9 +414,13 @@ def _process_one_file(
         stats.skipped_unstable += 1
         return
 
-    # Probe
+    # Probe (with 1 retry + backoff for transient failures: moov atom, IO race)
     stats.probed += 1
     meta = _ffprobe_json(fp)
+    if not meta:
+        time.sleep(1.5)
+        meta = _ffprobe_json(fp)
+        stats.retried_probe += 1
     if not meta:
         stats.failed_probe += 1
         return
@@ -495,9 +505,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  Skipped (no sha8): {stats.skipped_no_sha8}")
     if stats.skipped_outside_root > 0:
         print(f"  Skipped (outside root): {stats.skipped_outside_root}")
+    if stats.skipped_not_file > 0:
+        print(f"  Skipped (not file): {stats.skipped_not_file}")
     if stats.skipped_unstable > 0:
         print(f"  Skipped (unstable): {stats.skipped_unstable}")
     print(f"  Enriched: {stats.enriched}")
+    if stats.retried_probe > 0:
+        print(f"  Retried probe: {stats.retried_probe}")
     if stats.item_error > 0:
         print(f"  Item errors: {stats.item_error}")
     if stats.failed_probe > 0:

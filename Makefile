@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary
 
 # --- Morning routine ---
 doctor:
@@ -146,6 +146,27 @@ baptism-full:
 # --- Status (quick health check: preflight + QC in one shot) ---
 status:
 	python3 scripts/doctor_report.py --state-dir state --preflight --qc --no-bitrate-gate
+
+# --- Telegram notifications ---
+MSG ?= RayVault status update
+
+notify:
+	@./scripts/telegram_send.sh "$(MSG)"
+
+status-notify:
+	@python3 scripts/doctor_report.py --state-dir state --preflight --qc --no-bitrate-gate --no-color --out state/status_summary.txt; \
+	code=$$?; \
+	if [ $$code -eq 2 ]; then \
+		./scripts/telegram_send.sh "CRITICAL: status check failed (see summary)"; \
+	elif [ $$code -eq 3 ]; then \
+		./scripts/telegram_send.sh "WARNING: low bitrate videos detected"; \
+	else \
+		./scripts/telegram_send.sh "OK: status check passed"; \
+	fi
+
+notify-summary:
+	@MSG="$$(cat state/status_summary.txt 2>/dev/null || echo 'No summary available')"; \
+	./scripts/telegram_send.sh "$$MSG"
 
 # --- Maintenance (safe + apply) ---
 # SAFE MODE: refresh + dry-run reports. Does not remove or modify anything.

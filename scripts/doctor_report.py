@@ -522,19 +522,33 @@ def build_refresh_banner(state_dir: Path, last_n: int = 3) -> str:
         failed = h.get("failed_probe", 0)
         errors = h.get("item_error", 0)
         unstable = h.get("skipped_unstable", 0)
+        retried = h.get("retried_probe", 0)
+        no_sha8 = h.get("skipped_no_sha8", 0)
+        out_root = h.get("skipped_outside_root", 0)
+        total_items = h.get("total_items", "?")
         did_change = h.get("did_change", False)
 
         status = "OK"
         if errors > 0 or failed > 0 or unstable > 0:
             status = "WARN"
+        if unstable >= 5:
+            status = "WARN"
         if errors > 3 or failed > 10:
             status = "CRIT"
 
         change_flag = "changed" if did_change else "no-change"
+        extra = ""
+        if retried > 0:
+            extra += f" retry={retried}"
+        if no_sha8 > 0:
+            extra += f" no_sha8={no_sha8}"
+        if out_root > 0:
+            extra += f" out_root={out_root}"
         lines.append(
             f"  {i}. {at} | {status} | "
             f"enriched={enriched} probed={probed} failed={failed} "
-            f"err={errors} unstable={unstable} [{change_flag}]"
+            f"err={errors} unstable={unstable}{extra} "
+            f"items={total_items} [{change_flag}]"
         )
 
     return "\n".join(lines)
@@ -682,100 +696,129 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Print preflight summary (credits + readiness)",
     )
 
+    # Output control
+    parser.add_argument(
+        "--no-color", action="store_true",
+        help="Disable ANSI colors (auto-detected from TTY when not set)",
+    )
+    parser.add_argument(
+        "--out", default="",
+        help="Duplicate report output to file (plain text, no color)",
+    )
+
     args = parser.parse_args(argv)
+
+    # Auto-detect: disable color when not a TTY (e.g. Telegram, pipe, cron)
+    if args.no_color or args.out or not sys.stdout.isatty():
+        os.environ["NO_COLOR"] = "1"
     state_dir = Path(args.state_dir)
+    return _run_report(args, state_dir)
 
-    summaries, details = compute_report(
-        state_dir=state_dir,
-        bitrate_min_bps=args.bitrate_min_bps,
-        enable_bitrate_gate=not args.no_bitrate_gate,
-    )
 
-    # Financial advisor from env
-    credit_price_usd = _get_env_float("DZINE_CREDIT_PRICE_USD")
-    usd_brl = _get_env_float("USD_BRL")
-    financial = compute_financial(
-        details["total_credits_needed"],
-        details["total_credits_saved"],
-        credit_price_usd,
-        usd_brl,
-    )
+def _run_report(args, state_dir: Path) -> int:
+    """Execute report logic. Separated to support --out redirect."""
+    from contextlib import redirect_stdout
 
-    # --qc implies --timeline --include-probe
-    if args.qc:
-        args.timeline = True
-        args.include_probe = True
+    def _do_report() -> int:
+        summaries, details = compute_report(
+            state_dir=state_dir,
+            bitrate_min_bps=args.bitrate_min_bps,
+            enable_bitrate_gate=not args.no_bitrate_gate,
+        )
 
-    print_report(summaries, details, financial)
+        # Financial advisor from env
+        credit_price_usd = _get_env_float("DZINE_CREDIT_PRICE_USD")
+        usd_brl = _get_env_float("USD_BRL")
+        financial = compute_financial(
+            details["total_credits_needed"],
+            details["total_credits_saved"],
+            credit_price_usd,
+            usd_brl,
+        )
 
-    # Orphan search
-    if args.orphans:
-        orphans = find_orphan_videos(state_dir)
-        print(f"\nOrphan videos (in /final, not in index): {len(orphans)}")
-        for o in orphans:
-            print(f"  - {o}")
-        if args.move_orphans_to and orphans:
-            quarantine = Path(args.move_orphans_to)
-            quarantine.mkdir(parents=True, exist_ok=True)
+        # --qc implies --timeline --include-probe
+        if args.qc:
+            args.timeline = True
+            args.include_probe = True
+
+        print_report(summaries, details, financial)
+
+        # Orphan search
+        if args.orphans:
+            orphans = find_orphan_videos(state_dir)
+            print(f"\nOrphan videos (in /final, not in index): {len(orphans)}")
             for o in orphans:
-                dest = quarantine / o.name
-                shutil.move(str(o), str(dest))
-                print(f"  Moved → {dest}")
+                print(f"  - {o}")
+            if args.move_orphans_to and orphans:
+                quarantine = Path(args.move_orphans_to)
+                quarantine.mkdir(parents=True, exist_ok=True)
+                for o in orphans:
+                    dest = quarantine / o.name
+                    shutil.move(str(o), str(dest))
+                    print(f"  Moved -> {dest}")
 
-    # Timeline CSV
-    if args.timeline:
-        all_refs = details.get("all_refs", [])
-        # Infer run_id from refs (use first found, or "unknown")
-        run_ids = {r.run_id for r in all_refs if r.run_id != "UNKNOWN"}
-        timeline_run_id = sorted(run_ids)[0] if run_ids else "unknown"
+        # Timeline CSV
+        if args.timeline:
+            all_refs = details.get("all_refs", [])
+            run_ids = {r.run_id for r in all_refs if r.run_id != "UNKNOWN"}
+            timeline_run_id = sorted(run_ids)[0] if run_ids else "unknown"
 
-        rows = build_timeline(all_refs, include_probe=args.include_probe)
-        csv_str = timeline_to_csv(rows)
+            rows = build_timeline(all_refs, include_probe=args.include_probe)
+            csv_str = timeline_to_csv(rows)
 
-        if args.timeline_out:
-            # Explicit path overrides auto-save
-            Path(args.timeline_out).write_text(csv_str, encoding="utf-8")
-            print(f"\nTimeline written to {args.timeline_out}")
-        else:
-            # Auto-save with timestamp + _latest symlink
-            ts_path, latest_path = save_timeline_csv(
-                csv_str, timeline_run_id, Path(args.timeline_dir),
-            )
-            print(f"\nTimeline saved: {ts_path}")
-            print(f"Timeline latest: {latest_path}")
-            print(f"\n--- Timeline CSV ({len(rows)} segments) ---")
-            print(csv_str)
+            if args.timeline_out:
+                Path(args.timeline_out).write_text(csv_str, encoding="utf-8")
+                print(f"\nTimeline written to {args.timeline_out}")
+            else:
+                ts_path, latest_path = save_timeline_csv(
+                    csv_str, timeline_run_id, Path(args.timeline_dir),
+                )
+                print(f"\nTimeline saved: {ts_path}")
+                print(f"Timeline latest: {latest_path}")
+                print(f"\n--- Timeline CSV ({len(rows)} segments) ---")
+                print(csv_str)
 
-        # QC banner (when probe data available)
-        if args.include_probe:
-            banner = build_qc_banner(rows)
-            print(f"\n{banner}")
+            if args.include_probe:
+                banner = build_qc_banner(rows)
+                print(f"\n{banner}")
 
-    # Preflight summary
-    if args.preflight:
-        needed = details["total_credits_needed"]
-        saved = details["total_credits_saved"]
-        missing = details["total_missing_videos"]
-        print("\n--- Preflight Summary ---")
-        print(f"Credits needed: {needed}")
-        print(f"Credits saved (cache): {saved}")
-        print(f"Missing videos: {missing}")
-        if financial.get("projected_cost_usd") is not None:
-            print(f"Projected cost: US$ {financial['projected_cost_usd']:.2f}")
-        if missing == 0:
-            print("Status: ALL READY — no Dzine credits needed")
-        else:
-            print(f"Status: {missing} segments need rendering")
+        # Preflight summary
+        if args.preflight:
+            needed = details["total_credits_needed"]
+            saved = details["total_credits_saved"]
+            missing = details["total_missing_videos"]
+            print("\n--- Preflight Summary ---")
+            print(f"Credits needed: {needed}")
+            print(f"Credits saved (cache): {saved}")
+            print(f"Missing videos: {missing}")
+            if financial.get("projected_cost_usd") is not None:
+                print(f"Projected cost: US$ {financial['projected_cost_usd']:.2f}")
+            if missing == 0:
+                print("Status: ALL READY — no Dzine credits needed")
+            else:
+                print(f"Status: {missing} segments need rendering")
 
-        # Refresh history banner (last 3 events)
-        refresh_banner = build_refresh_banner(state_dir)
-        print(f"\n{refresh_banner}")
+            refresh_banner = build_refresh_banner(state_dir)
+            print(f"\n{refresh_banner}")
 
-    if args.fail_if_needed_gt >= 0 and details["total_credits_needed"] > args.fail_if_needed_gt:
-        return 2
-    if args.fail_if_low_bitrate and details["total_low_bitrate"] > 0:
-        return 3
-    return 0
+        if args.fail_if_needed_gt >= 0 and details["total_credits_needed"] > args.fail_if_needed_gt:
+            return 2
+        if args.fail_if_low_bitrate and details["total_low_bitrate"] > 0:
+            return 3
+        return 0
+
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            rc = _do_report()
+        text = buf.getvalue()
+        out_path.write_text(text, encoding="utf-8")
+        print(text, end="")
+        return rc
+    else:
+        return _do_report()
 
 
 if __name__ == "__main__":

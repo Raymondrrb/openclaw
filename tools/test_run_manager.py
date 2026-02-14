@@ -8439,7 +8439,9 @@ class TestRefreshHistoryCounters(unittest.TestCase):
             # All forensic counters must be present
             for key in ["at", "scanned", "checked", "enriched", "failed_probe",
                         "skipped_unchanged", "skipped_dedup", "skipped_no_sha8",
-                        "skipped_outside_root", "sha8_mismatch", "force",
+                        "skipped_outside_root", "skipped_not_file", "retried_probe",
+                        "skipped_unstable", "item_error", "sha8_mismatch",
+                        "total_items", "did_change", "force",
                         "allow_missing_sha8"]:
                 self.assertIn(key, entry, f"Missing key: {key}")
 
@@ -8773,6 +8775,251 @@ class TestStateRootPersistence(unittest.TestCase):
             self.assertIn("skipped_unstable", entry)
             self.assertIn("item_error", entry)
             self.assertIn("did_change", entry)
+
+
+# ---------------------------------------------------------------------------
+# Probe retry + skipped_not_file + total_items + expanduser
+# ---------------------------------------------------------------------------
+
+class TestProbeRetry(unittest.TestCase):
+    """Test probe retry with backoff for transient failures."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_retry_on_first_probe_fail(self):
+        """First probe fails, retry succeeds — retried_probe incremented."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            good_meta = {
+                "format": {"duration": "5.0", "bit_rate": "2000000"},
+                "streams": [{"codec_type": "video", "codec_name": "h264"}],
+            }
+            # First call returns None, second returns good meta
+            with mock.patch("video_index_refresh._ffprobe_json",
+                          side_effect=[None, good_meta]):
+                with mock.patch("video_index_refresh.time.sleep"):
+                    stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
+            self.assertEqual(stats.retried_probe, 1)
+            self.assertEqual(stats.enriched, 1)
+            self.assertEqual(stats.failed_probe, 0)
+
+    def test_retry_both_fail(self):
+        """Both probe attempts fail — failed_probe incremented."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            with mock.patch("video_index_refresh._ffprobe_json", return_value=None):
+                with mock.patch("video_index_refresh.time.sleep"):
+                    stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
+            self.assertEqual(stats.retried_probe, 1)
+            self.assertEqual(stats.failed_probe, 1)
+            self.assertEqual(stats.enriched, 0)
+
+    def test_no_retry_when_first_succeeds(self):
+        """First probe succeeds — no retry, retried_probe stays 0."""
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            good_meta = {
+                "format": {"duration": "5.0", "bit_rate": "2000000"},
+                "streams": [{"codec_type": "video", "codec_name": "h264"}],
+            }
+            with mock.patch("video_index_refresh._ffprobe_json", return_value=good_meta):
+                stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
+            self.assertEqual(stats.retried_probe, 0)
+            self.assertEqual(stats.enriched, 1)
+
+
+class TestTotalItemsInHistory(unittest.TestCase):
+    """Test that total_items appears in refresh_history entries."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_total_items_in_history(self):
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            vid = Path(td) / "video"
+            vid.mkdir()
+            final = vid / "final"
+            final.mkdir()
+            idx_path = vid / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            good_meta = {
+                "format": {"duration": "5.0", "bit_rate": "2000000"},
+                "streams": [{"codec_type": "video", "codec_name": "h264"}],
+            }
+            with mock.patch("video_index_refresh._ffprobe_json", return_value=good_meta):
+                refresh_index(final_dir=final, index_path=idx_path, force=True)
+            idx = _load_index(idx_path)
+            entry = idx["meta_info"]["refresh_history"][-1]
+            self.assertIn("total_items", entry)
+            self.assertEqual(entry["total_items"], 1)
+
+
+class TestExpandUserInRoot(unittest.TestCase):
+    """Test that _is_under_root uses expanduser()."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_expanduser_called(self):
+        self._add_scripts_path()
+        from video_index_refresh import _is_under_root
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            child = root / "sub" / "file.txt"
+            child.parent.mkdir(parents=True)
+            child.touch()
+            self.assertTrue(_is_under_root(child, root))
+            # Path outside root
+            other = Path(td).parent / "other"
+            other.mkdir(exist_ok=True)
+            f = other / "f.txt"
+            f.touch()
+            self.assertFalse(_is_under_root(f, root))
+
+
+class TestRefreshBannerCounters(unittest.TestCase):
+    """Test that refresh banner shows extended counters."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_banner_shows_retry_and_items(self):
+        self._add_scripts_path()
+        from doctor_report import build_refresh_banner, _read_json
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td)
+            vid = state / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({
+                "items": {},
+                "meta_info": {
+                    "refresh_history": [{
+                        "at": "2025-01-01T00:00:00",
+                        "enriched": 3,
+                        "probed": 5,
+                        "failed_probe": 0,
+                        "item_error": 0,
+                        "skipped_unstable": 0,
+                        "retried_probe": 2,
+                        "skipped_no_sha8": 1,
+                        "skipped_outside_root": 0,
+                        "total_items": 10,
+                        "did_change": True,
+                    }],
+                },
+            }))
+            banner = build_refresh_banner(state)
+            self.assertIn("retry=2", banner)
+            self.assertIn("no_sha8=1", banner)
+            self.assertIn("items=10", banner)
+
+    def test_banner_unstable_high_is_warn(self):
+        """skipped_unstable >= 5 should trigger WARN status."""
+        self._add_scripts_path()
+        from doctor_report import build_refresh_banner
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td)
+            vid = state / "video"
+            vid.mkdir()
+            idx_path = vid / "index.json"
+            idx_path.write_text(json.dumps({
+                "items": {},
+                "meta_info": {
+                    "refresh_history": [{
+                        "at": "2025-01-01T00:00:00",
+                        "enriched": 3,
+                        "probed": 5,
+                        "failed_probe": 0,
+                        "item_error": 0,
+                        "skipped_unstable": 6,
+                        "did_change": True,
+                    }],
+                },
+            }))
+            banner = build_refresh_banner(state)
+            self.assertIn("WARN", banner)
+
+    def test_no_color_env(self):
+        """--no-color sets NO_COLOR env var."""
+        self._add_scripts_path()
+        from doctor_report import main as dr_main
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td)
+            jobs = state / "jobs"
+            jobs.mkdir(parents=True)
+            vid = state / "video"
+            vid.mkdir()
+            idx = vid / "index.json"
+            idx.write_text('{"items":{}}')
+            with mock.patch.dict(os.environ, {}, clear=False):
+                # Should not fail
+                with mock.patch("sys.stdout.isatty", return_value=False):
+                    rc = dr_main(["--state-dir", str(state), "--no-color"])
+                self.assertEqual(os.environ.get("NO_COLOR"), "1")
+
+    def test_out_flag_writes_file(self):
+        """--out <path> duplicates report output to file."""
+        self._add_scripts_path()
+        from doctor_report import main as dr_main
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td)
+            jobs = state / "jobs"
+            jobs.mkdir(parents=True)
+            vid = state / "video"
+            vid.mkdir()
+            idx = vid / "index.json"
+            idx.write_text('{"items":{}}')
+            out_file = Path(td) / "report_out.txt"
+            with mock.patch("sys.stdout.isatty", return_value=False):
+                rc = dr_main(["--state-dir", str(state), "--out", str(out_file)])
+            self.assertEqual(rc, 0)
+            self.assertTrue(out_file.exists())
+            content = out_file.read_text()
+            self.assertIn("Doctor Report", content)
 
 
 if __name__ == "__main__":
