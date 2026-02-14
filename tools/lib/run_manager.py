@@ -44,6 +44,12 @@ from typing import Any, Callable
 from tools.lib.common import now_iso
 
 
+def _future_iso(minutes: int) -> str:
+    """Return ISO timestamp N minutes in the future."""
+    from datetime import datetime, timezone, timedelta
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+
+
 # ---------------------------------------------------------------------------
 # Valid state transitions
 # ---------------------------------------------------------------------------
@@ -64,6 +70,13 @@ BLOCKED_STATES: set[str] = {"waiting_approval", "aborted", "failed", "done"}
 # States where the run is active and may proceed
 ACTIVE_STATES: set[str] = {"pending", "in_progress", "approved"}
 
+# Worker lease defaults
+DEFAULT_LEASE_MINUTES = 10
+MIN_LEASE_MINUTES = 1
+MAX_LEASE_MINUTES = 30
+MIN_WORKER_ID_LEN = 3
+CLAIMABLE_STATUSES = {"running", "in_progress", "approved"}
+
 
 # ---------------------------------------------------------------------------
 # Run state container
@@ -79,6 +92,10 @@ class RunState:
     policy_version: str = ""
     ranking_model: str = ""
     refetch_attempted: bool = False
+    # Worker lease fields
+    worker_id: str = ""
+    lock_token: str = ""
+    lock_expires_at: str = ""  # ISO timestamp
 
     @property
     def is_active(self) -> bool:
@@ -87,6 +104,19 @@ class RunState:
     @property
     def is_blocked(self) -> bool:
         return self.status in BLOCKED_STATES
+
+    @property
+    def is_locked(self) -> bool:
+        """True if there's an active (non-expired) lock."""
+        if not self.lock_token or not self.lock_expires_at:
+            return False
+        try:
+            from datetime import datetime, timezone
+            import time as _time
+            ts = datetime.fromisoformat(self.lock_expires_at).timestamp()
+            return ts > _time.time()
+        except (ValueError, OSError):
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -111,11 +141,13 @@ class RunManager:
         policy_version: str = "v1.0",
         ranking_model: str = "",
         use_supabase: bool = True,
+        worker_id: str = "",
     ):
         self._state = RunState(
             run_id=run_id,
             policy_version=policy_version,
             ranking_model=ranking_model,
+            worker_id=worker_id,
         )
         self._use_supabase = use_supabase
         self._events: list[dict] = []  # local event log
@@ -245,19 +277,28 @@ class RunManager:
         return self._transition("in_progress", reason="run started")
 
     def complete(self, *, final_evidence: dict | None = None) -> bool:
-        """Mark run as done. Records final snapshot."""
+        """Mark run as done. Records final snapshot. Auto-releases worker lock."""
         self._update_snapshot(phase="final", extra={"final_evidence": final_evidence or {}})
-        return self._transition("done", reason="all stages complete")
+        ok = self._transition("done", reason="all stages complete")
+        if ok:
+            self.release_lock()
+        return ok
 
     def fail(self, error: str) -> bool:
-        """Mark run as failed."""
+        """Mark run as failed. Auto-releases worker lock."""
         self._update_snapshot(phase="failed", extra={"error": error})
-        return self._transition("failed", reason=error)
+        ok = self._transition("failed", reason=error)
+        if ok:
+            self.release_lock()
+        return ok
 
     def abort(self, reason: str = "user abort") -> bool:
-        """Mark run as aborted."""
+        """Mark run as aborted. Auto-releases worker lock."""
         self._update_snapshot(phase="aborted", extra={"abort_reason": reason})
-        return self._transition("aborted", reason=reason)
+        ok = self._transition("aborted", reason=reason)
+        if ok:
+            self.release_lock()
+        return ok
 
     # -------------------------------------------------------------------
     # Status check — MUST call before expensive operations
@@ -314,6 +355,249 @@ class RunManager:
                 f"Run {self._state.run_id} is not active "
                 f"(status={self._state.status}). Cannot proceed."
             )
+
+    # -------------------------------------------------------------------
+    # Worker lease — prevents 2+ workers from processing the same run
+    # -------------------------------------------------------------------
+
+    @staticmethod
+    def _clamp_lease(minutes: int) -> int:
+        """Clamp lease to [1, 30] minutes. Matches DB-side guardrail."""
+        return max(MIN_LEASE_MINUTES, min(minutes, MAX_LEASE_MINUTES))
+
+    def claim(
+        self,
+        *,
+        lease_minutes: int = DEFAULT_LEASE_MINUTES,
+        existing_token: str = "",
+    ) -> bool:
+        """Claim this run for the current worker. CAS-safe.
+
+        Only succeeds if:
+        - Run is in a claimable status (running/in_progress/approved)
+        - No active lock exists (lock_expires_at is null or expired)
+        - Or this worker already owns the lock (idempotent reclaim)
+
+        Args:
+            lease_minutes: How long the lease lasts before expiring (clamped 1-30).
+            existing_token: If resuming from a crash, pass the previously
+                persisted lock_token to reclaim without waiting for expiry.
+
+        Returns True if claim succeeded.
+        """
+        if not self._state.worker_id:
+            print("[run_manager] Cannot claim: worker_id not set", file=sys.stderr)
+            return False
+
+        if len(self._state.worker_id.strip()) < MIN_WORKER_ID_LEN:
+            print(
+                f"[run_manager] Cannot claim: worker_id too short "
+                f"(min {MIN_WORKER_ID_LEN} chars)",
+                file=sys.stderr,
+            )
+            return False
+
+        lease_minutes = self._clamp_lease(lease_minutes)
+
+        # Reclaim: if we have a valid existing token, try heartbeat first
+        if existing_token:
+            self._state.lock_token = existing_token
+            if self.heartbeat(lease_minutes=lease_minutes):
+                self._state.lock_expires_at = _future_iso(lease_minutes)
+                self._log_event("worker_reclaim", {
+                    "worker_id": self._state.worker_id,
+                    "lock_token": existing_token,
+                    "lease_minutes": lease_minutes,
+                })
+                return True
+            # Heartbeat failed — token stale, fall through to fresh claim
+
+        token = str(uuid.uuid4())
+
+        if self._use_supabase:
+            success = self._supabase_claim(token, lease_minutes)
+            if not success:
+                self._log_event("claim_failed", {
+                    "worker_id": self._state.worker_id,
+                    "run_id": self._state.run_id,
+                    "reason": "CAS claim rejected (already locked by another worker)",
+                })
+                return False
+        else:
+            # Local mode: check state directly
+            if self._state.status not in CLAIMABLE_STATUSES:
+                return False
+            # Check if locked by a different worker with active lease
+            if (self._state.is_locked
+                    and self._state.lock_token
+                    and self._state.worker_id != self._state.worker_id):
+                return False
+
+        self._state.lock_token = token
+        self._state.lock_expires_at = _future_iso(lease_minutes)
+
+        self._log_event("worker_claim", {
+            "worker_id": self._state.worker_id,
+            "lock_token": token,
+            "lease_minutes": lease_minutes,
+        })
+
+        return True
+
+    def heartbeat(self, *, lease_minutes: int = DEFAULT_LEASE_MINUTES) -> bool:
+        """Renew the lease for the current lock. Call every 2-3 minutes.
+
+        Only succeeds if worker_id + lock_token match.
+        Returns True if lease was renewed.
+        """
+        if not self._state.lock_token:
+            return False
+
+        lease_minutes = self._clamp_lease(lease_minutes)
+
+        if self._use_supabase:
+            success = self._supabase_heartbeat(lease_minutes)
+            if not success:
+                # Lock lost — log event for forensics
+                self._log_event("lock_lost", {
+                    "worker_id": self._state.worker_id,
+                    "run_id": self._state.run_id,
+                    "lock_token": self._state.lock_token,
+                    "reason": "heartbeat rejected (token mismatch or status change)",
+                })
+                return False
+
+        self._state.lock_expires_at = _future_iso(lease_minutes)
+        return True
+
+    def release_lock(self) -> bool:
+        """Release the worker lock. Called on done/aborted/failed.
+
+        Only the holder (matching worker_id + lock_token) can release.
+        """
+        if not self._state.lock_token:
+            return True  # Nothing to release
+
+        if self._use_supabase:
+            self._supabase_release()
+
+        self._state.lock_token = ""
+        self._state.lock_expires_at = ""
+
+        self._log_event("worker_release", {
+            "worker_id": self._state.worker_id,
+        })
+        return True
+
+    @property
+    def is_claimed(self) -> bool:
+        """True if this run has an active claim by any worker."""
+        return self._state.is_locked
+
+    @property
+    def lock_token(self) -> str:
+        return self._state.lock_token
+
+    # --- Supabase lease helpers ---
+
+    def _supabase_claim(self, token: str, lease_minutes: int) -> bool:
+        """CAS claim via Supabase RPC (cas_claim_run)."""
+        try:
+            from tools.lib.supabase_client import rpc
+            result = rpc("cas_claim_run", {
+                "p_run_id": self._state.run_id,
+                "p_worker_id": self._state.worker_id,
+                "p_lock_token": token,
+                "p_lease_minutes": lease_minutes,
+            })
+            return bool(result)
+        except Exception as exc:
+            # Fallback: try direct update with CAS conditions
+            try:
+                from tools.lib.supabase_client import _postgrest, _enabled
+                if not _enabled():
+                    return True
+                _postgrest(
+                    "PATCH",
+                    "pipeline_runs",
+                    {
+                        "worker_id": self._state.worker_id,
+                        "locked_at": now_iso(),
+                        "lock_expires_at": _future_iso(lease_minutes),
+                        "lock_token": token,
+                    },
+                    params={
+                        "id": f"eq.{self._state.run_id}",
+                        "or": "(lock_expires_at.is.null,lock_expires_at.lt.now())",
+                    },
+                )
+                return True
+            except Exception as exc2:
+                print(f"[run_manager] Claim failed: {exc2}", file=sys.stderr)
+                return False
+
+    def _supabase_heartbeat(self, lease_minutes: int) -> bool:
+        """Renew lease via Supabase RPC (cas_heartbeat_run)."""
+        try:
+            from tools.lib.supabase_client import rpc
+            result = rpc("cas_heartbeat_run", {
+                "p_run_id": self._state.run_id,
+                "p_worker_id": self._state.worker_id,
+                "p_lock_token": self._state.lock_token,
+                "p_lease_minutes": lease_minutes,
+            })
+            return bool(result)
+        except Exception:
+            try:
+                from tools.lib.supabase_client import _postgrest, _enabled
+                if not _enabled():
+                    return True
+                _postgrest(
+                    "PATCH",
+                    "pipeline_runs",
+                    {"lock_expires_at": _future_iso(lease_minutes)},
+                    params={
+                        "id": f"eq.{self._state.run_id}",
+                        "worker_id": f"eq.{self._state.worker_id}",
+                        "lock_token": f"eq.{self._state.lock_token}",
+                    },
+                )
+                return True
+            except Exception as exc2:
+                print(f"[run_manager] Heartbeat failed: {exc2}", file=sys.stderr)
+                return False
+
+    def _supabase_release(self) -> None:
+        """Release lock via Supabase RPC (cas_release_run)."""
+        try:
+            from tools.lib.supabase_client import rpc
+            rpc("cas_release_run", {
+                "p_run_id": self._state.run_id,
+                "p_worker_id": self._state.worker_id,
+                "p_lock_token": self._state.lock_token,
+            })
+        except Exception:
+            try:
+                from tools.lib.supabase_client import _postgrest, _enabled
+                if not _enabled():
+                    return
+                _postgrest(
+                    "PATCH",
+                    "pipeline_runs",
+                    {
+                        "worker_id": "",
+                        "locked_at": None,
+                        "lock_expires_at": None,
+                        "lock_token": "",
+                    },
+                    params={
+                        "id": f"eq.{self._state.run_id}",
+                        "worker_id": f"eq.{self._state.worker_id}",
+                        "lock_token": f"eq.{self._state.lock_token}",
+                    },
+                )
+            except Exception as exc:
+                print(f"[run_manager] Release failed: {exc}", file=sys.stderr)
 
     # -------------------------------------------------------------------
     # Circuit breaker integration

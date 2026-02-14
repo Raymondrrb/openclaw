@@ -64,6 +64,11 @@ from lib.run_manager import (
     VALID_TRANSITIONS,
     BLOCKED_STATES,
     ACTIVE_STATES,
+    CLAIMABLE_STATUSES,
+    DEFAULT_LEASE_MINUTES,
+    MIN_LEASE_MINUTES,
+    MAX_LEASE_MINUTES,
+    MIN_WORKER_ID_LEN,
 )
 from lib.telegram_gate import (
     parse_callback_data,
@@ -672,6 +677,167 @@ class TestRunManagerSnapshotIntegrity(unittest.TestCase):
         events = rm.get_events()
         types = [e["event_type"] for e in events]
         self.assertIn("status_change", types)
+
+
+# =========================================================================
+# Worker Lease Tests
+# =========================================================================
+
+class TestWorkerLeaseClaim(unittest.TestCase):
+    """Worker claim/heartbeat/release lifecycle."""
+
+    def test_claim_success(self):
+        """Worker can claim a run in claimable status."""
+        rm = RunManager("lease-run-1", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        self.assertTrue(rm.claim())
+        self.assertTrue(rm.is_claimed)
+        self.assertNotEqual(rm.lock_token, "")
+
+    def test_claim_without_worker_id_fails(self):
+        """Cannot claim without a worker_id."""
+        rm = RunManager("lease-run-2", use_supabase=False)
+        rm.start()
+        self.assertFalse(rm.claim())
+
+    def test_claim_pending_fails(self):
+        """Cannot claim a run in pending status."""
+        rm = RunManager("lease-run-3", use_supabase=False, worker_id="RayMac-01")
+        # Don't start — status is still 'pending'
+        self.assertFalse(rm.claim())
+
+    def test_claim_done_fails(self):
+        """Cannot claim a run that's already done."""
+        rm = RunManager("lease-run-4", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        rm.complete()
+        self.assertFalse(rm.claim())
+
+    def test_heartbeat_renews_lease(self):
+        """Heartbeat extends the lock_expires_at."""
+        rm = RunManager("lease-run-5", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        rm.claim(lease_minutes=1)
+        old_expires = rm._state.lock_expires_at
+        # Small sleep to get different timestamp
+        rm.heartbeat(lease_minutes=10)
+        new_expires = rm._state.lock_expires_at
+        self.assertNotEqual(old_expires, new_expires)
+
+    def test_heartbeat_without_claim_fails(self):
+        """Heartbeat without an active claim returns False."""
+        rm = RunManager("lease-run-6", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        self.assertFalse(rm.heartbeat())
+
+    def test_release_clears_lock(self):
+        """Release clears the lock token and expires_at."""
+        rm = RunManager("lease-run-7", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        rm.claim()
+        self.assertTrue(rm.is_claimed)
+        rm.release_lock()
+        self.assertEqual(rm._state.lock_token, "")
+        self.assertEqual(rm._state.lock_expires_at, "")
+
+    def test_complete_auto_releases(self):
+        """Completing a run automatically releases the lock."""
+        rm = RunManager("lease-run-8", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        rm.claim()
+        self.assertTrue(rm.is_claimed)
+        rm.complete()
+        self.assertEqual(rm._state.lock_token, "")
+
+    def test_fail_auto_releases(self):
+        """Failing a run automatically releases the lock."""
+        rm = RunManager("lease-run-9", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        rm.claim()
+        rm.fail("something broke")
+        self.assertEqual(rm._state.lock_token, "")
+
+    def test_abort_auto_releases(self):
+        """Aborting a run automatically releases the lock."""
+        rm = RunManager("lease-run-10", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        rm.claim()
+        rm.abort("cancelled")
+        self.assertEqual(rm._state.lock_token, "")
+
+    def test_reclaim_with_existing_token(self):
+        """Worker can reclaim using a previously persisted token."""
+        rm = RunManager("lease-run-11", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        rm.claim()
+        saved_token = rm.lock_token
+
+        # Simulate restart: new RunManager with same worker_id
+        rm2 = RunManager("lease-run-11", use_supabase=False, worker_id="RayMac-01")
+        rm2._state.status = "in_progress"
+        rm2._state.lock_token = saved_token
+        rm2._state.lock_expires_at = rm._state.lock_expires_at
+        # Reclaim using saved token
+        ok = rm2.claim(existing_token=saved_token)
+        self.assertTrue(ok)
+
+    def test_events_logged_on_claim(self):
+        """Claim and release events are logged."""
+        rm = RunManager("lease-run-12", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        rm.claim()
+        rm.release_lock()
+
+        event_types = [e["event_type"] for e in rm.get_events()]
+        self.assertIn("worker_claim", event_types)
+        self.assertIn("worker_release", event_types)
+
+    # --- SRE guardrail tests ---
+
+    def test_short_worker_id_rejected(self):
+        """Worker_id shorter than 3 chars is rejected."""
+        rm = RunManager("lease-guard-1", use_supabase=False, worker_id="AB")
+        rm.start()
+        self.assertFalse(rm.claim())
+
+    def test_whitespace_worker_id_rejected(self):
+        """Worker_id that's all whitespace is rejected."""
+        rm = RunManager("lease-guard-2", use_supabase=False, worker_id="   ")
+        rm.start()
+        self.assertFalse(rm.claim())
+
+    def test_lease_clamp_low(self):
+        """Lease below 1 minute is clamped to 1."""
+        rm = RunManager("lease-guard-3", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        rm.claim(lease_minutes=0)
+        # Should succeed (clamped to 1) and the lock should be valid
+        self.assertTrue(rm.is_claimed)
+
+    def test_lease_clamp_high(self):
+        """Lease above 30 minutes is clamped to 30."""
+        rm = RunManager("lease-guard-4", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        rm.claim(lease_minutes=999)
+        self.assertTrue(rm.is_claimed)
+        # Verify the clamped expiry is ~30 min, not ~999 min
+        from datetime import datetime, timezone
+        expires = datetime.fromisoformat(rm._state.lock_expires_at)
+        now = datetime.now(timezone.utc)
+        delta = (expires - now).total_seconds() / 60.0
+        self.assertLessEqual(delta, 31)  # within 31 min (1 min buffer)
+
+    def test_heartbeat_lease_clamped(self):
+        """Heartbeat also clamps lease values."""
+        rm = RunManager("lease-guard-5", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        rm.claim()
+        rm.heartbeat(lease_minutes=200)
+        from datetime import datetime, timezone
+        expires = datetime.fromisoformat(rm._state.lock_expires_at)
+        now = datetime.now(timezone.utc)
+        delta = (expires - now).total_seconds() / 60.0
+        self.assertLessEqual(delta, 31)
 
 
 # =========================================================================

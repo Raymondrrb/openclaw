@@ -272,10 +272,79 @@ python3 tools/rayvault_doctor.py --json
 
 > If you need to open the Supabase dashboard more than 2x/day, there's too much complexity. `rayvault doctor` + `rayvault stats` should cover 95% of monitoring.
 
+## Worker Lease Lock (009)
+
+After running `008_forensic_hardening.sql`, apply `009_worker_lease_lock.sql` for multi-worker support:
+
+### Why
+
+Prevents 2+ workers from claiming the same run. Uses a **lease pattern** (lock with expiration) so crashed workers don't hold runs forever.
+
+### Columns Added to `pipeline_runs`
+
+| Column | Type | Purpose |
+|--------|------|---------|
+| `worker_id` | text | Which worker holds the lock ("RayMac-01") |
+| `locked_at` | timestamptz | When the lock was acquired |
+| `lock_expires_at` | timestamptz | When the lease expires (heartbeat renews) |
+| `lock_token` | text | UUID per claim session (prevents wrong-worker unlock) |
+
+### RPC Functions
+
+| Function | Purpose |
+|----------|---------|
+| `cas_claim_run(run_id, worker_id, lock_token, lease_minutes)` | Atomic CAS claim (only if free/expired or same worker) |
+| `cas_heartbeat_run(run_id, worker_id, lock_token, lease_minutes)` | Renew lease (includes waiting_approval) |
+| `cas_release_run(run_id, worker_id, lock_token)` | Release lock (terminal states) |
+| `force_release_expired_run(run_id)` | Dashboard force-release (only if expired) |
+
+### Worker Protocol
+
+```python
+from tools.lib.run_manager import RunManager
+
+rm = RunManager(run_id="your-uuid", worker_id="RayMac-01", use_supabase=True)
+rm.start()
+
+# 1. Claim the run (CAS-safe)
+if not rm.claim(lease_minutes=10):
+    print("Already claimed by another worker")
+    return
+
+# 2. Heartbeat every 2-3 minutes while processing
+rm.heartbeat()  # renews lease for another 10 min
+
+# 3. If resuming from crash, use persisted token
+rm.claim(existing_token="saved-uuid-from-disk")
+
+# 4. Auto-release on complete/fail/abort
+rm.complete()  # lock released automatically
+```
+
+### SRE Guardrails
+
+| Guardrail | DB-side | Python-side |
+|-----------|---------|-------------|
+| `SET search_path = public` | All 4 RPCs | N/A |
+| Lease clamp 1-30 min | `GREATEST(1, LEAST(p_lease_minutes, 30))` | `_clamp_lease()` |
+| Worker_id min 3 chars | `RAISE EXCEPTION` if `< 3` | Returns `False` |
+| Token renewal on reclaim | `CASE WHEN worker_id = p_worker_id THEN lock_token ELSE p_lock_token END` | Heartbeat-first reclaim |
+| Lock lost logging | N/A | `lock_lost` event on heartbeat failure |
+| Partial indexes | `idx_runs_lock_expiry`, `idx_runs_unclaimed` | N/A |
+
+### Safety Rules
+
+1. **Heartbeat < lease/3** — heartbeat every 2-3 min with 10 min lease
+2. **Auto-release on terminal** — `complete()`, `fail()`, `abort()` release the lock
+3. **Reclaim support** — persist `lock_token` to disk; on restart, pass to `claim(existing_token=...)`
+4. **Force release** — dashboard can only force-release if `lock_expires_at < now()`
+5. **Heartbeat during gate** — worker keeps heartbeating during `waiting_approval` to retain ownership
+6. **Lock lost panic** — on `heartbeat() → False`, worker stops immediately and logs `lock_lost` event
+
 ## Testing
 
 ```bash
-# Run all 65 tests
+# Run all 91 tests
 python3 tools/test_run_manager.py
 
 # Tests cover:
@@ -284,11 +353,13 @@ python3 tools/test_run_manager.py
 # - Conflict detection (4 tests)
 # - SKU fingerprint (4 tests)
 # - Refresh logic (5 tests)
+# - Hedge annotations (9 tests)
 # - Run manager state machine (7 tests)
 # - Status checks (3 tests)
 # - CAS approval flow (5 tests)
 # - CB integration (3 tests)
 # - Snapshot integrity (2 tests)
+# - Worker lease + SRE guardrails (17 tests)
 # - Telegram callback parsing (5 tests)
 # - Telegram gate handler (5 tests)
 # - Context builder (8 tests)
