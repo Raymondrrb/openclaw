@@ -15,20 +15,36 @@
 make worker WID=Mac-Ray-01
 ```
 
-## 3) Ritual de 5 minutos (Primeiro voo / pos-deploy)
-1. Rodar diagnostico:
+## 3) Batismo (Primeiro voo / pos-deploy)
+
+Duas camadas — A valida sem queimar creditos, B valida recuperacao real.
+
+### Batismo A (dry — sem worker)
+Valida infra, index, skip, orfaos. Nao inicia worker.
 ```bash
-make doctor
+make baptism
 ```
 
-2. Abrir cockpit (SQL view) e observar 5 min:
-   - `incidents_last_24h`
-   - `incidents_critical_open`
+### Batismo B (full — pos-kill)
+Rode depois de ter feito um ciclo completo com kill test:
+1. `make worker` — deixe processar
+2. `kill -TERM <PID>` — testa shutdown gracioso
+3. `make worker` — retoma e completa
+4. `kill -9 <PID>` — testa crash
+5. `make worker` — retoma via checkpoint
+6. Valida:
+```bash
+make baptism-full CONFIRM=YES
+```
 
-3. Batismo de fogo:
-   - SIGTERM (shutdown limpo): `make stop`
-   - KILL -9 (infra/stale): `kill -9 <PID>`
-   - Confirmar que `is_stale = true` aparece quando apropriado.
+O script verifica: checkpoints, spool, PID stale, index, skip, orfaos.
+Relatorio salvo em `state/baptism/`.
+
+### Ritual rapido (5 min)
+```bash
+make doctor          # diagnostico geral
+make status          # preflight + QC
+```
 
 ## 4) Quando der alerta no Telegram
 - **STALE WORKER**
@@ -131,7 +147,37 @@ If there's a conflict between Tier 4/5 sources on **critical claims** (price, vo
 
 Never override without reading the evidence diff in the dashboard.
 
-## 13) Common Commands
+## 13) Disaster Recovery
+
+### Cenario 1 — Worker morreu (kill -9) no meio
+```bash
+make status                    # confere missing e warnings
+make maintenance               # refresh index + detectar orfaos (dry-run)
+make worker                    # deve SKIP nos prontos e completar
+```
+
+### Cenario 2 — Index parece estranho (paths invalidos / meta ausente)
+```bash
+python3 scripts/video_index_refresh.py --state-dir state --force
+# se tiver legado sem sha8 no nome:
+python3 scripts/video_index_refresh.py --state-dir state --force --allow-missing-sha8
+make status
+```
+
+### Cenario 3 — Muitos probe_failed seguidos
+```bash
+ffprobe -version               # verifica se ffprobe esta acessivel
+make maintenance               # re-probe (se for corrida de IO, resolve)
+# se persistir: o problema e export/codec do Dzine, nao bug do RayVault
+```
+
+### Checklist pos-recovery
+```bash
+make baptism                   # Level A: valida tudo sem worker
+make baptism-full CONFIRM=YES  # Level B: valida checkpoints + spool + PID
+```
+
+## 14) Common Commands
 
 ```bash
 # Start worker (continuous)
@@ -157,6 +203,16 @@ make preflight
 
 # Force unlock (emergency only)
 python3 tools/rayvault_unlock.py --run <uuid> --operator ray --force --reason "stuck"
+
+# Quick status (preflight + QC)
+make status
+
+# Baptism (pre-first-run validation)
+make baptism
+make baptism-full CONFIRM=YES
+
+# Maintenance (safe: refresh + dry-run cleanup + report)
+make maintenance
 
 # Run tests
 make test

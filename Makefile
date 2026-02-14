@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status maintenance maintenance-apply
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply
 
 # --- Morning routine ---
 doctor:
@@ -129,6 +129,19 @@ clean-orphans-apply:
 # --- QC (timeline + drift banner) ---
 qc:
 	python3 scripts/doctor_report.py --state-dir state --qc
+
+# --- Baptism (structured validation before first real run) ---
+# Level A: dry — preflight + index + skip + orphans (no worker needed)
+baptism:
+	python3 scripts/baptism.py --state-dir state --level A
+
+# Level B: full — Level A + checkpoint recovery + spool + PID (after kill test)
+baptism-full:
+	@if [ "$(CONFIRM)" != "YES" ]; then \
+		echo "Level B validates post-kill recovery. Use: make baptism-full CONFIRM=YES"; \
+		exit 2; \
+	fi
+	python3 scripts/baptism.py --state-dir state --level B CONFIRM=YES
 
 # --- Status (quick health check: preflight + QC in one shot) ---
 status:

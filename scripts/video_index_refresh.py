@@ -265,19 +265,29 @@ def refresh_index(
             "path": str(fp),
             "run_id": existing.get("run_id") or run_id,
             "segment_id": existing.get("segment_id") or segment_id,
-            "duration": probe_data["duration"],
-            "bitrate_bps": probe_data["bitrate_bps"],
-            "video_codec": probe_data["video_codec"],
-            "audio_codec": probe_data["audio_codec"],
             "file_bytes": current_size,
             "file_mtime_ns": current_mtime_ns,
             "refreshed_at": datetime.now(timezone.utc).isoformat(),
         })
+        # Defensive update: only overwrite probe fields if new value is non-empty.
+        # Prevents a degraded ffprobe from wiping good metadata.
+        if probe_data["duration"] > 0:
+            entry["duration"] = probe_data["duration"]
+        if probe_data["bitrate_bps"] > 0:
+            entry["bitrate_bps"] = probe_data["bitrate_bps"]
+        if probe_data["video_codec"]:
+            entry["video_codec"] = probe_data["video_codec"]
+        if probe_data["audio_codec"]:
+            entry["audio_codec"] = probe_data["audio_codec"]
 
         items[key] = entry
         stats.enriched += 1
 
-    if not dry_run and stats.enriched > 0:
+    # Persist when any work was done (not just enriched > 0).
+    # This ensures forensic telemetry is recorded even when all files
+    # were skipped or failed — exactly when you need the "why".
+    did_work = stats.probed > 0 or stats.enriched > 0 or force
+    if not dry_run and did_work:
         # Append to refresh_history ring buffer (last 10)
         meta_info = idx.get("meta_info", {})
         history = meta_info.get("refresh_history", [])
@@ -285,6 +295,11 @@ def refresh_index(
             "at": datetime.now(timezone.utc).isoformat(),
             "scanned": stats.scanned,
             "enriched": stats.enriched,
+            "failed_probe": stats.failed_probe,
+            "skipped_unchanged": stats.skipped_mtime,
+            "skipped_dedup": stats.skipped_dedup,
+            "skipped_no_sha8": stats.skipped_no_sha8,
+            "sha8_mismatch": stats.sha8_mismatch,
             "force": force,
             "allow_missing_sha8": allow_missing_sha8,
         })

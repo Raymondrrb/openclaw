@@ -8148,5 +8148,300 @@ class TestQCBannerV2(unittest.TestCase):
         self.assertIn("s1", banner)
 
 
+# ---------------------------------------------------------------------------
+# Baptism script tests
+# ---------------------------------------------------------------------------
+
+class TestBaptism(unittest.TestCase):
+    """Tests for scripts/baptism.py checks and report."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_check_ffprobe(self):
+        self._add_scripts_path()
+        from baptism import check_ffprobe
+        result = check_ffprobe()
+        # ffprobe may or may not be installed in test env
+        self.assertIsInstance(result.passed, bool)
+        self.assertEqual(result.name, "ffprobe")
+
+    def test_check_state_dirs_missing(self):
+        self._add_scripts_path()
+        from baptism import check_state_dirs
+        with tempfile.TemporaryDirectory() as td:
+            result = check_state_dirs(Path(td) / "nonexistent")
+            self.assertFalse(result.passed)
+            self.assertIn("Missing", result.detail)
+
+    def test_check_state_dirs_present(self):
+        self._add_scripts_path()
+        from baptism import check_state_dirs
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td) / "state"
+            (sd / "video" / "final").mkdir(parents=True)
+            result = check_state_dirs(sd)
+            self.assertTrue(result.passed)
+
+    def test_check_index_health_no_index(self):
+        self._add_scripts_path()
+        from baptism import check_index_health
+        with tempfile.TemporaryDirectory() as td:
+            result = check_index_health(Path(td))
+            self.assertTrue(result.passed)
+            self.assertIn("No index", result.detail)
+
+    def test_check_index_health_valid(self):
+        self._add_scripts_path()
+        from baptism import check_index_health
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td)
+            vid = sd / "video"
+            vid.mkdir(parents=True)
+            idx = vid / "index.json"
+            final = vid / "final"
+            final.mkdir()
+            v = final / "test.mp4"
+            v.write_bytes(b"x" * 100)
+            idx.write_text(json.dumps({
+                "version": "1.0",
+                "items": {"abc": {"path": str(v), "file_mtime_ns": 123}},
+            }))
+            result = check_index_health(sd)
+            self.assertTrue(result.passed)
+            self.assertIn("1 entries", result.detail)
+
+    def test_check_index_health_missing_files(self):
+        self._add_scripts_path()
+        from baptism import check_index_health
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td)
+            vid = sd / "video"
+            vid.mkdir(parents=True)
+            idx = vid / "index.json"
+            idx.write_text(json.dumps({
+                "version": "1.0",
+                "items": {"abc": {"path": "/nonexistent/video.mp4"}},
+            }))
+            result = check_index_health(sd)
+            self.assertFalse(result.passed)
+            self.assertIn("missing files", result.detail)
+
+    def test_check_orphans_clean(self):
+        self._add_scripts_path()
+        from baptism import check_orphans
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td)
+            final = sd / "video" / "final"
+            final.mkdir(parents=True)
+            v = final / "test.mp4"
+            v.write_bytes(b"x" * 100)
+            idx = sd / "video" / "index.json"
+            idx.write_text(json.dumps({
+                "version": "1.0",
+                "items": {"abc": {"path": str(v)}},
+            }))
+            result = check_orphans(sd)
+            self.assertTrue(result.passed)
+
+    def test_check_orphans_found(self):
+        self._add_scripts_path()
+        from baptism import check_orphans
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td)
+            final = sd / "video" / "final"
+            final.mkdir(parents=True)
+            v = final / "orphan.mp4"
+            v.write_bytes(b"x" * 100)
+            idx = sd / "video" / "index.json"
+            idx.write_text(json.dumps({"version": "1.0", "items": {}}))
+            result = check_orphans(sd)
+            self.assertFalse(result.passed)
+            self.assertIn("orphan", result.detail)
+
+    def test_check_skip_behavior(self):
+        self._add_scripts_path()
+        from baptism import check_skip_behavior
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td)
+            final = sd / "video" / "final"
+            final.mkdir(parents=True)
+            v = final / "test.mp4"
+            v.write_bytes(b"x" * 100)
+            idx = sd / "video" / "index.json"
+            idx.write_text(json.dumps({
+                "version": "1.0",
+                "items": {"abc": {"path": str(v)}},
+            }))
+            result = check_skip_behavior(sd)
+            self.assertTrue(result.passed)
+            self.assertIn("SKIP_DZINE will work", result.detail)
+
+    def test_check_worker_pid_no_file(self):
+        self._add_scripts_path()
+        from baptism import check_worker_pid
+        # PID file may or may not exist in test env, just verify it returns a result
+        result = check_worker_pid()
+        self.assertIsInstance(result.passed, bool)
+        self.assertEqual(result.name, "worker_pid")
+
+    def test_run_baptism_level_a(self):
+        self._add_scripts_path()
+        from baptism import run_baptism
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td) / "state"
+            (sd / "video" / "final").mkdir(parents=True)
+            report = run_baptism(state_dir=sd, level="A")
+            self.assertGreater(len(report.checks), 5)
+            # Level A should not include checkpoint/spool/pid checks
+            check_names = [c.name for c in report.checks]
+            self.assertNotIn("checkpoints", check_names)
+            self.assertNotIn("spool", check_names)
+
+    def test_run_baptism_level_b(self):
+        self._add_scripts_path()
+        from baptism import run_baptism
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td) / "state"
+            (sd / "video" / "final").mkdir(parents=True)
+            report = run_baptism(state_dir=sd, level="B")
+            check_names = [c.name for c in report.checks]
+            self.assertIn("checkpoints", check_names)
+            self.assertIn("spool", check_names)
+            self.assertIn("worker_pid", check_names)
+
+    def test_save_report(self):
+        self._add_scripts_path()
+        from baptism import run_baptism, save_report
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td) / "state"
+            (sd / "video" / "final").mkdir(parents=True)
+            report = run_baptism(state_dir=sd, level="A")
+            path = save_report(report, sd)
+            self.assertTrue(path.exists())
+            data = json.loads(path.read_text())
+            self.assertIn("summary", data)
+            self.assertIn("checks", data)
+            self.assertEqual(data["level"], "A")
+
+    def test_baptism_report_all_passed(self):
+        self._add_scripts_path()
+        from baptism import BaptismReport, CheckResult
+        report = BaptismReport(level="A", timestamp="test")
+        report.add(CheckResult("a", True, "ok"))
+        report.add(CheckResult("b", True, "ok"))
+        self.assertTrue(report.all_passed)
+        self.assertEqual(report.passed, 2)
+        self.assertEqual(report.failed, 0)
+
+    def test_baptism_report_with_failure(self):
+        self._add_scripts_path()
+        from baptism import BaptismReport, CheckResult
+        report = BaptismReport(level="A", timestamp="test")
+        report.add(CheckResult("a", True, "ok"))
+        report.add(CheckResult("b", False, "bad", "fail"))
+        report.add(CheckResult("c", False, "meh", "warn"))
+        self.assertFalse(report.all_passed)
+        self.assertEqual(report.passed, 1)
+        self.assertEqual(report.failed, 1)
+        self.assertEqual(report.warnings, 1)
+
+    def test_cli_level_a(self):
+        self._add_scripts_path()
+        from baptism import main
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td) / "state"
+            (sd / "video" / "final").mkdir(parents=True)
+            rc = main(["--state-dir", str(sd), "--level", "A"])
+            self.assertIn(rc, (0, 1))  # depends on env (ffprobe, etc.)
+
+    def test_cli_level_b_no_confirm(self):
+        self._add_scripts_path()
+        from baptism import main
+        with tempfile.TemporaryDirectory() as td:
+            rc = main(["--state-dir", td, "--level", "B"])
+            self.assertEqual(rc, 2)
+
+    def test_cli_level_b_with_confirm(self):
+        self._add_scripts_path()
+        from baptism import main
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td) / "state"
+            (sd / "video" / "final").mkdir(parents=True)
+            rc = main(["--state-dir", str(sd), "--level", "B", "CONFIRM=YES"])
+            self.assertIn(rc, (0, 1))
+
+    def test_check_refresh_history_empty(self):
+        self._add_scripts_path()
+        from baptism import check_refresh_history
+        with tempfile.TemporaryDirectory() as td:
+            result = check_refresh_history(Path(td))
+            self.assertTrue(result.passed)
+
+    def test_check_refresh_history_with_data(self):
+        self._add_scripts_path()
+        from baptism import check_refresh_history
+        with tempfile.TemporaryDirectory() as td:
+            sd = Path(td)
+            vid = sd / "video"
+            vid.mkdir(parents=True)
+            idx = vid / "index.json"
+            idx.write_text(json.dumps({
+                "version": "1.0",
+                "items": {},
+                "meta_info": {
+                    "refresh_history": [
+                        {"at": "2025-01-01T00:00:00Z", "enriched": 5, "failed_probe": 0},
+                    ],
+                },
+            }))
+            result = check_refresh_history(sd)
+            self.assertTrue(result.passed)
+            self.assertIn("1 refreshes", result.detail)
+            self.assertIn("enriched=5", result.detail)
+
+
+# ---------------------------------------------------------------------------
+# Refresh history forensic counters
+# ---------------------------------------------------------------------------
+
+class TestRefreshHistoryCounters(unittest.TestCase):
+    """Test that refresh_history entries contain forensic counters."""
+
+    def _add_scripts_path(self):
+        p = str(Path(__file__).resolve().parent.parent / "scripts")
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+    def test_history_has_all_counters(self):
+        self._add_scripts_path()
+        from video_index_refresh import refresh_index, _load_index, _atomic_write_json
+        import unittest.mock as mock
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "final"
+            final.mkdir()
+            idx_path = Path(td) / "index.json"
+            v = final / "V_R1_s1_aabbccdd.mp4"
+            v.write_bytes(b"x" * 500)
+            fake_meta = {
+                "format": {"duration": "5.0", "bit_rate": "2000000"},
+                "streams": [{"codec_type": "video", "codec_name": "h264"}],
+            }
+            with mock.patch("video_index_refresh._ffprobe_json", return_value=fake_meta):
+                stats = refresh_index(final_dir=final, index_path=idx_path, force=True)
+            self.assertEqual(stats.enriched, 1)
+            idx = _load_index(idx_path)
+            history = idx.get("meta_info", {}).get("refresh_history", [])
+            self.assertEqual(len(history), 1)
+            entry = history[0]
+            # All forensic counters must be present
+            for key in ["at", "scanned", "enriched", "failed_probe",
+                        "skipped_unchanged", "skipped_dedup", "skipped_no_sha8",
+                        "sha8_mismatch", "force", "allow_missing_sha8"]:
+                self.assertIn(key, entry, f"Missing key: {key}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
