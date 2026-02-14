@@ -1,4 +1,4 @@
-.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism prompts prompts-verify run-handoff run-status products-fetch products-fetch-dry render-config claims final-validate final-validate-no-video upload-receipt upload-verify verify verify-manual verify-uploads verify-uploads-manual run-cleanup run-cleanup-apply
+.PHONY: doctor health replay check-contract worker worker-test stop stop_force test stress smoke clean logs quarantine purge_spool cockpit report timeline orphans preflight clean-hard clean-zombies clean-zombies-delete index-refresh index-refresh-force clean-orphans clean-orphans-apply qc status baptism baptism-full maintenance maintenance-apply notify status-notify notify-summary index-repair index-repair-apply index-resurrect index-resurrect-apply keyframe-score keyframe-summary keyframe-baptism prompts prompts-verify run-handoff run-status products-fetch products-fetch-dry render-config claims final-validate final-validate-no-video upload-receipt upload-verify verify verify-manual verify-uploads verify-uploads-manual run-cleanup run-cleanup-apply cache-prune cache-prune-apply cache-prune-aggressive amazon-quarantine amazon-quarantine-clear
 
 # --- Morning routine ---
 doctor:
@@ -296,6 +296,36 @@ run-cleanup-apply:
 		exit 2; \
 	fi
 	python3 -m rayvault.cleanup_run --run-dir state/runs/$(RUN_ID) --apply --delete-final-video
+
+# --- Cache prune (SSD hygiene) ---
+cache-prune:
+	python3 -m rayvault.cache_prune --root state/library/products
+
+cache-prune-apply:
+	@if [ "$(CONFIRM)" != "YES" ]; then \
+		echo "Use: make cache-prune-apply CONFIRM=YES"; \
+		exit 2; \
+	fi
+	python3 -m rayvault.cache_prune --root state/library/products --apply
+
+cache-prune-aggressive:
+	@if [ "$(CONFIRM)" != "YES" ]; then \
+		echo "Use: make cache-prune-aggressive CONFIRM=YES"; \
+		exit 2; \
+	fi
+	python3 -m rayvault.cache_prune --root state/library/products --max-unused-days 14 --apply
+
+# --- Amazon quarantine status ---
+amazon-quarantine:
+	@if [ -f state/amazon_quarantine.lock ]; then \
+		python3 -c "import json; d=json.load(open('state/amazon_quarantine.lock')); print(f\"QUARANTINE ACTIVE | code={d.get('code')} | until={d.get('cooldown_until_utc')} | note={d.get('note')}\")"; \
+	else \
+		echo "No quarantine active."; \
+	fi
+
+amazon-quarantine-clear:
+	rm -f state/amazon_quarantine.lock
+	@echo "Amazon quarantine cleared."
 
 # --- Maintenance (safe + apply) ---
 # SAFE MODE: refresh + dry-run reports. Does not remove or modify anything.

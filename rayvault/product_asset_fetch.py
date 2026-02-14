@@ -86,12 +86,21 @@ def safe_ext_from_url(url: str, default: str = ".jpg") -> str:
         return default
 
 
+ALLOWED_IMAGE_CONTENT_TYPES = frozenset({
+    "image/jpeg", "image/png", "image/webp", "image/jpg",
+})
+
+MIN_IMAGE_BYTES = 2048
+
+
 def http_get_bytes(
     url: str, timeout: int = 20, user_agent: str = "Mozilla/5.0"
-) -> bytes:
+) -> Tuple[bytes, str]:
+    """Download URL, return (data, content_type)."""
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+        ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        return resp.read(), ctype
 
 
 def download_with_retries(
@@ -108,8 +117,11 @@ def download_with_retries(
     last_err = ""
     for i in range(retries):
         try:
-            data = http_get_bytes(url)
-            if not data or len(data) < 2048:
+            data, ctype = http_get_bytes(url)
+            # Reject non-image content types (HTML error pages, redirects)
+            if ctype and ctype not in ALLOWED_IMAGE_CONTENT_TYPES:
+                return False, f"bad_content_type_{ctype}"
+            if not data or len(data) < MIN_IMAGE_BYTES:
                 last_err = (
                     f"too_small_or_empty ({len(data) if data else 0} bytes)"
                 )
@@ -198,6 +210,29 @@ class FetchResult:
     amazon_blocks: int = 0
     survival_mode: bool = False
     notes: List[str] = field(default_factory=list)
+
+
+def compute_stability_score(
+    survival_mode: bool,
+    amazon_blocks: int,
+    cache_misses: int,
+    total_products: int,
+    missing_images: int,
+) -> int:
+    """Compute product stability score (0-100).
+
+    Penalties:
+      -20: survival mode active
+      -30: any amazon blocks
+      -10 per product missing images (max total)
+    """
+    score = 100
+    if survival_mode:
+        score -= 20
+    if amazon_blocks > 0:
+        score -= 30
+    score -= missing_images * 10
+    return max(0, min(100, score))
 
 
 def _build_product_meta(it: Dict[str, Any], rank: int) -> Dict[str, Any]:
@@ -483,6 +518,28 @@ def run_product_fetch(
             "ttl_images_hours": round(cache.policy.ttl_images_sec / 3600, 1),
             "library_dir": str(library_dir),
         }
+        # Stability score + episode truth tier
+        missing_images = sum(
+            1 for p in products_summary if p.get("truth_source") == "NONE"
+        )
+        stab_score = compute_stability_score(
+            survival_mode=survival_mode,
+            amazon_blocks=amazon_blocks,
+            cache_misses=cache_misses,
+            total_products=len(products_summary),
+            missing_images=missing_images,
+        )
+        manifest["products"]["stability_score_products"] = stab_score
+
+        # Episode truth tier: GREEN (all fresh), AMBER (survival used), RED (blocks)
+        if amazon_blocks > 0 or missing_images >= 2:
+            episode_tier = "RED"
+        elif survival_mode or cache_misses >= 3:
+            episode_tier = "AMBER"
+        else:
+            episode_tier = "GREEN"
+        manifest["products"]["episode_truth_tier"] = episode_tier
+
         # Stability flags
         stability_notes = []
         if survival_mode:

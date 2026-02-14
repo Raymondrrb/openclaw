@@ -14068,5 +14068,73 @@ class TestRenderConfigLibraryBroll(unittest.TestCase):
         self.assertEqual(product_segs[0]["visual"]["reason"], "library_approved_broll")
 
 
+class TestStabilityScore(unittest.TestCase):
+    """Tests for stability score computation and episode truth tier."""
+
+    def test_perfect_score(self):
+        from rayvault.product_asset_fetch import compute_stability_score
+        score = compute_stability_score(
+            survival_mode=False, amazon_blocks=0, cache_misses=0,
+            total_products=5, missing_images=0,
+        )
+        self.assertEqual(score, 100)
+
+    def test_survival_mode_penalty(self):
+        from rayvault.product_asset_fetch import compute_stability_score
+        score = compute_stability_score(
+            survival_mode=True, amazon_blocks=0, cache_misses=0,
+            total_products=5, missing_images=0,
+        )
+        self.assertEqual(score, 80)
+
+    def test_amazon_blocks_penalty(self):
+        from rayvault.product_asset_fetch import compute_stability_score
+        score = compute_stability_score(
+            survival_mode=False, amazon_blocks=2, cache_misses=0,
+            total_products=5, missing_images=0,
+        )
+        self.assertEqual(score, 70)
+
+    def test_missing_images_penalty(self):
+        from rayvault.product_asset_fetch import compute_stability_score
+        score = compute_stability_score(
+            survival_mode=False, amazon_blocks=0, cache_misses=0,
+            total_products=5, missing_images=3,
+        )
+        self.assertEqual(score, 70)
+
+    def test_combined_penalties(self):
+        from rayvault.product_asset_fetch import compute_stability_score
+        score = compute_stability_score(
+            survival_mode=True, amazon_blocks=1, cache_misses=5,
+            total_products=5, missing_images=2,
+        )
+        # -20 (survival) -30 (blocks) -20 (2 missing) = 30
+        self.assertEqual(score, 30)
+
+    def test_floor_at_zero(self):
+        from rayvault.product_asset_fetch import compute_stability_score
+        score = compute_stability_score(
+            survival_mode=True, amazon_blocks=5, cache_misses=5,
+            total_products=5, missing_images=5,
+        )
+        self.assertEqual(score, 0)
+
+
+class TestContentTypeValidation(unittest.TestCase):
+    """Tests for Content-Type validation in downloads."""
+
+    def test_allowed_content_types(self):
+        from rayvault.product_asset_fetch import ALLOWED_IMAGE_CONTENT_TYPES
+        self.assertIn("image/jpeg", ALLOWED_IMAGE_CONTENT_TYPES)
+        self.assertIn("image/png", ALLOWED_IMAGE_CONTENT_TYPES)
+        self.assertIn("image/webp", ALLOWED_IMAGE_CONTENT_TYPES)
+
+    def test_html_not_allowed(self):
+        from rayvault.product_asset_fetch import ALLOWED_IMAGE_CONTENT_TYPES
+        self.assertNotIn("text/html", ALLOWED_IMAGE_CONTENT_TYPES)
+        self.assertNotIn("application/json", ALLOWED_IMAGE_CONTENT_TYPES)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
