@@ -1804,5 +1804,344 @@ class TestClaimNextRecoveryLocal(unittest.TestCase):
         self.assertTrue(rm._state.lock_token)  # should have a token
 
 
+# ==========================================================================
+# Config module tests
+# ==========================================================================
+
+class TestConfig(unittest.TestCase):
+    """Tests for tools/lib/config.py."""
+
+    def test_format_dual_time(self):
+        """format_dual_time produces UTC and BRT."""
+        from lib.config import format_dual_time
+        dt = datetime(2025, 6, 15, 18, 30, 0, tzinfo=timezone.utc)
+        result = format_dual_time(dt)
+        self.assertIn("18:30 UTC", result)
+        self.assertIn("15:30 BRT", result)
+        self.assertIn("2025-06-15", result)
+
+    def test_panic_reasons_taxonomy(self):
+        """All PANIC_REASONS have required fields."""
+        from lib.config import PANIC_REASONS
+        required_keys = {"label", "emoji", "severity", "action"}
+        for key, info in PANIC_REASONS.items():
+            self.assertTrue(key.startswith("panic_"), f"{key} must start with panic_")
+            for rk in required_keys:
+                self.assertIn(rk, info, f"{key} missing {rk}")
+            self.assertIn(info["severity"], ("WARN", "CRITICAL", "UNKNOWN"),
+                          f"{key} has invalid severity: {info['severity']}")
+
+    def test_panic_template_contains_severity(self):
+        """panic_template includes severity label."""
+        from lib.config import panic_template
+        dt = datetime(2025, 6, 15, 18, 0, 0, tzinfo=timezone.utc)
+        text = panic_template("panic_lost_lock", "abc12345-6789-0000-0000-000000000000",
+                              dt, latency_ms=150, retry_count=2)
+        self.assertIn("[CRITICAL]", text)
+        self.assertIn("Lock Lost", text)
+        self.assertIn("150ms", text)
+        self.assertIn("Retries: 2", text)
+
+    def test_panic_template_unknown_reason(self):
+        """panic_template handles unknown reason keys gracefully."""
+        from lib.config import panic_template
+        dt = datetime(2025, 6, 15, 18, 0, 0, tzinfo=timezone.utc)
+        text = panic_template("panic_alien_invasion", "abc12345-run", dt)
+        self.assertIn("panic_alien_invasion", text)
+
+    def test_load_worker_config_defaults(self):
+        """load_worker_config returns valid defaults."""
+        from lib.config import load_worker_config
+        cfg, secrets = load_worker_config(worker_id="TestMac")
+        self.assertEqual(cfg.worker_id, "TestMac")
+        self.assertEqual(cfg.lease_minutes, 15)
+        self.assertEqual(cfg.heartbeat_interval_sec, 120)
+        self.assertTrue(cfg.spool_dir)
+        self.assertTrue(cfg.checkpoint_dir)
+        # Thresholds
+        self.assertEqual(cfg.thresholds.heartbeat_latency_crit_ms, 8000)
+        self.assertEqual(cfg.thresholds.stale_worker_minutes, 30)
+        self.assertEqual(cfg.thresholds.spool_max_retries, 3)
+
+    def test_load_worker_config_from_env(self):
+        """load_worker_config reads env vars."""
+        from lib.config import load_worker_config
+        with patch.dict(os.environ, {"LEASE_MINUTES": "20", "WORKER_ID": "EnvWorker"}):
+            cfg, _ = load_worker_config()
+        self.assertEqual(cfg.lease_minutes, 20)
+        self.assertEqual(cfg.worker_id, "EnvWorker")
+
+    def test_health_thresholds_frozen(self):
+        """HealthThresholds is immutable."""
+        from lib.config import HealthThresholds
+        t = HealthThresholds()
+        with self.assertRaises(AttributeError):
+            t.heartbeat_latency_warn_ms = 9999
+
+
+# ==========================================================================
+# Panic module tests
+# ==========================================================================
+
+class TestPanicManager(unittest.TestCase):
+    """Tests for tools/lib/panic.py."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="test_panic_")
+        from lib.config import WorkerConfig, SecretsConfig
+        self.cfg = WorkerConfig(
+            worker_id="TestWorker",
+            spool_dir=self.tmpdir,
+            rpc_timeout_sec=2,
+        )
+        self.secrets = SecretsConfig(
+            supabase_url="",  # no DB for unit tests
+            supabase_service_key="",
+        )
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_report_panic_creates_spool_file(self):
+        """report_panic creates an atomic spool file."""
+        from lib.panic import PanicManager
+        pm = PanicManager(self.cfg, self.secrets)
+        spool_name = pm.report_panic(
+            "panic_lost_lock", "run-123", "lock stolen",
+        )
+        self.assertIn("panic_lost_lock", spool_name)
+        spool_path = Path(self.tmpdir) / spool_name
+        self.assertTrue(spool_path.exists())
+
+        # Verify content
+        with open(spool_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["run_id"], "run-123")
+        self.assertEqual(data["reason_key"], "panic_lost_lock")
+        self.assertEqual(data["worker_id"], "TestWorker")
+        self.assertIn("event_id", data)
+        self.assertIn("timestamp", data)
+
+    def test_spool_filename_collision_free(self):
+        """Two rapid panics produce different spool files."""
+        from lib.panic import PanicManager
+        pm = PanicManager(self.cfg, self.secrets)
+        name1 = pm.report_panic("panic_lost_lock", "run-1", "err1")
+        name2 = pm.report_panic("panic_lost_lock", "run-2", "err2")
+        self.assertNotEqual(name1, name2)
+
+    def test_error_msg_truncated(self):
+        """Error message is truncated to max_worker_error_len."""
+        from lib.panic import PanicManager
+        self.cfg.max_worker_error_len = 50
+        pm = PanicManager(self.cfg, self.secrets)
+        spool_name = pm.report_panic(
+            "panic_browser_frozen", "run-999", "A" * 1000,
+        )
+        spool_path = Path(self.tmpdir) / spool_name
+        with open(spool_path) as f:
+            data = json.load(f)
+        self.assertEqual(len(data["error_msg"]), 50)
+
+    def test_event_id_is_uuid(self):
+        """event_id in spool file is a valid UUID."""
+        import uuid
+        from lib.panic import PanicManager
+        pm = PanicManager(self.cfg, self.secrets)
+        spool_name = pm.report_panic("panic_heartbeat_uncertain", "run-x", "net")
+        spool_path = Path(self.tmpdir) / spool_name
+        with open(spool_path) as f:
+            data = json.load(f)
+        # Should not raise
+        uuid.UUID(data["event_id"])
+
+    def test_atomic_write_json_no_corruption(self):
+        """_atomic_write_json produces valid JSON even if called rapidly."""
+        from lib.panic import _atomic_write_json
+        p = Path(self.tmpdir) / "test.json"
+        for i in range(10):
+            _atomic_write_json(p, {"i": i, "data": "x" * 100})
+        with open(p) as f:
+            data = json.load(f)
+        self.assertEqual(data["i"], 9)
+
+    def test_no_db_call_without_url(self):
+        """With empty supabase_url, DB update is skipped (no error)."""
+        from lib.panic import PanicManager
+        pm = PanicManager(self.cfg, self.secrets)
+        # Should not raise even without DB
+        spool = pm.report_panic("panic_lost_lock", "run-safe", "no db")
+        self.assertTrue(spool)
+
+    def test_no_telegram_without_token(self):
+        """With empty telegram_bot_token, Telegram is skipped."""
+        from lib.panic import PanicManager
+        pm = PanicManager(self.cfg, self.secrets)
+        # Should not raise
+        spool = pm.report_panic("panic_lost_lock", "run-safe", "no tg")
+        self.assertTrue(spool)
+
+
+# ==========================================================================
+# Doctor module tests
+# ==========================================================================
+
+class TestDoctor(unittest.TestCase):
+    """Tests for tools/lib/doctor.py."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="test_doctor_spool_")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write_spool(self, name: str, data: dict) -> Path:
+        p = Path(self.tmpdir) / name
+        with open(p, "w") as f:
+            json.dump(data, f)
+        return p
+
+    def test_replay_spool_empty_dir(self):
+        """replay_spool on empty dir returns zeros."""
+        from lib.doctor import replay_spool
+        s, f, r = replay_spool(self.tmpdir, "http://fake", "key")
+        self.assertEqual((s, f, r), (0, 0, 0))
+
+    def test_replay_spool_corrupted_quarantine(self):
+        """Corrupted JSON files are moved to bad/."""
+        from lib.doctor import replay_spool
+        # Write corrupt file
+        bad_file = Path(self.tmpdir) / "corrupt.json"
+        bad_file.write_text("{invalid json")
+        s, f, r = replay_spool(self.tmpdir, "http://fake", "key")
+        self.assertEqual(f, 1)
+        self.assertTrue((Path(self.tmpdir) / "bad" / "corrupt.json").exists())
+
+    def test_replay_spool_no_run_id_quarantine(self):
+        """Files without run_id are moved to bad/."""
+        from lib.doctor import replay_spool
+        self._write_spool("no_runid.json", {"event_type": "test"})
+        s, f, r = replay_spool(self.tmpdir, "http://fake", "key")
+        self.assertEqual(f, 1)
+        self.assertTrue((Path(self.tmpdir) / "bad" / "no_runid.json").exists())
+
+    def test_replay_spool_retry_count_increment(self):
+        """Failed replay increments _replay_retries in the file."""
+        from lib.doctor import replay_spool
+        self._write_spool("event.json", {
+            "run_id": "r1", "event_id": "e1", "event_type": "panic",
+        })
+        with patch("lib.doctor._http_post", return_value=(500, "error")):
+            s, f, r = replay_spool(self.tmpdir, "http://fake", "key")
+        self.assertEqual(f, 1)
+        # File should still exist with retry count
+        with open(Path(self.tmpdir) / "event.json") as fh:
+            data = json.load(fh)
+        self.assertEqual(data["_replay_retries"], 1)
+
+    def test_replay_spool_quarantine_after_max_retries(self):
+        """After max_retries failures, file moves to quarantine/."""
+        from lib.doctor import replay_spool
+        self._write_spool("event.json", {
+            "run_id": "r1", "event_id": "e1",
+            "_replay_retries": 2,  # already failed twice
+        })
+        with patch("lib.doctor._http_post", return_value=(500, "error")):
+            s, f, r = replay_spool(self.tmpdir, "http://fake", "key", max_retries=3)
+        self.assertEqual(f, 1)
+        self.assertTrue(
+            (Path(self.tmpdir) / "quarantine" / "event.json").exists()
+        )
+
+    def test_health_check_stale_worker(self):
+        """health_check detects stale workers."""
+        from lib.doctor import health_check
+        from lib.config import HealthThresholds
+
+        old_hb = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat()
+        active_runs = [
+            {
+                "id": "aaaa-bbbb-cccc-dddd",
+                "worker_state": "active",
+                "worker_id": "Mac-Ray-01",
+                "last_heartbeat_at": old_hb,
+                "last_heartbeat_latency_ms": 200,
+            }
+        ]
+
+        def mock_get(url, headers, timeout=15):
+            if "waiting_approval" in url:
+                return 200, []
+            return 200, active_runs
+
+        with patch("lib.doctor._http_get", side_effect=mock_get):
+            results = health_check(
+                "http://fake", "key",
+                HealthThresholds(stale_worker_minutes=30),
+            )
+        self.assertEqual(results["counts"]["stale_workers"], 1)
+        self.assertEqual(results["stale_workers"][0]["worker_id"], "Mac-Ray-01")
+
+    def test_health_check_no_stale_fresh_worker(self):
+        """health_check does NOT flag fresh workers as stale."""
+        from lib.doctor import health_check
+        from lib.config import HealthThresholds
+
+        fresh_hb = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+        active_runs = [
+            {
+                "id": "aaaa-bbbb-cccc-dddd",
+                "worker_state": "active",
+                "worker_id": "Mac-Ray-01",
+                "last_heartbeat_at": fresh_hb,
+                "last_heartbeat_latency_ms": 100,
+            }
+        ]
+
+        def mock_get(url, headers, timeout=15):
+            if "waiting_approval" in url:
+                return 200, []
+            return 200, active_runs
+
+        with patch("lib.doctor._http_get", side_effect=mock_get):
+            results = health_check(
+                "http://fake", "key",
+                HealthThresholds(stale_worker_minutes=30),
+            )
+        self.assertEqual(results["counts"]["stale_workers"], 0)
+
+    def test_health_check_latency_thresholds(self):
+        """health_check correctly classifies latency levels."""
+        from lib.doctor import health_check
+        from lib.config import HealthThresholds
+
+        active_runs = [
+            {"id": "run-low", "worker_state": "active", "worker_id": "w1",
+             "last_heartbeat_at": datetime.now(timezone.utc).isoformat(),
+             "last_heartbeat_latency_ms": 100},
+            {"id": "run-warn", "worker_state": "active", "worker_id": "w2",
+             "last_heartbeat_at": datetime.now(timezone.utc).isoformat(),
+             "last_heartbeat_latency_ms": 4000},
+            {"id": "run-crit", "worker_state": "active", "worker_id": "w3",
+             "last_heartbeat_at": datetime.now(timezone.utc).isoformat(),
+             "last_heartbeat_latency_ms": 9000},
+        ]
+
+        def mock_get(url, headers, timeout=15):
+            if "waiting_approval" in url:
+                return 200, []
+            return 200, active_runs
+
+        with patch("lib.doctor._http_get", side_effect=mock_get):
+            results = health_check(
+                "http://fake", "key",
+                HealthThresholds(),
+            )
+        self.assertEqual(results["counts"]["lat_warn"], 1)
+        self.assertEqual(results["counts"]["lat_crit"], 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
