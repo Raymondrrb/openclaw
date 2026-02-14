@@ -42,6 +42,7 @@ Evidence Collection
 | `supabase/sql/007_run_manager_schema.sql` | DB schema (runs, run_events, evidence_items, fingerprints) |
 | `supabase/sql/009_worker_lease_lock.sql` | Worker lease columns + CAS claim/heartbeat/release RPCs |
 | `supabase/sql/010_claim_next_and_unlock.sql` | Queue-style claim_next + force_unlock RPCs |
+| `tools/lib/worker_ops.py` | Safe stop, local checkpoints, event spool |
 | `tools/rayvault_unlock.py` | CLI for force-unlocking stuck runs |
 | `tools/test_run_manager.py` | 96 unit tests covering all modules |
 
@@ -474,7 +475,7 @@ Dashboard rules:
 ## Testing
 
 ```bash
-# Run all 108 tests
+# Run all 122 tests
 python3 tools/test_run_manager.py
 
 # Tests cover:
@@ -492,6 +493,9 @@ python3 tools/test_run_manager.py
 # - Worker lease + SRE guardrails (17 tests)
 # - Claim next + force unlock (5 tests)
 # - HeartbeatManager + panic protocol (12 tests)
+# - Worker ops: checkpoint (5 tests)
+# - Worker ops: spool + replay (4 tests)
+# - Worker ops: safe stop (5 tests)
 # - Telegram callback parsing (5 tests)
 # - Telegram gate handler (5 tests)
 # - Context builder (8 tests)

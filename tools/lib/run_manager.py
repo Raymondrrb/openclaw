@@ -215,18 +215,26 @@ class HeartbeatManager:
         return False
 
     def _enter_panic(self) -> None:
-        """Enter PANIC state: set flag, log event, call on_panic hook."""
+        """Enter PANIC state: set flag, spool event locally, call hook."""
         self._lost_event.set()
 
         event_type = getattr(self, "_panic_type", "panic_lost_lock")
-
-        # Log forensic event (separate types for autopsy)
-        self._rm._log_event(event_type, {
+        payload = {
             "worker_id": self._rm._state.worker_id,
             "run_id": self._rm.run_id,
             "lock_token": self._rm._state.lock_token,
             "reason": self._panic_reason,
-        })
+        }
+
+        # Log forensic event (separate types for autopsy)
+        self._rm._log_event(event_type, payload)
+
+        # Spool locally in case network is down (the whole reason for panic)
+        try:
+            from tools.lib.worker_ops import spool_event
+            spool_event(self._rm.run_id, event_type, payload)
+        except Exception:
+            pass  # best-effort; event is already in local _events list
 
         print(
             f"[heartbeat] PANIC ({event_type}): {self._panic_reason} "
@@ -243,6 +251,11 @@ class HeartbeatManager:
                     f"[heartbeat] on_panic hook failed: {exc}",
                     file=sys.stderr,
                 )
+
+    @property
+    def panic_type(self) -> str:
+        """The type of panic: panic_lost_lock or panic_heartbeat_uncertain."""
+        return getattr(self, "_panic_type", "")
 
 
 # ---------------------------------------------------------------------------

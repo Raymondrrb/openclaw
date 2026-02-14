@@ -1342,5 +1342,224 @@ class TestFullGateFlow(unittest.TestCase):
         self.assertFalse(rm.check_status())
 
 
+# =========================================================================
+# Worker Ops Tests (safe_stop, checkpoint, spool)
+# =========================================================================
+
+class TestWorkerOpsCheckpoint(unittest.TestCase):
+    """Checkpoint load/save with atomic writes."""
+
+    def setUp(self):
+        import shutil
+        self._orig_dir = None
+        self.tmpdir = tempfile.mkdtemp(prefix="test_ckpt_")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        # Restore original dir if patched
+        if self._orig_dir is not None:
+            from lib import worker_ops
+            worker_ops.CHECKPOINT_DIR = self._orig_dir
+
+    def _patch_dir(self):
+        from lib import worker_ops
+        self._orig_dir = worker_ops.CHECKPOINT_DIR
+        worker_ops.CHECKPOINT_DIR = self.tmpdir
+
+    def test_load_missing_returns_default(self):
+        """load_checkpoint returns default dict if file doesn't exist."""
+        self._patch_dir()
+        from lib.worker_ops import load_checkpoint
+        ckpt = load_checkpoint("nonexistent-run")
+        self.assertEqual(ckpt["run_id"], "nonexistent-run")
+        self.assertEqual(ckpt["stage"], "init")
+        self.assertEqual(ckpt["completed_steps"], [])
+        self.assertIn("version", ckpt)
+
+    def test_save_and_load_roundtrip(self):
+        """save_checkpoint then load_checkpoint preserves data."""
+        self._patch_dir()
+        from lib.worker_ops import save_checkpoint, load_checkpoint
+        save_checkpoint(
+            "rt-run-1", "collect_evidence",
+            data={"products": 5},
+            artifacts={"csv": "/tmp/ev.csv"},
+            lock_token="tok-123",
+        )
+        ckpt = load_checkpoint("rt-run-1")
+        self.assertEqual(ckpt["stage"], "collect_evidence")
+        self.assertIn("collect_evidence", ckpt["completed_steps"])
+        self.assertEqual(ckpt["data"]["products"], 5)
+        self.assertEqual(ckpt["artifacts"]["csv"], "/tmp/ev.csv")
+        self.assertEqual(ckpt["lock_token"], "tok-123")
+        self.assertIn("last_update_utc", ckpt)
+
+    def test_save_merges_data(self):
+        """Multiple saves merge data and artifacts."""
+        self._patch_dir()
+        from lib.worker_ops import save_checkpoint, load_checkpoint
+        save_checkpoint("merge-1", "step1", data={"a": 1})
+        save_checkpoint("merge-1", "step2", data={"b": 2})
+        ckpt = load_checkpoint("merge-1")
+        self.assertEqual(ckpt["data"]["a"], 1)
+        self.assertEqual(ckpt["data"]["b"], 2)
+        self.assertIn("step1", ckpt["completed_steps"])
+        self.assertIn("step2", ckpt["completed_steps"])
+
+    def test_clear_checkpoint(self):
+        """clear_checkpoint removes the file."""
+        self._patch_dir()
+        from lib.worker_ops import save_checkpoint, clear_checkpoint, load_checkpoint
+        save_checkpoint("clear-1", "done")
+        self.assertTrue(clear_checkpoint("clear-1"))
+        ckpt = load_checkpoint("clear-1")
+        self.assertEqual(ckpt["stage"], "init")  # back to default
+
+    def test_save_none_data_safe(self):
+        """save_checkpoint with data=None doesn't crash."""
+        self._patch_dir()
+        from lib.worker_ops import save_checkpoint, load_checkpoint
+        save_checkpoint("none-1", "step1", data=None, artifacts=None)
+        ckpt = load_checkpoint("none-1")
+        self.assertEqual(ckpt["stage"], "step1")
+
+
+class TestWorkerOpsSpool(unittest.TestCase):
+    """Event spool write and replay."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="test_spool_")
+        self._orig_dir = None
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        if self._orig_dir is not None:
+            from lib import worker_ops
+            worker_ops.SPOOL_DIR = self._orig_dir
+
+    def _patch_dir(self):
+        from lib import worker_ops
+        self._orig_dir = worker_ops.SPOOL_DIR
+        worker_ops.SPOOL_DIR = self.tmpdir
+
+    def test_spool_event_writes_file(self):
+        """spool_event creates a JSON file."""
+        self._patch_dir()
+        from lib.worker_ops import spool_event
+        path = spool_event("spool-run-1", "panic_stop", {"reason": "test"})
+        self.assertTrue(os.path.exists(path))
+        with open(path) as f:
+            data = json.load(f)
+        self.assertEqual(data["run_id"], "spool-run-1")
+        self.assertEqual(data["event_type"], "panic_stop")
+        self.assertEqual(data["payload"]["reason"], "test")
+
+    def test_replay_with_send_fn(self):
+        """replay_spool calls send_fn and removes files on success."""
+        self._patch_dir()
+        from lib.worker_ops import spool_event, replay_spool
+        spool_event("replay-1", "test_event", {"k": "v"})
+
+        sent_records = []
+        def send_fn(record):
+            sent_records.append(record)
+            return True
+
+        result = replay_spool(send_fn=send_fn)
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(len(sent_records), 1)
+        # File should be removed
+        self.assertEqual(len(os.listdir(self.tmpdir)), 0)
+
+    def test_replay_keeps_failed(self):
+        """replay_spool keeps files when send_fn returns False."""
+        self._patch_dir()
+        from lib.worker_ops import spool_event, replay_spool
+        spool_event("replay-2", "test_event", {"k": "v"})
+
+        result = replay_spool(send_fn=lambda r: False)
+        self.assertEqual(result["sent"], 0)
+        self.assertEqual(result["failed"], 1)
+        # File should still exist
+        files = [f for f in os.listdir(self.tmpdir) if f.endswith(".json")]
+        self.assertEqual(len(files), 1)
+
+    def test_replay_empty_dir(self):
+        """replay_spool on empty dir returns zeros."""
+        self._patch_dir()
+        from lib.worker_ops import replay_spool
+        result = replay_spool()
+        self.assertEqual(result["sent"], 0)
+        self.assertEqual(result["failed"], 0)
+
+
+class TestWorkerOpsSafeStop(unittest.TestCase):
+    """Safe stop idempotency and cleanup."""
+
+    def setUp(self):
+        from lib.worker_ops import reset_panic_flag
+        reset_panic_flag()
+        self._orig_spool = None
+
+    def tearDown(self):
+        from lib.worker_ops import reset_panic_flag
+        reset_panic_flag()
+        if self._orig_spool is not None:
+            from lib import worker_ops
+            worker_ops.SPOOL_DIR = self._orig_spool
+
+    def _patch_spool(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="test_ss_")
+        from lib import worker_ops
+        self._orig_spool = worker_ops.SPOOL_DIR
+        worker_ops.SPOOL_DIR = self.tmpdir
+
+    def test_safe_stop_sets_panic_flag(self):
+        """safe_stop sets the global panic flag."""
+        self._patch_spool()
+        from lib.worker_ops import safe_stop, is_panic_active
+        self.assertFalse(is_panic_active())
+        safe_stop("ss-run-1", "test")
+        self.assertTrue(is_panic_active())
+
+    def test_safe_stop_idempotent(self):
+        """Calling safe_stop twice is a no-op on second call."""
+        self._patch_spool()
+        from lib.worker_ops import safe_stop, is_panic_active
+        hook_calls = []
+        safe_stop("ss-run-2", "first", mark_panic_fn=lambda r, reason: hook_calls.append(1))
+        safe_stop("ss-run-2", "second", mark_panic_fn=lambda r, reason: hook_calls.append(2))
+        self.assertEqual(len(hook_calls), 1)  # only first call runs
+
+    def test_safe_stop_sets_stop_signal(self):
+        """safe_stop calls stop_signal.set()."""
+        self._patch_spool()
+        import threading
+        from lib.worker_ops import safe_stop
+        sig = threading.Event()
+        safe_stop("ss-run-3", "test", stop_signal=sig)
+        self.assertTrue(sig.is_set())
+
+    def test_safe_stop_spools_event(self):
+        """safe_stop writes a spool file."""
+        self._patch_spool()
+        from lib.worker_ops import safe_stop
+        safe_stop("ss-run-4", "test_spool")
+        files = [f for f in os.listdir(self.tmpdir) if f.endswith(".json")]
+        self.assertGreaterEqual(len(files), 1)
+
+    def test_reset_panic_flag(self):
+        """reset_panic_flag clears the flag for restart."""
+        self._patch_spool()
+        from lib.worker_ops import safe_stop, is_panic_active, reset_panic_flag
+        safe_stop("ss-run-5", "test")
+        self.assertTrue(is_panic_active())
+        reset_panic_flag()
+        self.assertFalse(is_panic_active())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

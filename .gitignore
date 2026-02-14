@@ -94,6 +94,8 @@ artifacts/
 assets/ray_avatar/
 logs/
 runs/
+spool/
+checkpoints/
 data/error_log.json
 data/niche_history.json
 supabase/.temp/
