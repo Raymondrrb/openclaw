@@ -27,6 +27,8 @@ export function getServerEnv() {
     supabaseServiceRoleKey: require("SUPABASE_SERVICE_ROLE_KEY"),
     telegramBotToken: optional("TELEGRAM_BOT_TOKEN"),
     telegramChatId: optional("TELEGRAM_CHAT_ID"),
+    telegramWebhookSecret: optional("TELEGRAM_WEBHOOK_SECRET"),
+    telegramAdminUserIds: optional("TELEGRAM_ADMIN_USER_IDS"),
     cronSecret: optional("CRON_SECRET"),
   };
 }

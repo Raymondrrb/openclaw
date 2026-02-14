@@ -162,7 +162,7 @@ begin
         lock_expires_at    = null,
         lock_token         = '',
         worker_state       = 'idle',
-        worker_last_error  = ''
+        worker_last_error  = left('manual_unlock: ' || coalesce(p_reason, ''), 500)
     where id = p_run_id
       and (
           p_force = true
