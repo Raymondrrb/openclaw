@@ -10230,9 +10230,9 @@ class TestVisualConfigFiles(unittest.TestCase):
         self.assertIn("outfit", vb)
         self.assertIn("accent", vb)
         self.assertGreater(len(vb["environment"]), 0)
-        # Daily rotation config
+        # Daily rotation + fallback levels
         self.assertIn("daily_rotation", data)
-        self.assertIn("safe_fallback", data["daily_rotation"])
+        self.assertIn("fallback_levels", data)
 
     def test_visual_qc_loadable(self):
         path = self._config_dir() / "visual_qc.json"
@@ -10256,12 +10256,28 @@ class TestVisualConfigFiles(unittest.TestCase):
     def test_style_guide_loadable(self):
         path = self._config_dir() / "ray_style_guide.json"
         data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("canon_specs", data)
+        self.assertIn("safe_mode", data)
         self.assertIn("invariants", data)
         self.assertIn("never", data)
-        self.assertIn("varies_1_axis_per_day", data)
-        self.assertIn("qc_fail_instant", data)
+        self.assertIn("qc_fast_fail", data)
+        self.assertIn("qc_soft_fail", data)
         self.assertIn("qc_pass", data)
-        self.assertIn("fallback", data)
+        self.assertIn("fallback_levels", data)
+        self.assertIn("drift_regression", data)
+        self.assertIn("identity_overlay_test", data)
+        self.assertIn("visual_qc_exit_codes", data)
+        self.assertIn("changelog", data)
+        self.assertEqual(data["character"], "Ray")
+
+    def test_voice_dna_loadable(self):
+        path = self._config_dir() / "voice_dna.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("canon", data)
+        self.assertIn("never", data)
+        self.assertIn("script_rules", data)
+        self.assertIn("tts_settings", data)
+        self.assertIn("qc", data)
         self.assertEqual(data["character"], "Ray")
 
     def test_cookbook_prebuilt_combos_reference_valid_blocks(self):

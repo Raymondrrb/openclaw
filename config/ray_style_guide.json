@@ -1,53 +1,142 @@
 {
-  "_doc": "Ray Model Sheet — compact visual identity spec. Load into any AI as context. Single source of truth for all visual generation.",
-  "version": 1,
+  "_doc": "Ray Model Sheet v3 — complete visual + voice identity spec. Single source of truth.",
+  "version": 3,
 
   "character": "Ray",
   "purpose": "Lipsync-ready talking head for YouTube product reviews",
+
+  "canon_specs": {
+    "_doc": "IMMUTABLE. The true North. Safe Mode reverts to these. Never change without version bump.",
+    "camera": "85mm look, eye-level, MCU, centered, headroom 8-10%",
+    "face": "fixed nose bridge, jawline, beard density, hairline, eye distance, skin tone",
+    "expression": "neutral, mouth closed, lips relaxed, continuous lip line",
+    "lighting": "neutral face light, no tint, no colored cast on skin",
+    "background": "always bokeh/blurred, never sharp detail, no text/logos",
+    "frame": "16:9, safe margins around head (no crop on hair/chin)"
+  },
+
+  "safe_mode": {
+    "_doc": "CANONICAL PRESET. Non-negotiable. Use when anything fails.",
+    "environment": "studio charcoal grey gradient",
+    "outfit": "solid black t-shirt, no logos",
+    "lighting": "soft key front-left + gentle fill + subtle rim",
+    "expression": "neutral, mouth closed, lips relaxed",
+    "background": "bokeh, no props",
+    "seed_rotation": ["SafeSeed-01", "SafeSeed-02", "SafeSeed-03"],
+    "when_to_use": [
+      "any QC failure after 6 attempts",
+      "model instability day",
+      "urgent publish deadline"
+    ]
+  },
 
   "invariants": {
     "face": "same facial structure, same hairline, same beard shape, same nose and jaw proportions, same skin tone, same eye distance",
     "shot": "medium close-up, chest/shoulders up",
     "camera": "85mm lens look, eye-level, centered, headroom 8-10%",
-    "lighting_face": "soft key front-left 45deg, gentle fill front-right, subtle rim light",
-    "mouth": "closed, relaxed lips, clear lip line, clean chin contour",
+    "lighting_face": "soft key front-left 45deg, gentle fill front-right, subtle rim light. Skin tone unchanged, no colored cast on skin.",
+    "mouth": "closed, relaxed lips, continuous lip line, no teeth silhouettes, no lip shadow breaks, clean chin contour",
     "eyes": "aligned, looking into camera lens",
     "hands": "out of frame"
   },
 
   "never": [
-    "open mouth", "teeth showing", "hairstyle change", "beard shape change",
-    "sunglasses", "hat", "hands visible", "wide-angle lens", "cartoon/CGI",
-    "busy background", "patterned clothing", "logos", "text in frame"
+    "open mouth", "teeth showing", "teeth silhouettes", "lip shadow breaks",
+    "hairstyle change", "beard shape change", "beard length change", "age change",
+    "sunglasses", "hat", "hands visible", "wide-angle lens", "fisheye", "35mm look",
+    "cartoon/CGI", "plastic skin", "waxy face",
+    "busy background", "patterned clothing", "logos", "text in frame",
+    "color spill on skin", "blue/cyan cast on face",
+    "smile", "grimace", "mouth seam artifacts", "warped philtrum", "stretched jaw",
+    "muddy skin", "oversharpened pores"
   ],
 
-  "varies_1_axis_per_day": {
+  "varies_1_axis_per_session": {
+    "_doc": "Change 1 axis per SESSION (not per video). Staged transitions only.",
     "background": ["office_daylight_bokeh", "office_citylight_bokeh", "studio_charcoal_gradient"],
     "outfit": ["black_tee", "navy_tee", "grey_hoodie"],
-    "accent_light": ["warm_ambient", "cool_ambient", "rim_tint"]
+    "accent_light": ["warm_ambient", "cool_ambient", "rim_tint"],
+    "rollback_rule": "If drift appears after a change, revert only the last axis changed."
   },
 
-  "qc_fail_instant": [
-    "mouth/lips deformed or teeth visible",
-    "eyes misaligned or double pupil",
-    "identity drift (nose/jaw/hairline changed)",
-    "background sharp or has text/logos",
-    "hands appear in frame"
-  ],
+  "qc_fast_fail": {
+    "_doc": "One match = discard. No exceptions.",
+    "triggers": [
+      "mouth line broken or teeth silhouette",
+      "eye divergence (pupils not aligned)",
+      "jaw/neck merge artifact or floating skin",
+      "face wider/narrower than Keyframe Zero by obvious margin",
+      "any visible hands/fingers",
+      "lip shadow breaks or discontinuous lip line",
+      "identity drift (nose/jaw/hairline changed)",
+      "color cast/spill on face skin"
+    ]
+  },
+
+  "qc_soft_fail": {
+    "_doc": "Retry with seed swap. Publishable if desperate.",
+    "triggers": [
+      "minor lighting mismatch (skin slightly warmer/cooler)",
+      "background too sharp (bokeh insufficient)",
+      "beard texture slightly inconsistent but identity stable",
+      "micro asymmetry in eyebrows"
+    ]
+  },
 
   "qc_pass": [
     "same Ray as Keyframe Zero",
-    "mouth closed and clean",
+    "mouth closed, continuous lip line",
     "jawline clean",
-    "eyes on lens",
-    "background bokeh clean"
+    "eyes on lens, pupils aligned",
+    "background bokeh clean",
+    "skin tone neutral (no color spill)"
   ],
 
-  "fallback": "If 6 attempts fail: studio_charcoal + black_tee + warm_ambient (safe mode). 3 seeds, pick 1.",
+  "identity_overlay_test": {
+    "_doc": "Quick 10-second check: overlay Keyframe Zero at 50% opacity.",
+    "fail_if": [
+      "hairline height shifts noticeably",
+      "nose width changes",
+      "jaw angle changes"
+    ],
+    "allow": "tiny differences in pores/skin microtexture only"
+  },
+
+  "fallback_levels": {
+    "0_normal": "Config of the day (1 axis varied). 3-6 seeds.",
+    "1_soft": "Same config, new seeds. 3 more attempts.",
+    "2_safe": "Safe Mode canonical preset. 3 seeds.",
+    "3_library": "Use approved keyframe. Zero generation.",
+    "4_manual": "Operator intervention."
+  },
+
+  "drift_regression": {
+    "frequency": "weekly",
+    "config": "Safe Mode canonical preset",
+    "seeds": 3,
+    "compare_to": "Keyframe Zero",
+    "fail_if": "2/3 fail identity via overlay test",
+    "on_fail": "reduce variation axes, increase identity lock strength"
+  },
+
+  "visual_qc_exit_codes": {
+    "0": "PASS — publishable",
+    "1": "WARNING — minor issues, publishable if needed",
+    "2": "FAIL — do not publish"
+  },
 
   "keyframe_zero": {
     "_doc": "The single perfect reference image. All generations must match this.",
-    "path": null,
-    "status": "pending_selection"
-  }
+    "path": "state/assets/keyframes/Ray_KeyframeZero.png",
+    "status": "pending_selection",
+    "versioning": "Any change requires new version: Ray_KeyframeZero_v2.png"
+  },
+
+  "voice_dna_ref": "config/voice_dna.json",
+
+  "changelog": [
+    {"version": 1, "changes": "Initial style guide with invariants, QC, fallback"},
+    {"version": 2, "changes": "Added fallback levels 0-4, drift regression, lip line hardening, semantic bleed patch"},
+    {"version": 3, "changes": "Added canon specs, safe mode preset, fast/soft fail QC, overlay test, voice DNA link, strengthened negatives"}
+  ]
 }

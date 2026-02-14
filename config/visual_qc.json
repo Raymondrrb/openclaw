@@ -42,9 +42,9 @@
         "weight": 1,
         "max": 2,
         "description": "Mouth/chin clean and lipsync-compatible",
-        "score_2": "Mouth closed, clean chin, clear lip line, front-facing",
-        "score_1": "Slight lip noise or minor chin shadow",
-        "score_0": "Open mouth, deformed lips, chin artifact, extreme angle"
+        "score_2": "Mouth closed, clean chin, continuous lip line, no teeth silhouettes, front-facing",
+        "score_1": "Slight lip noise, minor chin shadow, or small lip shadow break",
+        "score_0": "Open mouth, deformed lips, teeth silhouette, discontinuous lip line, lip shadow breaks, chin artifact, extreme angle"
       }
     },
     "max_total": 10,

@@ -1,0 +1,62 @@
+{
+  "_doc": "Voice identity contract — the audio half of Ray's identity. Load into TTS pipeline as constraints.",
+  "version": 1,
+
+  "character": "Ray",
+
+  "canon": {
+    "language": "English",
+    "dialect": "consistent neutral American",
+    "tempo_range": [0.95, 1.05],
+    "tempo_baseline": 1.0,
+    "intensity": "calm, confident, not hyped",
+    "pitch_range": "narrow — avoid emotional swings",
+    "prosody": "clear pauses, short sentences",
+    "smile_in_voice": "low — no salesy grin",
+    "noise_floor": "studio clean, no reverb, no background"
+  },
+
+  "never": [
+    "slang drift",
+    "bro energy",
+    "sarcasm",
+    "shouting",
+    "whisper",
+    "vocal fry",
+    "heavy upspeak",
+    "emotional rollercoaster within one video"
+  ],
+
+  "script_rules": {
+    "hook": "max 2 sentences",
+    "main_points": "max 3 bullets",
+    "cta": "1 line",
+    "emotional_tone": "one tone per video (neutral to slightly upbeat)",
+    "sentence_length": "short and clear"
+  },
+
+  "tts_settings": {
+    "_doc": "Generic ElevenLabs-style settings. Adjust per provider.",
+    "stability": "high (0.7-0.85)",
+    "expressiveness": "low-medium (0.3-0.5)",
+    "variation": "low",
+    "voice_profile": "same profile every time — never switch",
+    "sample_rate": 44100
+  },
+
+  "qc": {
+    "fail_if": [
+      "tempo outside 0.95-1.05 range",
+      "audible background noise",
+      "voice breaks or glitches",
+      "emotional tone mismatch (e.g., hype in calm video)",
+      "pronunciation errors on product names"
+    ],
+    "pass_if": [
+      "sounds like the same Ray",
+      "tempo consistent",
+      "clean audio",
+      "natural prosody"
+    ]
+  }
+}

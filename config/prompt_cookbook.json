@@ -1,13 +1,13 @@
 {
   "_doc": "Modular Dzine prompt system. Fixed blocks never change. Variable blocks swap 1 axis per day. Paste assembled prompt into 'Character action & scene'.",
-  "version": 2,
+  "version": 3,
 
   "fixed_blocks": {
-    "core_identity": "Ray (use the existing Ray character identity and the verified face reference). Same exact person, same facial structure, same hairline, same beard shape, same nose and jaw proportions. Medium close-up talking head. Calm neutral expression. Looking directly into the camera lens. Mouth closed, relaxed lips, clean lip line for lip-sync. Clean jawline and chin contour, no shadow artifacts.",
-    "camera": "Eye-level camera, centered framing, stable composition, headroom 8-10%. 85mm lens look (no wide angle), natural perspective, no facial distortion. Shoulders relaxed. Hands out of frame.",
-    "lighting": "Soft key light from front-left 45 degrees, gentle fill from front-right, subtle rim light for separation. Face lighting neutral and clean. No harsh shadows under nose/lips/chin.",
-    "quality": "Photorealistic, natural skin texture, consistent pores, high-end cinematic realism, stable features across generations, clean background bokeh.",
-    "negative": "open mouth, teeth showing, exaggerated smile, distorted lips, double chin artifacts, messy beard noise, hairstyle change, sunglasses, hat, heavy wrinkles, low-res, oversharpen, cartoon, anime, CGI, hands visible, extra fingers, text, logos, busy background, patterned clothing."
+    "core_identity": "Ray (use the existing Ray character identity and the verified face reference). Same exact person, same facial structure, same hairline, same beard shape, same nose and jaw proportions. Do NOT change facial structure. No alternate identity. No hairstyle changes. No beard length changes. No age changes. Medium close-up talking head. Neutral expression only. No smile. No grimace. Looking directly into the camera lens. Mouth closed, relaxed lips, clean continuous lip line for lip-sync; no teeth silhouettes; no lip shadow breaks. Clean jawline and chin contour, no shadow artifacts.",
+    "camera": "Eye-level camera, centered framing, stable composition, headroom 8-10%. 85mm lens look (no wide angle), natural perspective, no facial distortion. No wide-angle distortion. No 35mm look. No fisheye. Shoulders relaxed. Hands out of frame.",
+    "lighting": "Soft key light from front-left 45 degrees, gentle fill from front-right, subtle rim light for separation. Neutral face light. No colored cast on skin. No extreme shadows under nose/lips. Skin tone unchanged. No harsh shadows under nose/lips/chin.",
+    "quality": "Clean cinematic realism. Natural skin texture, consistent pores, stable features across generations, clean background bokeh. No plastic skin. No waxy face.",
+    "negative": "open mouth, teeth showing, teeth shadow, teeth silhouettes, exaggerated smile, distorted lips, double chin artifacts, messy beard noise, hairstyle change, beard length change, age change, sunglasses, hat, heavy wrinkles, low-res, oversharpen, cartoon, anime, CGI, hands visible, extra fingers, text, logos, busy background, patterned clothing, blue skin tint, cyan cast on face, color spill, lip shadow breaks, mouth seam artifacts, asymmetrical lips, warped philtrum, stretched jaw, muddy skin, oversharpened pores, plastic skin, waxy face, wide-angle distortion, fisheye."
   },
 
   "variable_blocks": {
@@ -42,13 +42,26 @@
   "daily_rotation": {
     "_doc": "Change max 1 axis per day. Default safe config: C_studio + 1_black_tee + 1_warm.",
     "max_axes_per_day": 1,
-    "safe_fallback": {
-      "environment": "C_studio",
-      "outfit": "1_black_tee",
-      "accent": "1_warm"
-    },
-    "fallback_trigger": "6 consecutive FAIL results",
     "seeds_per_attempt": 3
+  },
+
+  "fallback_levels": {
+    "_doc": "Escalation when generation fails QC. Each level is tried before moving to next.",
+    "0_normal": "Config of the day (1 axis varied). Generate 3-6 seeds.",
+    "1_soft": "Same config, different seeds. Generate 3 more.",
+    "2_safe": "Studio + Outfit 1 + Accent 1 (all fixed). Generate 3 seeds.",
+    "3_library": "Use approved keyframe from library. Zero generation.",
+    "4_manual": "Human intervention. Flag for operator review."
+  },
+
+  "drift_regression": {
+    "_doc": "Weekly regression test to detect model drift.",
+    "frequency": "1x per week",
+    "config": {"env": "C_studio", "outfit": "1_black_tee", "accent": "1_warm"},
+    "seeds": 3,
+    "compare_to": "Keyframe Zero",
+    "fail_threshold": "2/3 fail identity criterion",
+    "on_fail": "Reduce variation axes, increase identity lock strength if available"
   },
 
   "prebuilt_combos": {
