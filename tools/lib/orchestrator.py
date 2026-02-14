@@ -42,6 +42,12 @@ from tools.lib.audio_utils import (
     FinalizeResult,
     scrub_fillers,
 )
+from tools.lib.media_manifest import (
+    has_ffprobe,
+    is_video_valid,
+    load_video_index,
+    upsert_video_index,
+)
 from tools.lib.tone_gate import (
     strip_tts_tags,
     tone_gate_validate,
@@ -81,9 +87,31 @@ class EventSinkLike(Protocol):
     async def insert_run_event(self, event: dict) -> None: ...
 
 
+class DzineAgentLike(Protocol):
+    """Interface for Dzine UI automation (Playwright/operator).
+
+    Contract: render must produce the mp4 at the expected_video_path.
+    """
+    def render_segment(
+        self, *, audio_path: Path, expected_video_path: Path,
+        avatar_ref: str, project_preset: str,
+        lip_sync_hint: str, target_duration_sec: float,
+    ) -> None:
+        """Render one segment. Raises on failure."""
+        ...
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DzineBudget:
+    """Budget control for Dzine credits."""
+    available_credits: int = 100
+    cost_per_segment: int = 1
+    max_dzine_attempts: int = 1
+
 
 @dataclass(frozen=True)
 class OrchestratorConfig:
@@ -93,6 +121,8 @@ class OrchestratorConfig:
     jobs_dir: str = "state/jobs"
     audio_dir: str = "state/audio"
     video_dir: str = "state/video"
+    video_final_dir: str = "state/video/final"
+    video_index_path: str = "state/video/index.json"
     output_dir: str = "state/output"
 
     # Tone Gate tuning
@@ -110,12 +140,18 @@ class OrchestratorConfig:
     min_render_bytes: int = 5_000_000
     min_render_duration_sec: float = 5.0
 
+    # Video validation (ffprobe)
+    video_tolerance_sec: float = 0.15
+    min_video_bytes: int = 500_000
+
 
 # Stages as simple strings — deterministic ordering
 STAGES = (
     "VOICE_PREP",
     "VOICE_GEN",
     "MEDIA_SYNC",
+    "PREFLIGHT",
+    "DZINE_RENDER",
     "ASSEMBLY",
     "RENDER_PROBE",
     "DONE",
@@ -165,6 +201,8 @@ class RayVaultOrchestrator:
         panic_mgr: PanicLike,
         tts_engine: Optional[TTSEngineLike] = None,
         repair_engine: Optional[RepairEngineLike] = None,
+        dzine_agent: Optional[DzineAgentLike] = None,
+        dzine_budget: Optional[DzineBudget] = None,
         event_sink: Optional[EventSinkLike] = None,
         resolve_script: str = "scripts/resolve_assemble.py",
         render_probe_script: str = "scripts/render_probe.py",
@@ -173,6 +211,8 @@ class RayVaultOrchestrator:
         self.panic = panic_mgr
         self.tts = tts_engine
         self.repair = repair_engine
+        self.dzine = dzine_agent
+        self.budget = dzine_budget or DzineBudget()
         self.events = event_sink
         self.resolve_script = resolve_script
         self.render_probe_script = render_probe_script
@@ -181,10 +221,13 @@ class RayVaultOrchestrator:
         self._jobs_dir = Path(config.jobs_dir)
         self._audio_dir = Path(config.audio_dir)
         self._video_dir = Path(config.video_dir)
+        self._video_final_dir = Path(config.video_final_dir)
+        self._video_index_path = Path(config.video_index_path)
         self._output_dir = Path(config.output_dir)
 
         # Ensure directories exist
-        for d in (self._check_dir, self._jobs_dir, self._audio_dir, self._output_dir):
+        for d in (self._check_dir, self._jobs_dir, self._audio_dir,
+                  self._output_dir, self._video_final_dir):
             d.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -535,6 +578,197 @@ class RayVaultOrchestrator:
         return path
 
     # ------------------------------------------------------------------
+    # Stage: PREFLIGHT (GO/NO_GO before spending Dzine credits)
+    # ------------------------------------------------------------------
+
+    def preflight(self, manifest_path: Path) -> Dict[str, Any]:
+        """Pre-flight check: budget, probe tools, cache hits.
+
+        Returns preflight dict with status GO/NO_GO.
+        Raises RuntimeError if NO_GO (fail-fast, zero credits spent).
+        """
+        m = _read_json(manifest_path)
+        if not m or "segments" not in m:
+            raise RuntimeError("PREFLIGHT_FAIL: invalid manifest")
+
+        segments = m.get("segments", [])
+        cache_hits = 0
+        needs_render: List[str] = []
+        probe_available = has_ffprobe()
+
+        for seg in segments:
+            video_path_str = seg.get("video_path", "")
+            target_sec = _safe_float(seg.get("approx_duration_sec", 0))
+            seg_id = seg.get("segment_id", "?")
+
+            if video_path_str and probe_available:
+                ok, dur = is_video_valid(
+                    Path(video_path_str), target_sec,
+                    tolerance_sec=self.cfg.video_tolerance_sec,
+                    min_bytes=self.cfg.min_video_bytes,
+                )
+                if ok:
+                    cache_hits += 1
+                    continue
+
+            needs_render.append(seg_id)
+
+        credits_needed = len(needs_render) * self.budget.cost_per_segment
+        go = credits_needed <= self.budget.available_credits
+
+        # If ffprobe is unavailable and there are segments to render,
+        # refuse to proceed — can't validate output
+        if not probe_available and needs_render:
+            go = False
+
+        pf = {
+            "run_id": m.get("run_id", "?"),
+            "total_segments": len(segments),
+            "cache_hits": cache_hits,
+            "needs_render": needs_render,
+            "credits_needed": credits_needed,
+            "credits_available": self.budget.available_credits,
+            "probe_available": probe_available,
+            "status": "GO" if go else "NO_GO",
+        }
+
+        if not go:
+            reason = "insufficient credits" if probe_available else "ffprobe not available"
+            raise RuntimeError(
+                f"PREFLIGHT_NO_GO: {reason} "
+                f"(need {credits_needed}, have {self.budget.available_credits})"
+            )
+
+        return pf
+
+    # ------------------------------------------------------------------
+    # Stage: DZINE_RENDER (per-segment lip-sync with fail-fast)
+    # ------------------------------------------------------------------
+
+    def dzine_render(
+        self, run_id: str, manifest_path: Path,
+    ) -> Dict[str, Any]:
+        """Render segments via Dzine UI agent with fail-fast protection.
+
+        For each segment not cached:
+        1. Check local cache (SKIP_DZINE if valid video exists)
+        2. Render via Dzine agent (max attempts per segment)
+        3. Post-render probe (ffprobe duration + size)
+        4. Index validated video atomically
+        5. ABORT on first failure (capital protection)
+
+        Returns summary dict. Raises RuntimeError on any failure.
+        """
+        m = _read_json(manifest_path)
+        if not m:
+            raise RuntimeError("DZINE_RENDER_FAIL: manifest not found")
+
+        segments = m.get("segments", [])
+        rendered = 0
+        skipped = 0
+
+        for seg in segments:
+            seg_id = seg.get("segment_id", "?")
+            video_path_str = seg.get("video_path", "")
+            audio_path_str = seg.get("audio_path", "")
+            target_sec = _safe_float(seg.get("approx_duration_sec", 0))
+
+            if not video_path_str or not audio_path_str:
+                continue
+
+            video_path = Path(video_path_str)
+
+            # Cache hit: skip
+            ok, dur = is_video_valid(
+                video_path, target_sec,
+                tolerance_sec=self.cfg.video_tolerance_sec,
+                min_bytes=self.cfg.min_video_bytes,
+            )
+            if ok:
+                self._index_video(
+                    run_id, seg_id, video_path, dur,
+                    seg.get("audio_sha256", "")[:8], "skip_cache_hit",
+                )
+                skipped += 1
+                continue
+
+            # No Dzine agent → mark incomplete
+            if not self.dzine:
+                raise RuntimeError(
+                    f"DZINE_RENDER_FAIL: no dzine_agent for segment {seg_id}"
+                )
+
+            # Attempt render (capped at max_dzine_attempts)
+            dzine_block = seg.get("dzine", {})
+            upload = dzine_block.get("upload", {})
+            settings = dzine_block.get("settings", {})
+
+            try:
+                self.dzine.render_segment(
+                    audio_path=Path(audio_path_str),
+                    expected_video_path=video_path,
+                    avatar_ref=upload.get("avatar_ref", ""),
+                    project_preset=upload.get("project_preset", ""),
+                    lip_sync_hint=settings.get("lip_sync_hint", "neutral"),
+                    target_duration_sec=target_sec,
+                )
+            except Exception as e:
+                self.panic.report_panic(
+                    "panic_dzine_ui_failure", run_id,
+                    f"segment {seg_id}: {e}",
+                )
+                raise RuntimeError(
+                    f"DZINE_RENDER_FAIL: UI failure on {seg_id}: {str(e)[:300]}"
+                )
+
+            # Post-render probe
+            ok2, dur2 = is_video_valid(
+                video_path, target_sec,
+                tolerance_sec=self.cfg.video_tolerance_sec,
+                min_bytes=self.cfg.min_video_bytes,
+            )
+            if not ok2:
+                self.panic.report_panic(
+                    "panic_dzine_probe_fail", run_id,
+                    f"segment {seg_id}: video probe failed "
+                    f"(duration={dur2:.2f}s, expected={target_sec:.2f}s)",
+                )
+                raise RuntimeError(
+                    f"DZINE_PROBE_FAIL: segment {seg_id} "
+                    f"(duration={dur2:.2f}s, expected={target_sec:.2f}s)"
+                )
+
+            self._index_video(
+                run_id, seg_id, video_path, dur2,
+                seg.get("audio_sha256", "")[:8], "render_ok",
+            )
+            rendered += 1
+
+        return {
+            "rendered": rendered,
+            "skipped": skipped,
+            "total": len(segments),
+        }
+
+    def _index_video(
+        self, run_id: str, segment_id: str,
+        path: Path, duration: float, sha8: str, note: str,
+    ) -> None:
+        """Atomically index a validated video."""
+        item = {
+            "segment_id": segment_id,
+            "run_id": run_id,
+            "path": str(path),
+            "duration": round(duration, 3),
+            "timestamp": _utcnow_iso(),
+            "note": note,
+        }
+        try:
+            upsert_video_index(self._video_index_path, sha8, item)
+        except Exception:
+            pass  # Index is best-effort — doesn't block pipeline
+
+    # ------------------------------------------------------------------
     # Gate: Media Ready
     # ------------------------------------------------------------------
 
@@ -682,11 +916,39 @@ class RayVaultOrchestrator:
                 segs = data["segments"]
                 manifest_path = self.build_manifest(run_id, segs)
                 self.save_checkpoint(
-                    run_id, "ASSEMBLY",
+                    run_id, "PREFLIGHT",
                     {"manifest_path": str(manifest_path)},
                 )
-                stage, data = "ASSEMBLY", {"manifest_path": str(manifest_path)}
+                stage, data = "PREFLIGHT", {"manifest_path": str(manifest_path)}
                 await self._emit(run_id, "stage_done", "INFO", {"stage": "MEDIA_SYNC"})
+
+            if stage == "PREFLIGHT":
+                await self._emit(run_id, "stage_enter", "INFO", {"stage": "PREFLIGHT"})
+                manifest_path = Path(data["manifest_path"])
+                pf = self.preflight(manifest_path)
+                await self._emit(run_id, "preflight_result", "INFO", pf)
+                self.save_checkpoint(
+                    run_id, "DZINE_RENDER",
+                    {"manifest_path": str(manifest_path), "preflight": pf},
+                )
+                stage = "DZINE_RENDER"
+                data = {"manifest_path": str(manifest_path), "preflight": pf}
+                await self._emit(run_id, "stage_done", "INFO", {"stage": "PREFLIGHT"})
+
+            if stage == "DZINE_RENDER":
+                await self._emit(run_id, "stage_enter", "INFO", {"stage": "DZINE_RENDER"})
+                manifest_path = Path(data["manifest_path"])
+                render_summary = self.dzine_render(run_id, manifest_path)
+                await self._emit(
+                    run_id, "dzine_render_done", "INFO", render_summary,
+                )
+                self.save_checkpoint(
+                    run_id, "ASSEMBLY",
+                    {"manifest_path": str(manifest_path), "render_summary": render_summary},
+                )
+                stage = "ASSEMBLY"
+                data = {"manifest_path": str(manifest_path), "render_summary": render_summary}
+                await self._emit(run_id, "stage_done", "INFO", {"stage": "DZINE_RENDER"})
 
             if stage == "ASSEMBLY":
                 await self._emit(run_id, "stage_enter", "INFO", {"stage": "ASSEMBLY"})

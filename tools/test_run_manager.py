@@ -6477,5 +6477,255 @@ class TestDzineManifestPreparation(unittest.TestCase):
             self.assertNotIn("budget_summary", manifest)
 
 
+# ==========================================================================
+# Preflight + Video probe + Index + Fail-fast tests
+# ==========================================================================
+
+class TestAtomicReadJson(unittest.TestCase):
+    """Tests for atomic_read_json with corrupt file recovery."""
+
+    def test_read_valid_json(self):
+        """Reads valid JSON file."""
+        from lib.audio_utils import atomic_read_json, atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "ok.json"
+            atomic_write_json(p, {"key": "value"})
+            result = atomic_read_json(p)
+            self.assertEqual(result["key"], "value")
+
+    def test_read_missing_returns_default(self):
+        """Missing file returns default."""
+        from lib.audio_utils import atomic_read_json
+        result = atomic_read_json(Path("/nonexistent.json"), default={"d": 1})
+        self.assertEqual(result, {"d": 1})
+
+    def test_read_corrupt_preserves_and_returns_default(self):
+        """Corrupt file is renamed .corrupt and default returned."""
+        from lib.audio_utils import atomic_read_json
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "bad.json"
+            p.write_text("{broken json!!!!")
+            result = atomic_read_json(p, default={"fallback": True})
+            self.assertEqual(result, {"fallback": True})
+            # Original renamed
+            self.assertFalse(p.exists())
+            self.assertTrue(Path(td, "bad.json.corrupt").exists())
+
+
+class TestIsVideoValid(unittest.TestCase):
+    """Tests for is_video_valid (size + ffprobe)."""
+
+    def test_missing_file(self):
+        """Missing file returns (False, 0.0)."""
+        from lib.media_manifest import is_video_valid
+        ok, dur = is_video_valid(Path("/nonexistent.mp4"), 10.0)
+        self.assertFalse(ok)
+        self.assertEqual(dur, 0.0)
+
+    def test_too_small_file(self):
+        """File below min_bytes returns False."""
+        from lib.media_manifest import is_video_valid
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "tiny.mp4"
+            p.write_bytes(b"x" * 100)
+            ok, dur = is_video_valid(p, 10.0, min_bytes=500_000)
+            self.assertFalse(ok)
+
+
+class TestVideoIndex(unittest.TestCase):
+    """Tests for video index load/upsert."""
+
+    def test_load_empty_returns_default(self):
+        """Empty index returns default structure."""
+        from lib.media_manifest import load_video_index
+        with tempfile.TemporaryDirectory() as td:
+            idx = load_video_index(Path(td) / "missing.json")
+            self.assertEqual(idx["version"], "1.0")
+            self.assertEqual(idx["items"], {})
+
+    def test_upsert_and_load(self):
+        """upsert adds item, load retrieves it."""
+        from lib.media_manifest import load_video_index, upsert_video_index
+        with tempfile.TemporaryDirectory() as td:
+            idx_path = Path(td) / "index.json"
+            upsert_video_index(idx_path, "a1b2c3d4", {
+                "segment_id": "intro",
+                "path": "/video/intro.mp4",
+                "duration": 10.5,
+            })
+            idx = load_video_index(idx_path)
+            self.assertIn("a1b2c3d4", idx["items"])
+            self.assertEqual(idx["items"]["a1b2c3d4"]["duration"], 10.5)
+
+    def test_upsert_overwrites(self):
+        """Upsert same sha8 overwrites previous entry."""
+        from lib.media_manifest import load_video_index, upsert_video_index
+        with tempfile.TemporaryDirectory() as td:
+            idx_path = Path(td) / "index.json"
+            upsert_video_index(idx_path, "abc", {"v": 1})
+            upsert_video_index(idx_path, "abc", {"v": 2})
+            idx = load_video_index(idx_path)
+            self.assertEqual(idx["items"]["abc"]["v"], 2)
+
+
+class TestPreflightGate(unittest.TestCase):
+    """Tests for orchestrator preflight GO/NO_GO."""
+
+    def _make_mock_panic(self):
+        class MockPanic:
+            def __init__(self):
+                self.calls = []
+            def report_panic(self, reason_key, run_id, error_msg, **kw):
+                self.calls.append((reason_key, run_id, error_msg))
+        return MockPanic()
+
+    def test_preflight_no_go_insufficient_credits(self):
+        """NO_GO when credits insufficient."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig, DzineBudget
+        from lib.audio_utils import atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", video_final_dir=f"{td}/vfinal",
+                video_index_path=f"{td}/index.json",
+                output_dir=f"{td}/output",
+            )
+            budget = DzineBudget(available_credits=0, cost_per_segment=1)
+            orch = RayVaultOrchestrator(
+                config=cfg, panic_mgr=self._make_mock_panic(),
+                dzine_budget=budget,
+            )
+            # Create manifest with segments
+            manifest_path = Path(td) / "jobs" / "test.json"
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(manifest_path, {
+                "run_id": "TEST-PF",
+                "segments": [
+                    {"segment_id": "s1", "audio_path": "/a.mp3", "video_path": "/v.mp4", "approx_duration_sec": 5},
+                ],
+            })
+            with self.assertRaises(RuntimeError) as ctx:
+                orch.preflight(manifest_path)
+            self.assertIn("PREFLIGHT_NO_GO", str(ctx.exception))
+
+    def test_preflight_go_with_budget(self):
+        """GO when credits sufficient (segments not cached → all need render)."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig, DzineBudget
+        from lib.audio_utils import atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", video_final_dir=f"{td}/vfinal",
+                video_index_path=f"{td}/index.json",
+                output_dir=f"{td}/output",
+            )
+            budget = DzineBudget(available_credits=10, cost_per_segment=1)
+            orch = RayVaultOrchestrator(
+                config=cfg, panic_mgr=self._make_mock_panic(),
+                dzine_budget=budget,
+            )
+            manifest_path = Path(td) / "jobs" / "test.json"
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(manifest_path, {
+                "run_id": "TEST-PF2",
+                "segments": [
+                    {"segment_id": "s1", "audio_path": "/a.mp3", "video_path": "/v.mp4", "approx_duration_sec": 5},
+                    {"segment_id": "s2", "audio_path": "/b.mp3", "video_path": "/v2.mp4", "approx_duration_sec": 5},
+                ],
+            })
+            pf = orch.preflight(manifest_path)
+            self.assertEqual(pf["status"], "GO")
+            self.assertEqual(pf["credits_needed"], 2)
+            self.assertEqual(len(pf["needs_render"]), 2)
+
+
+class TestDzineRenderFailFast(unittest.TestCase):
+    """Tests for dzine_render fail-fast behavior."""
+
+    def _make_mock_panic(self):
+        class MockPanic:
+            def __init__(self):
+                self.calls = []
+            def report_panic(self, reason_key, run_id, error_msg, **kw):
+                self.calls.append((reason_key, run_id, error_msg))
+        return MockPanic()
+
+    def test_no_dzine_agent_raises(self):
+        """dzine_render without agent raises immediately."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        from lib.audio_utils import atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", video_final_dir=f"{td}/vfinal",
+                video_index_path=f"{td}/index.json",
+                output_dir=f"{td}/output",
+            )
+            orch = RayVaultOrchestrator(
+                config=cfg, panic_mgr=self._make_mock_panic(),
+            )
+            manifest_path = Path(td) / "jobs" / "test.json"
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(manifest_path, {
+                "run_id": "TEST-DR",
+                "segments": [
+                    {"segment_id": "s1", "audio_path": "/a.mp3",
+                     "video_path": f"{td}/vfinal/V_x.mp4", "approx_duration_sec": 5},
+                ],
+            })
+            with self.assertRaises(RuntimeError) as ctx:
+                orch.dzine_render("TEST-DR", manifest_path)
+            self.assertIn("no dzine_agent", str(ctx.exception))
+
+    def test_dzine_ui_failure_panics(self):
+        """Dzine UI failure triggers panic + abort."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        from lib.audio_utils import atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", video_final_dir=f"{td}/vfinal",
+                video_index_path=f"{td}/index.json",
+                output_dir=f"{td}/output",
+            )
+
+            class FailingDzine:
+                def render_segment(self, **kw):
+                    raise RuntimeError("Playwright timeout")
+
+            pm = self._make_mock_panic()
+            orch = RayVaultOrchestrator(
+                config=cfg, panic_mgr=pm,
+                dzine_agent=FailingDzine(),
+            )
+            manifest_path = Path(td) / "jobs" / "test.json"
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(manifest_path, {
+                "run_id": "TEST-DR2",
+                "segments": [
+                    {"segment_id": "s1", "audio_path": "/a.mp3",
+                     "video_path": f"{td}/vfinal/V_x.mp4", "approx_duration_sec": 5},
+                ],
+            })
+            with self.assertRaises(RuntimeError) as ctx:
+                orch.dzine_render("TEST-DR2", manifest_path)
+            self.assertIn("DZINE_RENDER_FAIL", str(ctx.exception))
+            self.assertTrue(any("panic_dzine_ui_failure" in c[0] for c in pm.calls))
+
+
+class TestHasFfprobe(unittest.TestCase):
+    """Tests for has_ffprobe availability check."""
+
+    def test_has_ffprobe_returns_bool(self):
+        """has_ffprobe returns a boolean."""
+        from lib.media_manifest import has_ffprobe
+        result = has_ffprobe()
+        self.assertIsInstance(result, bool)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

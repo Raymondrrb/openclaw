@@ -39,10 +39,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _canonical_json(obj: Any) -> str:
@@ -383,3 +385,85 @@ def prepare_manifest_for_dzine(
     ready["prepared_at"] = datetime.now(timezone.utc).isoformat()
 
     return ready
+
+
+# ---------------------------------------------------------------------------
+# ffprobe video validation — industrial probe
+# ---------------------------------------------------------------------------
+
+_DEFAULT_TOLERANCE_SEC = 0.15
+_MIN_VIDEO_BYTES = 500_000
+
+
+def has_ffprobe() -> bool:
+    """Check if ffprobe is available on PATH."""
+    try:
+        subprocess.run(
+            ["ffprobe", "-version"],
+            capture_output=True, timeout=5,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def get_video_duration_sec(path: Path) -> float:
+    """Get video duration via ffprobe. Returns 0.0 on failure."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return 0.0
+        return float((r.stdout or "").strip() or "0")
+    except Exception:
+        return 0.0
+
+
+def is_video_valid(
+    path: Path,
+    target_sec: float,
+    *,
+    tolerance_sec: float = _DEFAULT_TOLERANCE_SEC,
+    min_bytes: int = _MIN_VIDEO_BYTES,
+) -> Tuple[bool, float]:
+    """Validate video: exists + size + duration via ffprobe.
+
+    Returns (is_valid, measured_duration_sec).
+    If ffprobe is unavailable, falls back to size-only check.
+    """
+    if not path.exists():
+        return False, 0.0
+    if path.stat().st_size < min_bytes:
+        return False, 0.0
+    dur = get_video_duration_sec(path)
+    if dur <= 0.0:
+        # ffprobe unavailable or failed — size check passed, accept cautiously
+        return False, 0.0
+    return (abs(dur - target_sec) <= tolerance_sec), dur
+
+
+# ---------------------------------------------------------------------------
+# Video index — atomic cache memory for rendered videos
+# ---------------------------------------------------------------------------
+
+def load_video_index(index_path: Path) -> Dict[str, Any]:
+    """Load video index, preserving corrupt files for forensics."""
+    from tools.lib.audio_utils import atomic_read_json
+    return atomic_read_json(index_path, default={"version": "1.0", "items": {}})
+
+
+def upsert_video_index(
+    index_path: Path,
+    sha8: str,
+    item: Dict[str, Any],
+) -> None:
+    """Atomically upsert a video entry in the index."""
+    from tools.lib.audio_utils import atomic_write_json
+    idx = load_video_index(index_path)
+    idx["items"][sha8] = item
+    atomic_write_json(index_path, idx)

@@ -218,8 +218,27 @@ def compute_file_sha256(path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Atomic file write (crash-safe)
+# Atomic file read/write (crash-safe)
 # ---------------------------------------------------------------------------
+
+def atomic_read_json(path: Path, default: Optional[dict] = None) -> Optional[dict]:
+    """Read JSON with corrupt file preservation.
+
+    If the file is corrupt (truncated, invalid JSON from a crash),
+    renames it to .corrupt for forensics and returns default.
+    """
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        bak = path.with_suffix(path.suffix + ".corrupt")
+        try:
+            path.rename(bak)
+        except OSError:
+            pass
+        return default
+
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
     """Write bytes atomically: tmp → fsync → os.replace.
