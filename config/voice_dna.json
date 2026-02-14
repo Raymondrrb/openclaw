@@ -1,6 +1,6 @@
 {
   "_doc": "Voice identity contract — the audio half of Ray's identity. Load into TTS pipeline as constraints.",
-  "version": 1,
+  "version": 2,
 
   "character": "Ray",
 
@@ -13,13 +13,16 @@
     "pitch_range": "narrow — avoid emotional swings",
     "prosody": "clear pauses, short sentences",
     "smile_in_voice": "low — no salesy grin",
-    "noise_floor": "studio clean, no reverb, no background"
+    "noise_floor": "studio clean, no reverb, no background",
+    "emotional_modulation": "none — no sarcasm, no hype, no dramatic emphasis. Neutral confidence only."
   },
 
   "never": [
     "slang drift",
     "bro energy",
     "sarcasm",
+    "dramatic emphasis",
+    "hype",
     "shouting",
     "whisper",
     "vocal fry",
@@ -32,7 +35,9 @@
     "main_points": "max 3 bullets",
     "cta": "1 line",
     "emotional_tone": "one tone per video (neutral to slightly upbeat)",
-    "sentence_length": "short and clear"
+    "sentence_length": "short and clear",
+    "word_count_full": {"min": 90, "max": 140},
+    "word_count_shorts": {"min": 60, "max": 90}
   },
 
   "tts_settings": {
@@ -50,13 +55,16 @@
       "audible background noise",
       "voice breaks or glitches",
       "emotional tone mismatch (e.g., hype in calm video)",
-      "pronunciation errors on product names"
+      "pronunciation errors on product names",
+      "sarcasm or dramatic emphasis detected",
+      "word count outside target range"
     ],
     "pass_if": [
       "sounds like the same Ray",
       "tempo consistent",
       "clean audio",
-      "natural prosody"
+      "natural prosody",
+      "neutral confident tone throughout"
     ]
   }
 }

@@ -47,11 +47,42 @@
 
   "fallback_levels": {
     "_doc": "Escalation when generation fails QC. Each level is tried before moving to next.",
-    "0_normal": "Config of the day (1 axis varied). Generate 3-6 seeds.",
-    "1_soft": "Same config, different seeds. Generate 3 more.",
-    "2_safe": "Studio + Outfit 1 + Accent 1 (all fixed). Generate 3 seeds.",
+    "0_normal": "Config of the day (1 axis varied). Use seed_ladder[0].",
+    "1_soft": "Same config. Use seed_ladder[1], then seed_ladder[2].",
+    "2_safe": "Safe Mode preset (SAFE_STUDIO_V1). Use seed_ladder[0..2].",
     "3_library": "Use approved keyframe from library. Zero generation.",
-    "4_manual": "Human intervention. Flag for operator review."
+    "4_manual": "Human intervention. Flag for operator review.",
+    "max_attempts_before_library": 6
+  },
+
+  "seed_ladder": {
+    "_doc": "Deterministic seed rotation. Makes failures reproducible and debuggable.",
+    "seeds": ["SafeSeed-01", "SafeSeed-02", "SafeSeed-03"],
+    "usage": "Level 0 tries seeds[0]. Level 1 tries seeds[1], then seeds[2]. Level 2 uses same ladder with safe prompt."
+  },
+
+  "named_prompts": {
+    "_doc": "Full assembled prompt strings with ID. Reference by ID in automation.",
+    "SAFE_STUDIO_V1": {
+      "env": "C_studio",
+      "outfit": "1_black_tee",
+      "accent": "1_warm",
+      "assembled": "Ray (use the existing Ray character identity and the verified face reference). Same exact person, same facial structure, same hairline, same beard shape, same nose and jaw proportions. Do NOT change facial structure. No alternate identity. No hairstyle changes. No beard length changes. No age changes. Medium close-up talking head. Neutral expression only. No smile. No grimace. Looking directly into the camera lens. Mouth closed, relaxed lips, clean continuous lip line for lip-sync; no teeth silhouettes; no lip shadow breaks. Clean jawline and chin contour, no shadow artifacts.\nEye-level camera, centered framing, stable composition, headroom 8-10%. 85mm lens look (no wide angle), natural perspective, no facial distortion. Shoulders relaxed. Hands out of frame.\nSoft key light from front-left 45 degrees, gentle fill from front-right, subtle rim light for separation. Neutral face light. No colored cast on skin. Skin tone unchanged. No harsh shadows under nose/lips/chin.\nProfessional studio backdrop, deep charcoal grey gradient, clean, non-distracting, subtle bokeh.\nSolid black crew-neck t-shirt, premium cotton, no logos, no patterns.\nBackground ambient slightly warm, face lighting remains neutral.\nClean cinematic realism. Natural skin texture, consistent pores, stable features across generations, clean background bokeh. No plastic skin. No waxy face."
+    },
+    "OFFICE_V1": {
+      "env": "A_office_a",
+      "outfit": "1_black_tee",
+      "accent": "1_warm",
+      "assembled": "Ray (use the existing Ray character identity and the verified face reference). Same exact person, same facial structure, same hairline, same beard shape, same nose and jaw proportions. Do NOT change facial structure. No alternate identity. No hairstyle changes. No beard length changes. No age changes. Medium close-up talking head. Neutral expression only. No smile. No grimace. Looking directly into the camera lens. Mouth closed, relaxed lips, clean continuous lip line for lip-sync; no teeth silhouettes; no lip shadow breaks. Clean jawline and chin contour, no shadow artifacts.\nEye-level camera, centered framing, stable composition, headroom 8-10%. 85mm lens look (no wide angle), natural perspective, no facial distortion. Shoulders relaxed. Hands out of frame.\nSoft key light from front-left 45 degrees, gentle fill from front-right, subtle rim light for separation. Neutral face light. No colored cast on skin. Skin tone unchanged. No harsh shadows under nose/lips/chin.\nModern minimalist tech office, blurred glass partitions, soft daylight, subtle bokeh, no readable text, no logos, neutral professional vibe.\nSolid black crew-neck t-shirt, premium cotton, no logos, no patterns.\nBackground ambient slightly warm, face lighting remains neutral.\nClean cinematic realism. Natural skin texture, consistent pores, stable features across generations, clean background bokeh. No plastic skin. No waxy face."
+    }
+  },
+
+  "failure_categories": {
+    "_doc": "Distinguish failure types for operator action and telemetry.",
+    "QC_FAIL": "Output generated but failed visual QC (mouth, eyes, identity)",
+    "GEN_FAIL": "Tool error, timeout, or Dzine API failure",
+    "ID_FAIL": "Identity drift — face does not match Keyframe Zero",
+    "FILE_FAIL": "Missing asset file on disk"
   },
 
   "drift_regression": {

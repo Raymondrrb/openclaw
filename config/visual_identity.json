@@ -101,5 +101,35 @@
     },
     "approval_threshold": "green_zone_only",
     "min_qc_score": 8
+  },
+
+  "identity_proof": {
+    "_doc": "Metadata stored with every approved asset for forensic traceability.",
+    "fields": {
+      "confidence": "HIGH | MEDIUM | LOW",
+      "reason": "reference_locked | dna_match | fingerprint_match | forced_no_sha8",
+      "at": "ISO timestamp of approval",
+      "operator_note": "optional operator reason"
+    },
+    "confidence_rules": {
+      "HIGH": "sha8 in filename + visual QC green + overlay test pass",
+      "MEDIUM": "no sha8 but size+mtime match + visual QC yellow-or-better",
+      "LOW": "no sha8, no fingerprint, allow-missing-sha8 override"
+    }
+  },
+
+  "status_summary_fields": {
+    "_doc": "Standard fields every generation run must produce in status_summary.txt.",
+    "required": [
+      "run_id",
+      "visual_qc_result",
+      "visual_fail_reason",
+      "fallback_level",
+      "seed_used",
+      "prompt_id",
+      "identity_confidence",
+      "voice_profile",
+      "tts_stability_setting"
+    ]
   }
 }
