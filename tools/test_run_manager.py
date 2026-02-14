@@ -2143,5 +2143,156 @@ class TestDoctor(unittest.TestCase):
         self.assertEqual(results["counts"]["lat_crit"], 1)
 
 
+# ==========================================================================
+# PID file tests
+# ==========================================================================
+
+class TestPidFile(unittest.TestCase):
+    """Tests for PID file management in worker.py."""
+
+    def setUp(self):
+        from tools.worker import _RUNTIME_DIR, _PID_FILE
+        self._orig_runtime = _RUNTIME_DIR
+        self._orig_pid = _PID_FILE
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="test_pid_"))
+        # Monkey-patch PID paths for testing
+        import tools.worker as _w
+        _w._RUNTIME_DIR = self.tmpdir
+        _w._PID_FILE = self.tmpdir / "worker.pid"
+
+    def tearDown(self):
+        import shutil
+        import tools.worker as _w
+        _w._RUNTIME_DIR = self._orig_runtime
+        _w._PID_FILE = self._orig_pid
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_write_and_read_pid(self):
+        """write_pid creates file, read_pid returns current PID."""
+        from tools.worker import write_pid, read_pid
+        write_pid()
+        pid = read_pid()
+        self.assertEqual(pid, os.getpid())
+
+    def test_remove_pid(self):
+        """remove_pid deletes the PID file."""
+        from tools.worker import write_pid, read_pid, remove_pid
+        write_pid()
+        remove_pid()
+        self.assertIsNone(read_pid())
+
+    def test_read_pid_no_file(self):
+        """read_pid returns None when no file exists."""
+        from tools.worker import read_pid
+        self.assertIsNone(read_pid())
+
+
+# ==========================================================================
+# CLI arg parsing tests
+# ==========================================================================
+
+class TestCliParsing(unittest.TestCase):
+    """Tests for rayvault_cli.py argument parsing."""
+
+    def test_doctor_default_flags(self):
+        """doctor with no flags does all (spool + health + contract)."""
+        # Add repo root to path
+        _repo_root = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(_repo_root))
+        from rayvault_cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["doctor"])
+        self.assertEqual(args.cmd, "doctor")
+        # No specific flags = will do all
+        self.assertFalse(getattr(args, "do_spool_flag", False))
+        self.assertFalse(getattr(args, "do_health_flag", False))
+        self.assertFalse(getattr(args, "do_contract_flag", False))
+
+    def test_doctor_specific_flags(self):
+        """doctor --health only sets health flag."""
+        _repo_root = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(_repo_root))
+        from rayvault_cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["doctor", "--health"])
+        self.assertTrue(args.do_health_flag)
+        self.assertFalse(args.do_spool_flag)
+
+    def test_unlock_requires_run(self):
+        """unlock without --run should fail."""
+        _repo_root = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(_repo_root))
+        from rayvault_cli import build_parser
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["unlock"])
+
+    def test_stop_force_flag(self):
+        """stop --force sets force=True."""
+        _repo_root = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(_repo_root))
+        from rayvault_cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["stop", "--force"])
+        self.assertTrue(args.force)
+
+
+# ==========================================================================
+# Contract check tests
+# ==========================================================================
+
+class TestContractCheck(unittest.TestCase):
+    """Tests for RPC contract verification."""
+
+    def test_contract_all_pass(self):
+        """check_rpc_contract with all 200 returns all passed."""
+        from lib.doctor import check_rpc_contract
+
+        def mock_post(url, data, headers, timeout=15):
+            return 200, "null"
+
+        with patch("lib.doctor._http_post", side_effect=mock_post):
+            passed, failed = check_rpc_contract("http://fake", "key")
+        self.assertEqual(len(passed), 4)
+        self.assertEqual(len(failed), 0)
+
+    def test_contract_400_is_pass(self):
+        """400 (bad params) still means function exists = pass."""
+        from lib.doctor import check_rpc_contract
+
+        def mock_post(url, data, headers, timeout=15):
+            return 400, '{"message":"invalid input"}'
+
+        with patch("lib.doctor._http_post", side_effect=mock_post):
+            passed, failed = check_rpc_contract("http://fake", "key")
+        self.assertEqual(len(passed), 4)
+
+    def test_contract_404_is_fail(self):
+        """404 (function not found) = fail."""
+        from lib.doctor import check_rpc_contract
+
+        def mock_post(url, data, headers, timeout=15):
+            if "rpc_claim_next_run" in url:
+                return 404, "not found"
+            return 200, "null"
+
+        with patch("lib.doctor._http_post", side_effect=mock_post):
+            passed, failed = check_rpc_contract("http://fake", "key")
+        self.assertEqual(len(failed), 1)
+        self.assertIn("rpc_claim_next_run", failed)
+        self.assertEqual(len(passed), 3)
+
+    def test_contract_403_is_fail(self):
+        """403 (permission denied) = fail."""
+        from lib.doctor import check_rpc_contract
+
+        def mock_post(url, data, headers, timeout=15):
+            return 403, "permission denied"
+
+        with patch("lib.doctor._http_post", side_effect=mock_post):
+            passed, failed = check_rpc_contract("http://fake", "key")
+        self.assertEqual(len(failed), 4)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

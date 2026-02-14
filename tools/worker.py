@@ -74,8 +74,40 @@ DEFAULT_POLL_JITTER = 15     # max random jitter added to poll interval
 DEFAULT_LEASE_MINUTES = 15
 QUARANTINE_SECONDS = 45      # wait after panic_heartbeat_uncertain before retry
 
+# PID file for safe stop
+_RUNTIME_DIR = _repo / "state" / "runtime"
+_PID_FILE = _RUNTIME_DIR / "worker.pid"
+
 # Global stop signal — set by SIGINT/SIGTERM or panic
 _stop_signal = threading.Event()
+
+
+# ---------------------------------------------------------------------------
+# PID file management
+# ---------------------------------------------------------------------------
+
+def write_pid() -> None:
+    """Write current PID to state/runtime/worker.pid."""
+    _RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    _PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+
+
+def remove_pid() -> None:
+    """Remove PID file on clean exit."""
+    try:
+        _PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def read_pid() -> int | None:
+    """Read worker PID from file. Returns None if not found."""
+    if not _PID_FILE.exists():
+        return None
+    try:
+        return int(_PID_FILE.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return None
 
 # Pipeline stages in execution order
 STAGES = (
@@ -491,12 +523,17 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    return worker_loop(
-        worker_id,
-        lease_minutes=args.lease,
-        poll_interval=args.poll,
-        once=args.once,
-    )
+    # PID file for safe stop
+    write_pid()
+    try:
+        return worker_loop(
+            worker_id,
+            lease_minutes=args.lease,
+            poll_interval=args.poll,
+            once=args.once,
+        )
+    finally:
+        remove_pid()
 
 
 if __name__ == "__main__":

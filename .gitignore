@@ -96,6 +96,7 @@ logs/
 runs/
 spool/
 checkpoints/
+state/
 data/error_log.json
 data/niche_history.json
 supabase/.temp/

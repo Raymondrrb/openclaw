@@ -384,6 +384,83 @@ def print_report(
 
 
 # ---------------------------------------------------------------------------
+# RPC contract check
+# ---------------------------------------------------------------------------
+
+# RPCs that must be callable by service_role
+_REQUIRED_RPCS = (
+    "rpc_claim_next_run",
+    "cas_heartbeat_run",
+    "rpc_release_run",
+    "rpc_force_unlock_run",
+)
+
+
+def check_rpc_contract(
+    supabase_url: str,
+    service_key: str,
+    timeout: int = 15,
+) -> Tuple[List[str], List[str]]:
+    """Verify all required RPCs are callable.
+
+    Makes a harmless POST to each RPC endpoint with minimal params.
+    Expected: 200 (returns result) or 400 (bad params but function exists).
+    Failure: 404 (function missing) or 403 (permission denied).
+
+    Returns (passed, failed) lists of RPC names.
+    """
+    headers = _make_headers(service_key)
+    passed = []
+    failed = []
+
+    # Minimal payloads that exercise the function signature without side effects
+    rpc_payloads = {
+        "rpc_claim_next_run": {
+            "p_worker_id": "__contract_check__",
+            "p_lock_token": "00000000-0000-0000-0000-000000000000",
+            "p_lease_minutes": 1,
+            "p_task_type": None,
+        },
+        "cas_heartbeat_run": {
+            "p_run_id": "00000000-0000-0000-0000-000000000000",
+            "p_worker_id": "__contract_check__",
+            "p_lock_token": "00000000-0000-0000-0000-000000000000",
+            "p_lease_minutes": 1,
+        },
+        "rpc_release_run": {
+            "p_run_id": "00000000-0000-0000-0000-000000000000",
+            "p_worker_id": "__contract_check__",
+            "p_lock_token": "00000000-0000-0000-0000-000000000000",
+        },
+        "rpc_force_unlock_run": {
+            "p_run_id": "00000000-0000-0000-0000-000000000000",
+            "p_operator_id": "__contract_check__",
+            "p_reason": "contract_check",
+            "p_force": False,
+        },
+    }
+
+    for rpc_name in _REQUIRED_RPCS:
+        url = f"{supabase_url}/rest/v1/rpc/{rpc_name}"
+        payload = rpc_payloads.get(rpc_name, {})
+        status, body = _http_post(url, payload, headers, timeout=timeout)
+
+        # 200 = function exists and ran (may return null/false — that's fine)
+        # 400 = function exists but params invalid (still means it's deployed)
+        # 404 = function not found
+        # 403 = permission denied (REVOKE/GRANT issue)
+        if status in (200, 204):
+            passed.append(rpc_name)
+        elif status == 400:
+            # Function exists but rejected params — contract OK
+            passed.append(rpc_name)
+        else:
+            failed.append(rpc_name)
+
+    return passed, failed
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -396,11 +473,13 @@ def main() -> int:
                         help="Replay pending spool events to Supabase")
     parser.add_argument("--health", action="store_true",
                         help="Run health checks (ghost runs, latency, stale gates)")
+    parser.add_argument("--check-contract", action="store_true",
+                        help="Verify all required RPCs are deployed and callable")
     parser.add_argument("--all", action="store_true",
-                        help="Run both --replay-spool and --health (morning routine)")
+                        help="Run --replay-spool + --health + --check-contract")
     args = parser.parse_args()
 
-    if not (args.replay_spool or args.health or args.all):
+    if not (args.replay_spool or args.health or args.check_contract or args.all):
         parser.print_help()
         return 1
 
@@ -412,6 +491,7 @@ def main() -> int:
 
     do_spool = args.replay_spool or args.all
     do_health = args.health or args.all
+    do_contract = args.check_contract or args.all
 
     spool_stats = None
     if do_spool:
@@ -422,6 +502,22 @@ def main() -> int:
             timeout=cfg.rpc_timeout_sec,
         )
 
+    # Contract check
+    contract_failed = []
+    if do_contract:
+        passed, failed = check_rpc_contract(
+            secrets.supabase_url,
+            secrets.supabase_service_key,
+            timeout=cfg.rpc_timeout_sec,
+        )
+        contract_failed = failed
+        for name in passed:
+            print(f"[CONTRACT] PASS: {name}")
+        for name in failed:
+            print(f"[CONTRACT] FAIL: {name}")
+        if not failed:
+            print(f"[CONTRACT] All {len(passed)} RPCs callable.")
+
     results: Dict[str, Any] = {"counts": {}}
     if do_health:
         results = health_check(
@@ -431,13 +527,15 @@ def main() -> int:
             timeout=cfg.rpc_timeout_sec,
         )
 
-    print_report(results, cfg.thresholds, spool_stats=spool_stats)
+    if do_health or spool_stats:
+        print_report(results, cfg.thresholds, spool_stats=spool_stats)
 
     # Exit code: 2=CRITICAL, 1=WARN, 0=ok (automatable via cron)
     c = results.get("counts", {})
     has_critical = (
         c.get("stale_workers", 0) > 0
         or c.get("lat_crit", 0) > 0
+        or len(contract_failed) > 0
     )
     has_warn = (
         c.get("ghost", 0) > 0

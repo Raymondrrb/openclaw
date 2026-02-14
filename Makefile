@@ -1,18 +1,28 @@
-.PHONY: health replay doctor stress test clean logs quarantine purge_spool worker
+.PHONY: doctor health replay check-contract worker stop stop_force test stress clean logs quarantine purge_spool
 
 # --- Morning routine ---
 doctor:
-	python3 -m tools.lib.doctor --all
+	python3 rayvault_cli.py doctor
 
 health:
-	python3 -m tools.lib.doctor --health
+	python3 rayvault_cli.py health
 
 replay:
-	python3 -m tools.lib.doctor --replay-spool
+	python3 rayvault_cli.py replay-spool
 
-# --- Worker ---
+check-contract:
+	python3 rayvault_cli.py check-contract
+
+# --- Worker (caffeinate keeps Mac awake during processing) ---
 worker:
-	python3 tools/worker.py --worker-id Mac-Ray-01
+	caffeinate -dimsu python3 rayvault_cli.py worker
+
+# --- Stop worker safely (PID file, SIGTERM) ---
+stop:
+	python3 rayvault_cli.py stop
+
+stop_force:
+	python3 rayvault_cli.py stop --force
 
 # --- Testing ---
 test:
