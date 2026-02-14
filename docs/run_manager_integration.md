@@ -395,10 +395,86 @@ python3 tools/rayvault_unlock.py --run <UUID> --operator Ray --json
 5. **Force requires explicit flag** — default only works on expired leases
 6. **Forensic trail** — every unlock writes `manual_unlock` event with operator, reason, previous lock info
 
+## Heartbeat Panic Protocol
+
+The HeartbeatManager runs a background thread that renews the lease and detects lock loss.
+
+### Worker Loop with Heartbeat
+
+```python
+from tools.lib.run_manager import RunManager, LostLock
+
+def on_panic(run_id, reason):
+    """Stop Dzine/OpenClaw automation immediately."""
+    # Option 1: Playwright — browser.close()
+    # Option 2: Selenium — driver.quit()
+    # Option 3: kill PID of browser you launched (never pkill generic)
+    pass
+
+rm = RunManager.claim_next(worker_id="RayMac-01")
+if rm is None:
+    return  # no runs in queue
+
+hb = rm.start_heartbeat(on_panic=on_panic)
+
+try:
+    for stage in ["collect_evidence", "generate_script", "dzine_render", "finalize"]:
+        hb.check_or_raise()  # raises LostLock if lock was lost
+        do_stage(stage)
+
+    rm.complete()
+
+except LostLock:
+    # PANIC: stop everything, don't make it worse
+    save_local_checkpoint(rm.run_id, stage)
+    # Event already logged by HeartbeatManager
+
+except Exception as e:
+    rm.fail(str(e))
+```
+
+### Panic Types (forensic autopsy)
+
+| Event Type | Meaning | Action |
+|------------|---------|--------|
+| `panic_lost_lock` | RPC returned `false` — lock stolen by another worker | Concurrency issue. Check if lease was too short. |
+| `panic_heartbeat_uncertain` | Network failed after 3 retries — can't confirm lock | Infrastructure issue. Check connectivity, Supabase health. |
+
+### Heartbeat Configuration
+
+| Parameter | Default | Recommended |
+|-----------|---------|-------------|
+| `lease_minutes` | 10 | 15 (more margin) |
+| `interval_seconds` | 120 | 120 (heartbeat every 2 min) |
+| `jitter_seconds` | 15 | 15 (±15s randomization) |
+| `max_retries` | 3 | 3 (delays: 0s, 2s, 5s) |
+
+Rule: `heartbeat_interval < lease / 3` (gives 3 chances before expiry).
+
+### Waiting Approval Behavior
+
+When a run enters `waiting_approval`:
+1. Heartbeat RPC stops succeeding (status not in allowed list)
+2. Worker should stop heartbeating, save checkpoint
+3. Lease expires naturally (~10-15 min)
+4. When human approves, worker reclaims
+
+### Worker Health Columns (010)
+
+| Column | Type | Purpose |
+|--------|------|---------|
+| `last_heartbeat_at` | timestamptz | When the last successful heartbeat was |
+| `worker_state` | text | `idle` / `active` / `panic` |
+| `worker_last_error` | text | Short error message from last failure |
+
+Dashboard rules:
+- `now() - last_heartbeat_at > 3 min` → yellow (slow heartbeat)
+- `now() > lock_expires_at` → red (probable zombie / dead worker)
+
 ## Testing
 
 ```bash
-# Run all 96 tests
+# Run all 108 tests
 python3 tools/test_run_manager.py
 
 # Tests cover:
@@ -415,6 +491,7 @@ python3 tools/test_run_manager.py
 # - Snapshot integrity (2 tests)
 # - Worker lease + SRE guardrails (17 tests)
 # - Claim next + force unlock (5 tests)
+# - HeartbeatManager + panic protocol (12 tests)
 # - Telegram callback parsing (5 tests)
 # - Telegram gate handler (5 tests)
 # - Context builder (8 tests)

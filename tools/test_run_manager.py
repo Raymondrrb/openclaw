@@ -61,6 +61,8 @@ from lib.context_builder import (
 from lib.run_manager import (
     RunManager,
     RunState,
+    HeartbeatManager,
+    LostLock,
     VALID_TRANSITIONS,
     BLOCKED_STATES,
     ACTIVE_STATES,
@@ -69,6 +71,7 @@ from lib.run_manager import (
     MIN_LEASE_MINUTES,
     MAX_LEASE_MINUTES,
     MIN_WORKER_ID_LEN,
+    HEARTBEAT_INTERVAL_SECONDS,
 )
 from lib.telegram_gate import (
     parse_callback_data,
@@ -885,6 +888,154 @@ class TestClaimNextAndForceUnlock(unittest.TestCase):
         self.assertEqual(RunManager._clamp_lease(-5), MIN_LEASE_MINUTES)
         self.assertEqual(RunManager._clamp_lease(10), 10)
         self.assertEqual(RunManager._clamp_lease(999), MAX_LEASE_MINUTES)
+
+
+class TestHeartbeatManager(unittest.TestCase):
+    """HeartbeatManager panic protocol tests."""
+
+    def _make_running_rm(self) -> RunManager:
+        rm = RunManager("hb-run-1", use_supabase=False, worker_id="RayMac-01")
+        rm.start()
+        rm.claim()
+        return rm
+
+    def test_check_or_raise_when_healthy(self):
+        """check_or_raise does nothing when lock is held."""
+        rm = self._make_running_rm()
+        hb = HeartbeatManager(rm, interval_seconds=9999)
+        # Don't start thread — just test check_or_raise
+        hb.check_or_raise()  # should not raise
+
+    def test_check_or_raise_when_lost(self):
+        """check_or_raise raises LostLock after lock loss."""
+        rm = self._make_running_rm()
+        hb = HeartbeatManager(rm, interval_seconds=9999)
+        # Simulate lock loss
+        hb._lost_event.set()
+        hb._panic_reason = "test: lock stolen"
+        with self.assertRaises(LostLock) as ctx:
+            hb.check_or_raise()
+        self.assertIn("lock stolen", str(ctx.exception))
+
+    def test_lost_lock_property(self):
+        """lost_lock property reflects internal state."""
+        rm = self._make_running_rm()
+        hb = HeartbeatManager(rm, interval_seconds=9999)
+        self.assertFalse(hb.lost_lock)
+        hb._lost_event.set()
+        self.assertTrue(hb.lost_lock)
+
+    def test_heartbeat_success(self):
+        """Successful heartbeat returns True in _heartbeat_with_retries."""
+        rm = self._make_running_rm()
+        hb = HeartbeatManager(rm, interval_seconds=9999)
+        # In local mode, heartbeat() returns True (has a token)
+        result = hb._heartbeat_with_retries()
+        self.assertTrue(result)
+
+    def test_heartbeat_explicit_false_no_retry(self):
+        """Explicit False from heartbeat → immediate PANIC, no retry."""
+        rm = self._make_running_rm()
+        hb = HeartbeatManager(rm, interval_seconds=9999)
+        # Mock heartbeat to return False (lock stolen)
+        call_count = 0
+        original_hb = rm.heartbeat
+        def mock_heartbeat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return False
+        rm.heartbeat = mock_heartbeat
+        result = hb._heartbeat_with_retries()
+        self.assertFalse(result)
+        self.assertEqual(call_count, 1)  # no retry on explicit False
+        self.assertEqual(hb._panic_type, "panic_lost_lock")
+        rm.heartbeat = original_hb
+
+    def test_heartbeat_network_failure_retries(self):
+        """Network failure retries 3 times then PANICs."""
+        rm = self._make_running_rm()
+        hb = HeartbeatManager(rm, interval_seconds=9999, max_retries=3)
+        call_count = 0
+        original_hb = rm.heartbeat
+        def mock_heartbeat(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise ConnectionError("network down")
+        rm.heartbeat = mock_heartbeat
+        result = hb._heartbeat_with_retries()
+        self.assertFalse(result)
+        self.assertEqual(call_count, 3)  # retried 3 times
+        self.assertEqual(hb._panic_type, "panic_heartbeat_uncertain")
+        rm.heartbeat = original_hb
+
+    def test_enter_panic_logs_event(self):
+        """_enter_panic logs a forensic event."""
+        rm = self._make_running_rm()
+        hb = HeartbeatManager(rm, interval_seconds=9999)
+        hb._panic_type = "panic_lost_lock"
+        hb._panic_reason = "test panic"
+        hb._enter_panic()
+        event_types = [e["event_type"] for e in rm.get_events()]
+        self.assertIn("panic_lost_lock", event_types)
+
+    def test_enter_panic_calls_on_panic_hook(self):
+        """on_panic callback is called with run_id and reason."""
+        rm = self._make_running_rm()
+        hook_calls = []
+        def on_panic(run_id, reason):
+            hook_calls.append((run_id, reason))
+        hb = HeartbeatManager(rm, interval_seconds=9999, on_panic=on_panic)
+        hb._panic_type = "panic_lost_lock"
+        hb._panic_reason = "test hook"
+        hb._enter_panic()
+        self.assertEqual(len(hook_calls), 1)
+        self.assertEqual(hook_calls[0][0], "hb-run-1")
+        self.assertIn("test hook", hook_calls[0][1])
+
+    def test_start_heartbeat_integration(self):
+        """RunManager.start_heartbeat returns a HeartbeatManager."""
+        rm = self._make_running_rm()
+        hb = rm.start_heartbeat(interval_seconds=9999)
+        self.assertIsInstance(hb, HeartbeatManager)
+        self.assertFalse(hb.lost_lock)
+        rm.stop_heartbeat()
+
+    def test_stop_heartbeat_integration(self):
+        """RunManager.stop_heartbeat stops the thread."""
+        rm = self._make_running_rm()
+        hb = rm.start_heartbeat(interval_seconds=9999)
+        rm.stop_heartbeat()
+        self.assertIsNone(rm._heartbeat_manager)
+
+    def test_complete_stops_heartbeat(self):
+        """complete() auto-stops the heartbeat thread."""
+        rm = self._make_running_rm()
+        hb = rm.start_heartbeat(interval_seconds=9999)
+        rm.complete()
+        self.assertIsNone(rm._heartbeat_manager)
+
+    def test_panic_distinct_types(self):
+        """Lost lock and network uncertainty produce different event types."""
+        rm1 = RunManager("hb-panic-1", use_supabase=False, worker_id="Worker-A")
+        rm1.start(); rm1.claim()
+        hb1 = HeartbeatManager(rm1, interval_seconds=9999)
+        hb1._panic_type = "panic_lost_lock"
+        hb1._panic_reason = "lock stolen"
+        hb1._enter_panic()
+
+        rm2 = RunManager("hb-panic-2", use_supabase=False, worker_id="Worker-B")
+        rm2.start(); rm2.claim()
+        hb2 = HeartbeatManager(rm2, interval_seconds=9999)
+        hb2._panic_type = "panic_heartbeat_uncertain"
+        hb2._panic_reason = "network failure"
+        hb2._enter_panic()
+
+        types1 = [e["event_type"] for e in rm1.get_events()]
+        types2 = [e["event_type"] for e in rm2.get_events()]
+        self.assertIn("panic_lost_lock", types1)
+        self.assertNotIn("panic_heartbeat_uncertain", types1)
+        self.assertIn("panic_heartbeat_uncertain", types2)
+        self.assertNotIn("panic_lost_lock", types2)
 
 
 # =========================================================================

@@ -14,29 +14,33 @@ the agent saw, decided, and why. Phase markers:
 Integrates with circuit_breaker.py for evidence gating and
 telegram_gate.py for human approval.
 
+HeartbeatManager runs a background thread that renews the worker lease.
+On lock loss → LostLock exception → worker stops immediately.
+
 Stdlib only.
 
 Usage:
-    from lib.run_manager import RunManager
+    from lib.run_manager import RunManager, LostLock
 
-    rm = RunManager(run_id)
+    rm = RunManager(run_id, worker_id="RayMac-01")
     rm.start(context_pack, evidence)
+    rm.claim()
+    hb = rm.start_heartbeat()
 
-    # Before any expensive step:
-    if not rm.check_status():
-        return  # blocked — waiting approval
+    for stage in ["collect", "generate", "render"]:
+        hb.check_or_raise()  # raises LostLock if lock was lost
+        do_work(stage)
 
-    # After evidence collection:
-    cb_result = rm.evaluate_and_gate(evidence_items)
-    if cb_result.should_gate:
-        # Already handled: auto-refetch or Telegram gate sent
-        return
+    rm.complete()
 """
 
 from __future__ import annotations
 
 import json
+import random
 import sys
+import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -44,10 +48,201 @@ from typing import Any, Callable
 from tools.lib.common import now_iso
 
 
+# ---------------------------------------------------------------------------
+# LostLock exception — raised when the worker loses its lock on a run
+# ---------------------------------------------------------------------------
+
+class LostLock(Exception):
+    """Raised when the worker loses its lock on a run.
+
+    The worker MUST stop all automation immediately:
+    - Do not click, render, or generate anything
+    - Save a local checkpoint (run_id, stage, last item)
+    - Log a panic_lost_lock event if possible
+    """
+    pass
+
+
 def _future_iso(minutes: int) -> str:
     """Return ISO timestamp N minutes in the future."""
     from datetime import datetime, timezone, timedelta
     return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat Manager — background thread that renews the worker lease
+# ---------------------------------------------------------------------------
+
+# Default heartbeat configuration
+HEARTBEAT_INTERVAL_SECONDS = 120     # 2 minutes
+HEARTBEAT_JITTER_SECONDS = 15       # ±15s randomization
+HEARTBEAT_MAX_RETRIES = 3           # retries on network failure
+HEARTBEAT_RETRY_DELAYS = (0, 2, 5)  # seconds between retries
+
+
+class HeartbeatManager:
+    """Background thread that renews the worker lease and detects lock loss.
+
+    Two failure modes, handled differently:
+    - heartbeat() returns False → lock stolen or status changed. Immediate PANIC.
+    - heartbeat() raises exception → network issue. Retry with backoff, then PANIC.
+
+    On PANIC:
+    - Sets lost_lock flag (check with .lost_lock or .check_or_raise())
+    - Logs panic_lost_lock event to run_events
+    - Calls on_panic callback if provided (e.g., stop Dzine browser)
+
+    Usage:
+        hb = HeartbeatManager(rm)
+        hb.start()
+
+        for stage in stages:
+            hb.check_or_raise()  # raises LostLock
+            do_work(stage)
+
+        hb.stop()  # clean shutdown
+    """
+
+    def __init__(
+        self,
+        run_manager: "RunManager",
+        *,
+        interval_seconds: int = HEARTBEAT_INTERVAL_SECONDS,
+        jitter_seconds: int = HEARTBEAT_JITTER_SECONDS,
+        max_retries: int = HEARTBEAT_MAX_RETRIES,
+        on_panic: Callable[[str, str], None] | None = None,
+    ):
+        """
+        Args:
+            run_manager: The RunManager instance to heartbeat for.
+            interval_seconds: Base interval between heartbeats (default 120s).
+            jitter_seconds: Max random jitter added to interval (default 15s).
+            max_retries: Retries on network failure before PANIC (default 3).
+            on_panic: Optional callback(run_id, reason) called on lock loss.
+                      Use this to stop Dzine/OpenClaw automation.
+        """
+        self._rm = run_manager
+        self._interval = interval_seconds
+        self._jitter = jitter_seconds
+        self._max_retries = max_retries
+        self._on_panic = on_panic
+        self._stop_event = threading.Event()
+        self._lost_event = threading.Event()
+        self._panic_reason = ""
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> threading.Thread:
+        """Start the heartbeat background thread. Returns the thread."""
+        self._thread = threading.Thread(
+            target=self._loop,
+            daemon=True,
+            name=f"heartbeat-{self._rm.run_id[:8]}",
+        )
+        self._thread.start()
+        return self._thread
+
+    def stop(self) -> None:
+        """Stop the heartbeat thread. Safe to call multiple times."""
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+
+    @property
+    def lost_lock(self) -> bool:
+        """True if the lock was lost (PANIC state)."""
+        return self._lost_event.is_set()
+
+    @property
+    def panic_reason(self) -> str:
+        """Human-readable reason for the PANIC, if any."""
+        return self._panic_reason
+
+    def check_or_raise(self) -> None:
+        """Check lock status. Raises LostLock if the lock was lost.
+
+        Call this before every expensive operation in your pipeline.
+        """
+        if self._lost_event.is_set():
+            raise LostLock(self._panic_reason or "Lock lost")
+
+    def _loop(self) -> None:
+        """Main heartbeat loop. Runs in background thread."""
+        while not self._stop_event.is_set():
+            # Sleep with jitter (interruptible by stop)
+            sleep_time = self._interval + random.randint(0, self._jitter)
+            if self._stop_event.wait(timeout=sleep_time):
+                return  # clean stop
+
+            ok = self._heartbeat_with_retries()
+            if not ok:
+                self._enter_panic()
+                return
+
+    def _heartbeat_with_retries(self) -> bool:
+        """Try heartbeat with retries on network failure.
+
+        Returns True if heartbeat succeeded.
+        Returns False if:
+        - heartbeat() explicitly returned False (lock stolen → no retry)
+        - All retry attempts failed (network down → PANIC by uncertainty)
+
+        Sets self._panic_type to distinguish:
+        - "panic_lost_lock" — RPC responded false (definitive)
+        - "panic_heartbeat_uncertain" — network failures, can't confirm
+        """
+        delays = list(HEARTBEAT_RETRY_DELAYS[:self._max_retries])
+        for delay in delays:
+            if delay:
+                time.sleep(delay)
+            try:
+                result = self._rm.heartbeat()
+                if result:
+                    return True
+                # Explicit False from DB: lock stolen or status changed.
+                # Don't retry — this is a definitive answer.
+                self._panic_type = "panic_lost_lock"
+                self._panic_reason = (
+                    "heartbeat rejected (lock stolen or status changed)"
+                )
+                return False
+            except Exception:
+                # Network error — retry
+                continue
+
+        # All retries exhausted — uncertain, treat as PANIC
+        self._panic_type = "panic_heartbeat_uncertain"
+        self._panic_reason = "heartbeat network failure after retries"
+        return False
+
+    def _enter_panic(self) -> None:
+        """Enter PANIC state: set flag, log event, call on_panic hook."""
+        self._lost_event.set()
+
+        event_type = getattr(self, "_panic_type", "panic_lost_lock")
+
+        # Log forensic event (separate types for autopsy)
+        self._rm._log_event(event_type, {
+            "worker_id": self._rm._state.worker_id,
+            "run_id": self._rm.run_id,
+            "lock_token": self._rm._state.lock_token,
+            "reason": self._panic_reason,
+        })
+
+        print(
+            f"[heartbeat] PANIC ({event_type}): {self._panic_reason} "
+            f"(run={self._rm.run_id}, worker={self._rm._state.worker_id})",
+            file=sys.stderr,
+        )
+
+        # Call on_panic hook (e.g., close Dzine browser, driver.quit())
+        if self._on_panic:
+            try:
+                self._on_panic(self._rm.run_id, self._panic_reason)
+            except Exception as exc:
+                print(
+                    f"[heartbeat] on_panic hook failed: {exc}",
+                    file=sys.stderr,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -277,26 +472,29 @@ class RunManager:
         return self._transition("in_progress", reason="run started")
 
     def complete(self, *, final_evidence: dict | None = None) -> bool:
-        """Mark run as done. Records final snapshot. Auto-releases worker lock."""
+        """Mark run as done. Stops heartbeat, releases lock."""
         self._update_snapshot(phase="final", extra={"final_evidence": final_evidence or {}})
         ok = self._transition("done", reason="all stages complete")
         if ok:
+            self.stop_heartbeat()
             self.release_lock()
         return ok
 
     def fail(self, error: str) -> bool:
-        """Mark run as failed. Auto-releases worker lock."""
+        """Mark run as failed. Stops heartbeat, releases lock."""
         self._update_snapshot(phase="failed", extra={"error": error})
         ok = self._transition("failed", reason=error)
         if ok:
+            self.stop_heartbeat()
             self.release_lock()
         return ok
 
     def abort(self, reason: str = "user abort") -> bool:
-        """Mark run as aborted. Auto-releases worker lock."""
+        """Mark run as aborted. Stops heartbeat, releases lock."""
         self._update_snapshot(phase="aborted", extra={"abort_reason": reason})
         ok = self._transition("aborted", reason=reason)
         if ok:
+            self.stop_heartbeat()
             self.release_lock()
         return ok
 
@@ -497,6 +695,43 @@ class RunManager:
     @property
     def lock_token(self) -> str:
         return self._state.lock_token
+
+    # --- Heartbeat manager integration ---
+
+    def start_heartbeat(
+        self,
+        *,
+        interval_seconds: int = HEARTBEAT_INTERVAL_SECONDS,
+        jitter_seconds: int = HEARTBEAT_JITTER_SECONDS,
+        on_panic: Callable[[str, str], None] | None = None,
+    ) -> HeartbeatManager:
+        """Start a background heartbeat thread for this run.
+
+        Returns the HeartbeatManager instance. Call check_or_raise()
+        before every expensive operation in your pipeline.
+
+        Args:
+            interval_seconds: Base heartbeat interval (default 120s).
+            jitter_seconds: Random jitter (default 15s).
+            on_panic: Callback(run_id, reason) called on lock loss.
+                      Use to stop Dzine/OpenClaw automation.
+        """
+        hb = HeartbeatManager(
+            self,
+            interval_seconds=interval_seconds,
+            jitter_seconds=jitter_seconds,
+            on_panic=on_panic,
+        )
+        hb.start()
+        self._heartbeat_manager = hb
+        return hb
+
+    def stop_heartbeat(self) -> None:
+        """Stop the heartbeat thread if running."""
+        hb = getattr(self, "_heartbeat_manager", None)
+        if hb:
+            hb.stop()
+            self._heartbeat_manager = None
 
     # --- Claim-next: atomic "give me the next run" ---
 

@@ -1,8 +1,9 @@
--- Claim-next worker queue + force-unlock RPC.
+-- Claim-next worker queue + force-unlock RPC + heartbeat hardening.
 -- Run in Supabase SQL Editor after 009_worker_lease_lock.sql.
 --
 -- rpc_claim_next_run: atomic "give me the next eligible run" (FOR UPDATE SKIP LOCKED).
 -- rpc_force_unlock_run: operator unlock with forensic trail in run_events.
+-- cas_heartbeat_run: updated — removes waiting_approval, adds last_heartbeat_at.
 --
 -- All RPCs: SET search_path = public, lease clamp 1-30, worker_id validation.
 
@@ -161,5 +162,57 @@ begin
     end if;
 
     return false;
+end;
+$$;
+
+-- ==========================================================================
+-- 4. Worker health columns — observable state for dashboard
+-- ==========================================================================
+
+alter table public.pipeline_runs
+    add column if not exists last_heartbeat_at timestamptz;
+alter table public.pipeline_runs
+    add column if not exists worker_state text not null default 'idle';
+    -- values: 'idle' | 'active' | 'panic'
+alter table public.pipeline_runs
+    add column if not exists worker_last_error text not null default '';
+
+-- ==========================================================================
+-- 5. Updated heartbeat RPC — removes waiting_approval, records last_heartbeat_at
+--
+-- In waiting_approval, the worker should stop heartbeating and let the
+-- lease expire naturally. Protection against another worker claiming is
+-- by status (not by lock), since no worker should claim waiting_approval.
+-- ==========================================================================
+
+create or replace function public.cas_heartbeat_run(
+    p_run_id         uuid,
+    p_worker_id      text,
+    p_lock_token     text,
+    p_lease_minutes  int default 10
+) returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+    rows_affected int;
+begin
+    -- Clamp lease to 1-30 minutes
+    p_lease_minutes := greatest(1, least(p_lease_minutes, 30));
+
+    -- Renew lease. Only for active processing states.
+    -- waiting_approval: worker should stop and let lease expire.
+    update public.pipeline_runs
+    set lock_expires_at   = now() + make_interval(mins => p_lease_minutes),
+        last_heartbeat_at = now(),
+        worker_state      = 'active'
+    where id = p_run_id
+      and worker_id = p_worker_id
+      and lock_token = p_lock_token
+      and status in ('running', 'in_progress', 'approved');
+
+    get diagnostics rows_affected = row_count;
+    return rows_affected > 0;
 end;
 $$;
