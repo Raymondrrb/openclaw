@@ -5843,5 +5843,298 @@ class TestComputeFileSha256(unittest.TestCase):
             self.assertNotEqual(compute_file_sha256(f1), compute_file_sha256(f2))
 
 
+# ==========================================================================
+# v0.2.0 tests — FinalizeResult gate + tolerance + orchestrator integration
+# ==========================================================================
+
+class TestFinalizeResult(unittest.TestCase):
+    """Tests for FinalizeResult dataclass."""
+
+    def test_finalize_result_fields(self):
+        """FinalizeResult has correct fields."""
+        from lib.audio_utils import FinalizeResult
+        fr = FinalizeResult(
+            action="ok", input_path=Path("/a.mp3"), output_path=Path("/a.mp3"),
+            target_duration_sec=5.0, measured_duration_sec=4.98,
+            delta_ms=20, reason="within tolerance",
+        )
+        self.assertEqual(fr.action, "ok")
+        self.assertEqual(fr.delta_ms, 20)
+        self.assertIsNone(fr.rate)
+
+    def test_finalize_result_with_rate(self):
+        """FinalizeResult stores rate for rate_tweak action."""
+        from lib.audio_utils import FinalizeResult
+        fr = FinalizeResult(
+            action="rate_tweak", input_path=Path("/a.mp3"), output_path=Path("/a.mp3"),
+            target_duration_sec=5.0, measured_duration_sec=5.1,
+            delta_ms=-100, rate=1.02, reason="atempo",
+        )
+        self.assertEqual(fr.rate, 1.02)
+        self.assertEqual(fr.action, "rate_tweak")
+
+
+class TestToleranceMsForKind(unittest.TestCase):
+    """Tests for tolerance_ms_for_kind."""
+
+    def test_known_kinds(self):
+        """Known segment kinds return correct tolerance."""
+        from lib.audio_utils import tolerance_ms_for_kind
+        self.assertEqual(tolerance_ms_for_kind("intro"), 80)
+        self.assertEqual(tolerance_ms_for_kind("outro"), 80)
+        self.assertEqual(tolerance_ms_for_kind("product"), 120)
+        self.assertEqual(tolerance_ms_for_kind("transition"), 150)
+
+    def test_unknown_kind_default(self):
+        """Unknown kind returns default tolerance."""
+        from lib.audio_utils import tolerance_ms_for_kind
+        self.assertEqual(tolerance_ms_for_kind("unknown"), 80)
+        self.assertEqual(tolerance_ms_for_kind(""), 80)
+
+
+class TestFinalizeGate(unittest.TestCase):
+    """Tests for finalize_segment_audio smart gate (v0.2.0).
+
+    These tests require pydub. Skipped if pydub is not installed.
+    """
+
+    def _skip_without_pydub(self):
+        try:
+            from pydub import AudioSegment
+            return False
+        except ImportError:
+            return True
+
+    def _make_audio_file(self, td, duration_ms=5000, filename="test.mp3"):
+        """Create a real audio file with pydub."""
+        from pydub import AudioSegment
+        seg = AudioSegment.silent(duration=duration_ms)
+        path = Path(td) / filename
+        seg.export(path, format="mp3")
+        return path
+
+    def test_error_on_bad_target(self):
+        """Returns error for target_duration <= 0."""
+        from lib.audio_utils import finalize_segment_audio
+        fr = finalize_segment_audio(Path("/fake.mp3"), target_duration=0)
+        self.assertEqual(fr.action, "error")
+        self.assertIn("target_duration", fr.reason)
+
+    def test_error_on_missing_file(self):
+        """Returns error for nonexistent file."""
+        from lib.audio_utils import finalize_segment_audio
+        if self._skip_without_pydub():
+            self.skipTest("pydub not installed")
+        fr = finalize_segment_audio(Path("/nonexistent/x.mp3"), target_duration=5.0)
+        self.assertEqual(fr.action, "error")
+        self.assertIn("missing", fr.reason)
+
+    def test_ok_within_tolerance(self):
+        """Audio within tolerance returns ok."""
+        if self._skip_without_pydub():
+            self.skipTest("pydub not installed")
+        from lib.audio_utils import finalize_segment_audio
+        with tempfile.TemporaryDirectory() as td:
+            path = self._make_audio_file(td, duration_ms=5000)
+            fr = finalize_segment_audio(path, target_duration=5.05, kind="product")
+            self.assertEqual(fr.action, "ok")
+
+    def test_pad_silence_when_short(self):
+        """Short audio gets padded to target."""
+        if self._skip_without_pydub():
+            self.skipTest("pydub not installed")
+        from lib.audio_utils import finalize_segment_audio
+        with tempfile.TemporaryDirectory() as td:
+            path = self._make_audio_file(td, duration_ms=3000)
+            fr = finalize_segment_audio(path, target_duration=5.0, kind="intro")
+            self.assertEqual(fr.action, "pad_silence")
+            self.assertIn("padded", fr.reason)
+
+    def test_needs_repair_when_way_over(self):
+        """Audio way over target returns needs_repair."""
+        if self._skip_without_pydub():
+            self.skipTest("pydub not installed")
+        from lib.audio_utils import finalize_segment_audio
+        with tempfile.TemporaryDirectory() as td:
+            # 6 seconds audio, 5 second target → 20% over → needs_repair
+            path = self._make_audio_file(td, duration_ms=6000)
+            fr = finalize_segment_audio(
+                path, target_duration=5.0, kind="product",
+                max_over_pct_for_rate=0.02,
+            )
+            self.assertEqual(fr.action, "needs_repair")
+            self.assertIn("exceeds", fr.reason)
+
+    def test_tolerance_varies_by_kind(self):
+        """Different kinds have different tolerance thresholds."""
+        if self._skip_without_pydub():
+            self.skipTest("pydub not installed")
+        from lib.audio_utils import finalize_segment_audio
+        with tempfile.TemporaryDirectory() as td:
+            # 5100ms audio, 5000ms target → 100ms over
+            # intro tolerance=80ms → should NOT be ok
+            # transition tolerance=150ms → SHOULD be ok
+            path_intro = self._make_audio_file(td, duration_ms=5100, filename="intro.mp3")
+            fr_intro = finalize_segment_audio(path_intro, target_duration=5.0, kind="intro")
+            self.assertNotEqual(fr_intro.action, "ok")
+
+            path_trans = self._make_audio_file(td, duration_ms=5100, filename="trans.mp3")
+            fr_trans = finalize_segment_audio(path_trans, target_duration=5.0, kind="transition")
+            self.assertEqual(fr_trans.action, "ok")
+
+    def test_finalize_with_pause_injection(self):
+        """Pause tags add silence before gate decision."""
+        if self._skip_without_pydub():
+            self.skipTest("pydub not installed")
+        from lib.audio_utils import finalize_segment_audio
+        with tempfile.TemporaryDirectory() as td:
+            # 4500ms audio + [pause=300ms] = 4800ms → target 5000ms → pad 200ms
+            path = self._make_audio_file(td, duration_ms=4500)
+            fr = finalize_segment_audio(
+                path, target_duration=5.0,
+                source_text="Hello [pause=300ms] world",
+                kind="product",
+            )
+            self.assertEqual(fr.action, "pad_silence")
+
+
+class TestExportAtomic(unittest.TestCase):
+    """Tests for _export_atomic helper."""
+
+    def test_export_atomic_creates_file(self):
+        """_export_atomic creates a valid file."""
+        try:
+            from pydub import AudioSegment
+        except ImportError:
+            self.skipTest("pydub not installed")
+        from lib.audio_utils import _export_atomic
+        with tempfile.TemporaryDirectory() as td:
+            seg = AudioSegment.silent(duration=1000)
+            out = Path(td) / "out.mp3"
+            _export_atomic(seg, out, fmt="mp3")
+            self.assertTrue(out.exists())
+            self.assertGreater(out.stat().st_size, 0)
+            # No .tmp leftover
+            self.assertFalse(out.with_suffix(".mp3.tmp").exists())
+
+
+class TestOrchestratorFinalizeIntegration(unittest.TestCase):
+    """Tests for orchestrator voice_gen with smart finalize gate."""
+
+    def _make_mock_panic(self):
+        class MockPanic:
+            def __init__(self):
+                self.calls = []
+            def report_panic(self, reason_key, run_id, error_msg, **kw):
+                self.calls.append((reason_key, run_id, error_msg))
+        return MockPanic()
+
+    def test_voice_gen_stores_finalize_result(self):
+        """voice_gen stores finalize_result metadata per segment."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        try:
+            from pydub import AudioSegment
+        except ImportError:
+            self.skipTest("pydub not installed")
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+
+            # Create a mock TTS that returns a real audio file
+            audio_dir = Path(td) / "audio"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+
+            class MockTTS:
+                def synthesize(self, *, run_id, text):
+                    path = audio_dir / f"{run_id}.mp3"
+                    seg = AudioSegment.silent(duration=4500)
+                    seg.export(path, format="mp3")
+                    return path
+                def has_artifact(self, run_id):
+                    return False
+
+            orch = RayVaultOrchestrator(
+                config=cfg, panic_mgr=self._make_mock_panic(),
+                tts_engine=MockTTS(),
+            )
+            segs = [{
+                "segment_id": "intro",
+                "kind": "intro",
+                "text": "Hello world this is a test.",
+                "approx_duration_sec": 5.0,
+            }]
+            result = orch.voice_gen("TEST-1", segs)
+            self.assertEqual(len(result), 1)
+            fr = result[0].get("finalize_result")
+            self.assertIsNotNone(fr)
+            self.assertIn(fr["action"], ("ok", "pad_silence", "rate_tweak", "needs_repair", "error"))
+            self.assertIn("delta_ms", fr)
+            self.assertIn("measured_sec", fr)
+
+    def test_voice_gen_marks_repair_on_way_over(self):
+        """voice_gen marks segment needs_repair when finalize says so."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        try:
+            from pydub import AudioSegment
+        except ImportError:
+            self.skipTest("pydub not installed")
+
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            audio_dir = Path(td) / "audio"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+
+            class MockTTS:
+                def synthesize(self, *, run_id, text):
+                    path = audio_dir / f"{run_id}.mp3"
+                    # 8 seconds audio for 5 second target → 60% over → needs_repair
+                    seg = AudioSegment.silent(duration=8000)
+                    seg.export(path, format="mp3")
+                    return path
+                def has_artifact(self, run_id):
+                    return False
+
+            orch = RayVaultOrchestrator(
+                config=cfg, panic_mgr=self._make_mock_panic(),
+                tts_engine=MockTTS(),
+            )
+            segs = [{
+                "segment_id": "intro",
+                "kind": "intro",
+                "text": "Hello world.",
+                "approx_duration_sec": 5.0,
+            }]
+            result = orch.voice_gen("TEST-2", segs)
+            self.assertTrue(result[0].get("needs_repair"))
+            self.assertIsNotNone(result[0].get("repair_reason"))
+            fr = result[0]["finalize_result"]
+            self.assertEqual(fr["action"], "needs_repair")
+
+    def test_voice_gen_no_tts_engine(self):
+        """voice_gen without TTS marks all needs_human."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            orch = RayVaultOrchestrator(
+                config=cfg, panic_mgr=self._make_mock_panic(),
+            )
+            segs = [{"segment_id": "x", "text": "Hello", "approx_duration_sec": 5}]
+            result = orch.voice_gen("TEST-3", segs)
+            self.assertTrue(result[0]["needs_human"])
+            self.assertIsNone(result[0]["audio_path"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

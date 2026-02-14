@@ -1,31 +1,33 @@
-"""Audio utilities v0.1.1 — filler scrub, pause tags, precise padding.
+"""Audio utilities v0.2.0 — smart finalize gate, filler scrub, pause tags.
 
 Pre-TTS text optimization and post-TTS audio finalization for
 deterministic timeline assembly.
 
-Three-level auto-cutter (cheapest first):
-  A) Rate tweak: inject [rate=1.05] for small overages (free)
-  B) Filler scrub: regex-remove filler words (free, deterministic)
-  C) LLM repair: patch request to shorten segment (expensive, last resort)
+finalize_segment_audio is a 4-action gate:
+  1. PAD_SILENCE — audio shorter than target → inject trailing silence
+  2. OK          — within tolerance → no change
+  3. RATE_TWEAK  — slightly over (≤2%) → FFmpeg atempo speedup
+  4. NEEDS_REPAIR — way over (>2%) → flag for LLM text patch
 
-Pause tag handling (v0.1.1):
+Returns FinalizeResult with action, delta_ms, rate, reason — the
+orchestrator uses this to decide whether to re-TTS or proceed to Dzine.
+
+Pause tag handling:
   - Parse [pause=300ms] tags into structured tokens
   - Inject deterministic silence locally (post-TTS, not via TTS API)
-  - More precise and cheaper than relying on TTS pause support
 
-Post-TTS finalization:
-  - Silence injection for [pause=] tags
-  - Pad to exact target_duration (timeline determinism)
-  - Optionally trim trailing silence if audio exceeds target
-  - Atomic write: tmp → fsync → replace (no partial files)
+Tolerance by segment kind:
+  - intro/outro: 80ms (tight — viewer attention)
+  - product:     120ms (technical, forgiving)
+  - transition:  150ms (brief, very forgiving)
 
 Dependencies:
   - pydub (optional — for audio surgery; gracefully skipped if missing)
-  - ffmpeg (optional — required by pydub)
+  - ffmpeg (optional — for atempo rate tweak; graceful fallback)
 
 Usage:
     from tools.lib.audio_utils import scrub_fillers, estimate_duration_sec
-    from tools.lib.audio_utils import finalize_segment_audio, atomic_write_bytes
+    from tools.lib.audio_utils import finalize_segment_audio, FinalizeResult
     from tools.lib.audio_utils import tokenize_pause_tags, total_pause_ms
 """
 
@@ -35,9 +37,10 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 # Reuse TTS tag stripping from tone_gate
 from tools.lib.tone_gate import strip_tts_tags, estimate_duration_sec, count_words
@@ -233,7 +236,42 @@ def atomic_write_json(path: Path, data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Silence padding + pause injection (post-TTS finalization)
+# FinalizeResult — structured return from the finalize gate
+# ---------------------------------------------------------------------------
+
+Action = Literal["ok", "pad_silence", "rate_tweak", "needs_repair", "error"]
+
+
+@dataclass(frozen=True)
+class FinalizeResult:
+    """Outcome of finalize_segment_audio gate decision."""
+    action: Action
+    input_path: Path
+    output_path: Path
+    target_duration_sec: float
+    measured_duration_sec: float
+    delta_ms: int
+    rate: Optional[float] = None
+    reason: Optional[str] = None
+
+
+# Tolerance per segment kind (ms)
+_KIND_TOLERANCE_MS: Dict[str, int] = {
+    "intro": 80,
+    "outro": 80,
+    "product": 120,
+    "transition": 150,
+}
+_DEFAULT_TOLERANCE_MS = 80
+
+
+def tolerance_ms_for_kind(kind: str) -> int:
+    """Return tolerance in ms for a segment kind."""
+    return _KIND_TOLERANCE_MS.get(kind, _DEFAULT_TOLERANCE_MS)
+
+
+# ---------------------------------------------------------------------------
+# Silence padding + pause injection + smart finalize gate
 # ---------------------------------------------------------------------------
 
 try:
@@ -252,11 +290,8 @@ def _guess_format(path: Path) -> str:
 def _inject_pause_silence(audio: "_AudioSegment", source_text: str) -> "_AudioSegment":
     """Inject silence corresponding to [pause=Xms] tags.
 
-    v0.1.1 approach: appends total pause duration as trailing silence.
-    This is deterministic, cheap, and timeline-safe.
-
-    For "mid-sentence" pauses (v0.2+), split text at pause tags,
-    generate TTS per sub-phrase, then concatenate with silence between.
+    Appends total pause duration as trailing silence.
+    Deterministic, cheap, and timeline-safe.
     """
     pause_total = total_pause_ms(source_text)
     if pause_total <= 0:
@@ -264,26 +299,57 @@ def _inject_pause_silence(audio: "_AudioSegment", source_text: str) -> "_AudioSe
     return audio + _AudioSegment.silent(duration=pause_total)
 
 
-def _detect_trailing_silence_ms(audio: "_AudioSegment", threshold_dbfs: float = -45.0) -> int:
-    """Detect how many milliseconds of trailing silence an audio has.
+def _export_atomic(seg: "_AudioSegment", out_path: Path, fmt: str = "mp3") -> None:
+    """Export AudioSegment atomically: tmp → fsync → replace."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    try:
+        seg.export(tmp, format=fmt)
+        with open(tmp, "rb") as f:
+            os.fsync(f.fileno())
+        os.replace(tmp, out_path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
-    Scans backward in 50ms chunks from the end.
-    Returns ms of consecutive silence below threshold.
+
+def _ffmpeg_atempo(in_path: Path, out_path: Path, rate: float) -> None:
+    """Speed up/down audio with FFmpeg atempo filter.
+
+    atempo accepts 0.5–2.0. For our use case rate is always 1.00–1.05.
     """
-    chunk_ms = 50
-    total_ms = len(audio)
-    silence_ms = 0
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(in_path),
+        "-filter:a", f"atempo={rate}",
+        "-vn",
+        str(tmp),
+    ]
+    p = subprocess.run(cmd, capture_output=True, timeout=30)
+    if p.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg atempo failed: {p.stderr.decode('utf-8', errors='ignore')[:400]}"
+        )
+    with open(tmp, "rb") as f:
+        os.fsync(f.fileno())
+    os.replace(tmp, out_path)
 
-    pos = total_ms - chunk_ms
-    while pos >= 0:
-        chunk = audio[pos:pos + chunk_ms]
-        if chunk.dBFS < threshold_dbfs:
-            silence_ms += chunk_ms
-            pos -= chunk_ms
-        else:
-            break
 
-    return silence_ms
+def _has_ffmpeg() -> bool:
+    """Check if ffmpeg is available on PATH."""
+    try:
+        subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True, timeout=5,
+        )
+        return True
+    except Exception:
+        return False
 
 
 def finalize_segment_audio(
@@ -291,36 +357,51 @@ def finalize_segment_audio(
     target_duration: float,
     *,
     source_text: Optional[str] = None,
-    trim_trailing_silence: bool = True,
-    silence_threshold_dbfs: float = -45.0,
-) -> None:
-    """Post-TTS finalization for deterministic timeline duration.
+    kind: str = "product",
+    allow_rate_tweak: bool = True,
+    max_over_pct_for_rate: float = 0.02,
+    max_rate: float = 1.05,
+    force_format: str = "mp3",
+) -> FinalizeResult:
+    """Smart 4-action finalize gate for post-TTS audio.
 
-    Steps:
-    1. If source_text has [pause=Xms] tags, inject silence (local, exact)
-    2. If audio < target_duration: pad with trailing silence
-    3. If audio > target_duration and trim_trailing_silence: trim ONLY
-       trailing silence (never cuts speech)
+    Decision logic:
+    1. Inject [pause=Xms] silence from source_text (if present)
+    2. If within tolerance → OK (no change)
+    3. If shorter → PAD_SILENCE (trailing silence to hit target)
+    4. If slightly over (≤max_over_pct_for_rate) → RATE_TWEAK (FFmpeg atempo)
+    5. If way over → NEEDS_REPAIR (flag for LLM text patch)
 
-    Result: audio file with exact target_duration for timeline assembly.
+    The orchestrator inspects FinalizeResult.action to decide next step.
+    Dzine only receives audio with action in {ok, pad_silence, rate_tweak}.
 
-    Requires pydub + ffmpeg. No-op if pydub is not installed.
-
-    Args:
-        audio_path: Path to audio file (mp3/wav).
-        target_duration: Target duration in seconds.
-        source_text: Original text with TTS tags for pause injection.
-        trim_trailing_silence: If True, trim excess trailing silence
-            when audio exceeds target (safe — never cuts speech).
-        silence_threshold_dbfs: dBFS threshold for silence detection.
+    Returns FinalizeResult even when pydub is not installed (action=error).
     """
+    # Error: bad target
+    if target_duration <= 0:
+        return FinalizeResult(
+            action="error", input_path=audio_path, output_path=audio_path,
+            target_duration_sec=target_duration, measured_duration_sec=0.0,
+            delta_ms=0, reason="target_duration must be > 0",
+        )
+
+    # Error: pydub not available
     if not _HAS_PYDUB:
-        return
+        return FinalizeResult(
+            action="error", input_path=audio_path, output_path=audio_path,
+            target_duration_sec=target_duration, measured_duration_sec=0.0,
+            delta_ms=0, reason="pydub not installed",
+        )
 
-    if not audio_path.exists() or target_duration <= 0:
-        return
+    # Error: file missing
+    if not audio_path.exists():
+        return FinalizeResult(
+            action="error", input_path=audio_path, output_path=audio_path,
+            target_duration_sec=target_duration, measured_duration_sec=0.0,
+            delta_ms=0, reason=f"audio file missing: {audio_path}",
+        )
 
-    fmt = _guess_format(audio_path)
+    fmt = force_format or _guess_format(audio_path)
     audio = _AudioSegment.from_file(audio_path)
 
     # Step 1: Inject pause tag silence
@@ -328,20 +409,84 @@ def finalize_segment_audio(
         audio = _inject_pause_silence(audio, source_text)
 
     target_ms = int(target_duration * 1000)
-    current_ms = len(audio)
+    measured_ms = len(audio)
+    tol_ms = tolerance_ms_for_kind(kind)
+    delta_ms = target_ms - measured_ms  # positive = short, negative = over
 
-    # Step 2: Pad if shorter
-    if current_ms < target_ms:
-        silence = _AudioSegment.silent(duration=(target_ms - current_ms))
-        audio = audio + silence
+    measured_sec = measured_ms / 1000.0
 
-    # Step 3: Trim trailing silence if longer
-    elif current_ms > target_ms and trim_trailing_silence:
-        over_ms = current_ms - target_ms
-        trailing = _detect_trailing_silence_ms(audio, silence_threshold_dbfs)
-        # Only trim up to the amount of trailing silence available
-        trim_amount = min(over_ms, trailing)
-        if trim_amount > 0:
-            audio = audio[:current_ms - trim_amount]
+    # Action: OK — within tolerance
+    if abs(delta_ms) <= tol_ms:
+        return FinalizeResult(
+            action="ok", input_path=audio_path, output_path=audio_path,
+            target_duration_sec=target_duration, measured_duration_sec=measured_sec,
+            delta_ms=delta_ms, reason=f"within {tol_ms}ms tolerance ({kind})",
+        )
 
-    audio.export(audio_path, format=fmt)
+    # Action: PAD_SILENCE — audio shorter than target
+    if delta_ms > 0:
+        silence = _AudioSegment.silent(duration=delta_ms)
+        padded = audio + silence
+        _export_atomic(padded, audio_path, fmt=fmt)
+        return FinalizeResult(
+            action="pad_silence", input_path=audio_path, output_path=audio_path,
+            target_duration_sec=target_duration,
+            measured_duration_sec=len(padded) / 1000.0,
+            delta_ms=int(target_ms - len(padded)),
+            reason=f"padded +{delta_ms}ms",
+        )
+
+    # Audio is over target — decide rate_tweak vs needs_repair
+    over_ms = -delta_ms
+    over_pct = over_ms / max(target_ms, 1)
+
+    # Action: RATE_TWEAK — slightly over, use FFmpeg atempo
+    if allow_rate_tweak and over_pct <= max_over_pct_for_rate:
+        rate = measured_ms / target_ms
+        rate = max(1.0, min(rate, max_rate))
+
+        if _has_ffmpeg():
+            try:
+                _ffmpeg_atempo(audio_path, audio_path, rate=rate)
+                # After tweak, pad any remaining gap
+                tweaked = _AudioSegment.from_file(audio_path)
+                tweaked_ms = len(tweaked)
+                gap_ms = target_ms - tweaked_ms
+                if gap_ms > 0:
+                    tweaked = tweaked + _AudioSegment.silent(duration=gap_ms)
+                    _export_atomic(tweaked, audio_path, fmt=fmt)
+                    tweaked_ms = len(tweaked)
+                return FinalizeResult(
+                    action="rate_tweak", input_path=audio_path, output_path=audio_path,
+                    target_duration_sec=target_duration,
+                    measured_duration_sec=tweaked_ms / 1000.0,
+                    delta_ms=int(target_ms - tweaked_ms),
+                    rate=rate,
+                    reason=f"over by {over_ms}ms ({over_pct:.1%}); atempo={rate:.3f}",
+                )
+            except Exception as e:
+                # FFmpeg failed — fall through to needs_repair
+                return FinalizeResult(
+                    action="needs_repair", input_path=audio_path, output_path=audio_path,
+                    target_duration_sec=target_duration,
+                    measured_duration_sec=measured_sec,
+                    delta_ms=delta_ms, rate=rate,
+                    reason=f"rate_tweak failed ({e}); needs text repair",
+                )
+        else:
+            # No ffmpeg — fall through to needs_repair
+            return FinalizeResult(
+                action="needs_repair", input_path=audio_path, output_path=audio_path,
+                target_duration_sec=target_duration,
+                measured_duration_sec=measured_sec,
+                delta_ms=delta_ms,
+                reason=f"over by {over_ms}ms ({over_pct:.1%}); ffmpeg not available",
+            )
+
+    # Action: NEEDS_REPAIR — way over, needs LLM text patch
+    return FinalizeResult(
+        action="needs_repair", input_path=audio_path, output_path=audio_path,
+        target_duration_sec=target_duration, measured_duration_sec=measured_sec,
+        delta_ms=delta_ms,
+        reason=f"over by {over_ms}ms ({over_pct:.1%}) exceeds rate_tweak threshold",
+    )

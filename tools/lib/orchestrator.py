@@ -39,6 +39,7 @@ from tools.lib.audio_utils import (
     atomic_write_json,
     estimate_duration_sec,
     finalize_segment_audio,
+    FinalizeResult,
     scrub_fillers,
 )
 from tools.lib.tone_gate import (
@@ -299,16 +300,23 @@ class RayVaultOrchestrator:
         return fixed
 
     # ------------------------------------------------------------------
-    # Stage: VOICE_GEN (idempotent per-segment TTS)
+    # Stage: VOICE_GEN (TTS → finalize gate → repair loop)
     # ------------------------------------------------------------------
 
     def voice_gen(self, run_id: str, segments: List[dict]) -> List[dict]:
-        """Generate audio for each segment. Skips needs_repair/needs_human.
+        """Generate audio for each segment with smart finalize gate.
 
-        Uses TTS engine's synthesize method. Idempotency via has_artifact().
+        Per-segment flow:
+        1. Skip needs_repair/needs_human segments
+        2. Synthesize TTS (idempotent via has_artifact)
+        3. Run finalize gate → FinalizeResult with 4 possible actions:
+           - ok/pad_silence/rate_tweak: audio is ready for Dzine
+           - needs_repair: flag segment for LLM text patch (pre-Dzine)
+        4. Store finalize_result metadata per segment for telemetry
+
+        Dzine only gets segments where finalize.action != needs_repair.
         """
         if not self.tts:
-            # No TTS engine — mark all with placeholder paths
             return [
                 {**s, "audio_path": None, "needs_human": True}
                 for s in segments
@@ -352,16 +360,29 @@ class RayVaultOrchestrator:
                 )
                 s2["audio_path"] = str(audio_path)
 
-                # Finalize: inject pauses + pad to target duration
+                # Smart finalize gate
                 approx = _safe_float(s2.get("approx_duration_sec", 0))
+                kind = s2.get("kind", "product")
                 if approx > 0:
-                    try:
-                        finalize_segment_audio(
-                            audio_path, target_duration=approx,
-                            source_text=text,  # enables [pause=] injection
-                        )
-                    except Exception:
-                        pass  # Padding failure is non-fatal
+                    fr = finalize_segment_audio(
+                        audio_path,
+                        target_duration=approx,
+                        source_text=text,
+                        kind=kind,
+                    )
+                    s2["finalize_result"] = {
+                        "action": fr.action,
+                        "delta_ms": fr.delta_ms,
+                        "measured_sec": round(fr.measured_duration_sec, 3),
+                        "target_sec": fr.target_duration_sec,
+                        "rate": fr.rate,
+                        "reason": fr.reason,
+                    }
+
+                    if fr.action == "needs_repair":
+                        s2["needs_repair"] = True
+                        s2["repair_reason"] = fr.reason
+
             except Exception as e:
                 s2["audio_path"] = None
                 s2["tts_error"] = str(e)[:300]
@@ -520,6 +541,21 @@ class RayVaultOrchestrator:
             if stage == "VOICE_GEN":
                 await self._emit(run_id, "stage_enter", "INFO", {"stage": "VOICE_GEN"})
                 segs = self.voice_gen(run_id, data["segments"])
+
+                # Emit per-segment finalize telemetry (SRE)
+                for seg in segs:
+                    fr = seg.get("finalize_result")
+                    if fr:
+                        severity = "WARN" if fr["action"] == "needs_repair" else "INFO"
+                        await self._emit(
+                            run_id, "tone_gate_finalize", severity,
+                            {
+                                "segment_id": seg.get("segment_id", ""),
+                                "kind": seg.get("kind", ""),
+                                **fr,
+                            },
+                        )
+
                 self.save_checkpoint(run_id, "MEDIA_SYNC", {"segments": segs})
                 stage, data = "MEDIA_SYNC", {"segments": segs}
                 await self._emit(run_id, "stage_done", "INFO", {"stage": "VOICE_GEN"})
