@@ -5183,5 +5183,307 @@ class TestVoicePipelineHelpers(unittest.TestCase):
         self.assertTrue(any("status" in i for i in issues))
 
 
+# ==========================================================================
+# Audio Utils tests
+# ==========================================================================
+
+class TestAudioUtils(unittest.TestCase):
+    """Tests for audio_utils — filler scrub, digest, atomic write."""
+
+    def test_scrub_fillers_en(self):
+        """English filler words removed."""
+        from lib.audio_utils import scrub_fillers
+        text = "This is just really basically a great product."
+        result = scrub_fillers(text, lang="en")
+        self.assertNotIn("just", result.lower().split())
+        self.assertNotIn("really", result.lower().split())
+        self.assertNotIn("basically", result.lower().split())
+        self.assertIn("great", result)
+        self.assertIn("product", result)
+
+    def test_scrub_fillers_pt(self):
+        """Portuguese filler words removed."""
+        from lib.audio_utils import scrub_fillers
+        text = "Este produto tipo basicamente funciona bem."
+        result = scrub_fillers(text, lang="pt")
+        self.assertNotIn("tipo", result.lower().split())
+        self.assertNotIn("basicamente", result.lower().split())
+        self.assertIn("funciona", result)
+
+    def test_scrub_preserves_punctuation(self):
+        """Filler scrub preserves sentence punctuation."""
+        from lib.audio_utils import scrub_fillers
+        text = "It's really great, honestly."
+        result = scrub_fillers(text, lang="en")
+        self.assertIn("great,", result)
+        self.assertIn("It's", result)
+
+    def test_compute_audio_digest_deterministic(self):
+        """Same inputs produce same digest."""
+        from lib.audio_utils import compute_audio_digest
+        d1 = compute_audio_digest("v1", "Hello world", "model1")
+        d2 = compute_audio_digest("v1", "Hello world", "model1")
+        self.assertEqual(d1, d2)
+        self.assertEqual(len(d1), 64)
+
+    def test_compute_audio_digest_normalizes_whitespace(self):
+        """Whitespace is normalized before hashing."""
+        from lib.audio_utils import compute_audio_digest
+        d1 = compute_audio_digest("v1", "Hello   world", "model1")
+        d2 = compute_audio_digest("v1", "Hello world", "model1")
+        self.assertEqual(d1, d2)
+
+    def test_atomic_write_json(self):
+        """Atomic write creates valid JSON file."""
+        from lib.audio_utils import atomic_write_json
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "test.json"
+            data = {"key": "value", "num": 42}
+            atomic_write_json(path, data)
+            self.assertTrue(path.exists())
+            loaded = json.loads(path.read_text())
+            self.assertEqual(loaded["key"], "value")
+            self.assertEqual(loaded["num"], 42)
+
+    def test_atomic_write_bytes(self):
+        """Atomic write creates binary file."""
+        from lib.audio_utils import atomic_write_bytes
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "test.bin"
+            atomic_write_bytes(path, b"hello world")
+            self.assertTrue(path.exists())
+            self.assertEqual(path.read_bytes(), b"hello world")
+
+
+# ==========================================================================
+# Orchestrator tests
+# ==========================================================================
+
+class TestOrchestrator(unittest.TestCase):
+    """Tests for RayVaultOrchestrator — checkpoint + voice_prep + media_gate."""
+
+    def _make_mock_panic(self):
+        """Create a mock PanicManager."""
+        mock = MagicMock()
+        mock.report_panic = MagicMock()
+        return mock
+
+    def _make_segments(self):
+        return [
+            {"segment_id": "intro", "kind": "intro", "text": "Looking for earbuds?", "approx_duration_sec": 4, "lip_sync_hint": "excited"},
+            {"segment_id": "p0", "kind": "product", "text": "The Sony delivers best noise cancellation.", "approx_duration_sec": 5, "lip_sync_hint": "serious"},
+            {"segment_id": "outro", "kind": "outro", "text": "Subscribe for more reviews.", "approx_duration_sec": 4, "lip_sync_hint": "neutral"},
+        ]
+
+    def test_checkpoint_save_load(self):
+        """Checkpoint persists and loads correctly."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=self._make_mock_panic())
+
+            orch.save_checkpoint("RAY-1", "VOICE_GEN", {"segments": [{"id": "intro"}]})
+            cp = orch.load_checkpoint("RAY-1")
+            self.assertEqual(cp["stage"], "VOICE_GEN")
+            self.assertEqual(cp["data"]["segments"][0]["id"], "intro")
+
+    def test_checkpoint_initial_state(self):
+        """Missing checkpoint returns initial VOICE_PREP state."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=self._make_mock_panic())
+            cp = orch.load_checkpoint("RAY-NEW")
+            self.assertEqual(cp["stage"], "VOICE_PREP")
+
+    def test_voice_prep_ok_segments(self):
+        """voice_prep passes well-sized segments through."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=self._make_mock_panic())
+            segs = self._make_segments()
+            result = orch.voice_prep(segs)
+            self.assertEqual(len(result), 3)
+            for s in result:
+                self.assertIn("tone_gate", s)
+                self.assertFalse(s.get("needs_repair", False))
+
+    def test_voice_prep_rate_tweak(self):
+        """Slight overage triggers rate tweak."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+                rate_tweak_max_ratio=1.05,
+            )
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=self._make_mock_panic())
+            # ~4 words at 165 wpm ≈ 1.5s, approx_duration=2s → ratio ≈ 0.73 → rate_tweak
+            segs = [{"segment_id": "x", "text": "Hello world out there", "approx_duration_sec": 2}]
+            result = orch.voice_prep(segs)
+            self.assertEqual(result[0]["tone_gate"]["action"], "rate_tweak")
+            self.assertIn("rate", result[0].get("tts_hints", {}))
+
+    def test_voice_prep_needs_repair(self):
+        """Large overage triggers needs_repair flag."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=self._make_mock_panic())
+            # 40 words at 165 wpm ≈ 14.5s, approx=5s → ratio ≈ 2.9 → needs_repair
+            long_text = " ".join(["word"] * 40)
+            segs = [{"segment_id": "x", "text": long_text, "approx_duration_sec": 5}]
+            result = orch.voice_prep(segs)
+            self.assertTrue(result[0].get("needs_repair"))
+            self.assertEqual(result[0]["tone_gate"]["action"], "needs_repair")
+
+    def test_voice_prep_empty_text(self):
+        """Empty text triggers needs_repair."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=self._make_mock_panic())
+            segs = [{"segment_id": "x", "text": "", "approx_duration_sec": 5}]
+            result = orch.voice_prep(segs)
+            self.assertTrue(result[0].get("needs_repair"))
+
+    def test_voice_gen_no_engine(self):
+        """voice_gen without TTS engine marks all needs_human."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=self._make_mock_panic(), tts_engine=None)
+            segs = self._make_segments()
+            result = orch.voice_gen("RAY-1", segs)
+            for s in result:
+                self.assertTrue(s.get("needs_human"))
+                self.assertIsNone(s.get("audio_path"))
+
+    def test_build_manifest(self):
+        """Manifest built correctly from segments."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=self._make_mock_panic())
+            segs = [
+                {"segment_id": "intro", "kind": "intro", "audio_path": "/tmp/a.mp3", "approx_duration_sec": 5},
+                {"segment_id": "p0", "kind": "product", "audio_path": "/tmp/b.mp3", "approx_duration_sec": 10},
+            ]
+            path = orch.build_manifest("RAY-1", segs)
+            self.assertTrue(path.exists())
+            m = json.loads(path.read_text())
+            self.assertEqual(m["run_id"], "RAY-1")
+            self.assertEqual(len(m["segments"]), 2)
+            self.assertEqual(m["segments"][0]["segment_id"], "intro")
+
+    def test_media_gate_missing_audio(self):
+        """media_gate raises on missing audio file."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=self._make_mock_panic())
+            manifest = {
+                "segments": [
+                    {"segment_id": "x", "audio_path": "/nonexistent/audio.mp3", "video_path": None},
+                ],
+            }
+            manifest_path = Path(td) / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest))
+            with self.assertRaises(RuntimeError) as ctx:
+                orch.media_gate(manifest_path)
+            self.assertIn("MEDIA_GATE_FAIL", str(ctx.exception))
+
+    def test_media_gate_small_audio(self):
+        """media_gate raises on audio file below minimum size."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+                min_mp3_bytes=1000,
+            )
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=self._make_mock_panic())
+            # Create tiny audio file
+            tiny = Path(td) / "tiny.mp3"
+            tiny.write_bytes(b"x" * 100)
+            manifest = {
+                "segments": [
+                    {"segment_id": "x", "audio_path": str(tiny), "video_path": None},
+                ],
+            }
+            manifest_path = Path(td) / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest))
+            with self.assertRaises(RuntimeError) as ctx:
+                orch.media_gate(manifest_path)
+            self.assertIn("too small", str(ctx.exception))
+
+    def test_render_probe_missing(self):
+        """render_probe raises on missing file."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+            )
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=self._make_mock_panic())
+            with self.assertRaises(RuntimeError) as ctx:
+                orch.render_probe(Path("/nonexistent/video.mp4"))
+            self.assertIn("RENDER_PROBE_FAIL", str(ctx.exception))
+
+    def test_voice_prep_filler_scrub(self):
+        """Filler scrub applied for medium overage."""
+        from lib.orchestrator import RayVaultOrchestrator, OrchestratorConfig
+        with tempfile.TemporaryDirectory() as td:
+            cfg = OrchestratorConfig(
+                state_dir=td, checkpoints_dir=f"{td}/cp",
+                jobs_dir=f"{td}/jobs", audio_dir=f"{td}/audio",
+                video_dir=f"{td}/video", output_dir=f"{td}/output",
+                rate_tweak_max_ratio=0.5,  # force past rate_tweak
+                filler_scrub_max_ratio=2.0,  # allow filler scrub
+            )
+            orch = RayVaultOrchestrator(config=cfg, panic_mgr=self._make_mock_panic())
+            segs = [{"segment_id": "x", "text": "This is just really basically a nice product.", "approx_duration_sec": 3}]
+            result = orch.voice_prep(segs, lang="en")
+            self.assertEqual(result[0]["tone_gate"]["action"], "filler_scrub")
+            # Fillers should be removed
+            self.assertNotIn("just", result[0]["text"].lower().split())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
