@@ -94,6 +94,59 @@ MAX_RETRY = 1                 # Max retries after stall
 # Motion groups (for hygiene validation)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Soundtrack
+# ---------------------------------------------------------------------------
+
+SOUNDTRACK_MUSIC_GAIN_DB = -18.0
+SOUNDTRACK_DUCK_AMOUNT_DB = 12
+SOUNDTRACK_DUCK_ATTACK_MS = 20
+SOUNDTRACK_DUCK_RELEASE_MS = 250
+SOUNDTRACK_CROSSFADE_IN_SEC = 2.0
+SOUNDTRACK_CROSSFADE_OUT_SEC = 2.0
+SOUNDTRACK_LOOP_CROSSFADE_SEC = 2.5
+SOUNDTRACK_CHAPTER_GAIN_JITTER_DB = 1.5
+SOUNDTRACK_MAX_LOOP_RATIO = 2.0
+SOUNDTRACK_MIN_VIDEO_SEC = 30
+SOUNDTRACK_AI_EDITOR_EPS_SEC = 0.25
+SOUNDTRACK_LICENSE_TIERS = {"GREEN", "AMBER", "RED"}
+SOUNDTRACK_LUFS_RANGE = (-15.0, -13.0)
+SOUNDTRACK_DURATION_EPS_SEC = 0.2
+SOUNDTRACK_TRUE_PEAK_MAX = -1.0
+SOUNDTRACK_TRUE_PEAK_WARN = -1.3        # WARN if close to limit
+SOUNDTRACK_MAX_SILENCE_GAP_MS = 300
+SOUNDTRACK_TRACK_COOLDOWN_RUNS = 5
+SOUNDTRACK_MOTIF_COOLDOWN_RUNS = 8      # Cooldown by motif_group
+SOUNDTRACK_VALID_SOURCES = {
+    "artlist", "epidemic", "custom", "suno", "udio", "other",
+}
+
+# Broadcast QA — VAD + Ducking + Spectral
+VAD_VOICE_BAND_HZ = (300, 3000)         # Bandpass for voice activity detection
+VAD_WINDOW_MS = 200                      # Analysis window size
+VAD_NOISE_FLOOR_PERCENTILE = 10          # Bottom N% windows = noise floor estimate
+VAD_THRESHOLD_ABOVE_FLOOR_DB = 10.0      # VO detected if RMS > floor + this
+DUCKING_PRESENCE_BAND_HZ = (2000, 5000)  # Presence band for masking check
+DUCKING_MIN_REDUCTION_RATIO = 0.7        # Must duck at least 70% of target amount
+DUCKING_SPECTRAL_CLASH_BAND_HZ = (2000, 5000)  # Same as presence for clarity
+
+# Clipping / click detection
+CLIPPING_PEAK_RATIO = 0.99               # Sample value >= 99% of max = clip
+CLIPPING_MAX_CONSECUTIVE_SAMPLES = 3     # Consecutive clipped samples = true clip
+
+# Safety jitter (AMBER tier only)
+SAFETY_JITTER_PITCH_RATIO = 0.9995       # ~-0.05% pitch shift
+SAFETY_JITTER_TEMPO_RATIO = 1.001        # ~+0.1% tempo shift
+
+# Fairlight bus contract
+BUS_VO_NAME = "BUS_VO"
+BUS_MUSIC_NAME = "BUS_MUSIC"
+BUS_SFX_NAME = "BUS_SFX"
+BUS_MASTER_NAME = "BUS_MASTER"
+
+# Conform cache
+CONFORM_CACHE_DIR = "state/cache/conformed_tracks"
+
 MOTION_GROUPS = {
     "zoom_in": {"zoom_in_center", "slow_push_in", "push_in"},
     "zoom_out": {"zoom_out_center", "pull_out"},

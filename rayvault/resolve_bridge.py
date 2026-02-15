@@ -525,6 +525,96 @@ class ResolveBridge:
         except Exception:
             return []
 
+    # --- Music import helpers ---
+
+    def import_music(self, path: str, bins: Dict[str, Any]) -> Optional[Any]:
+        """Import a music file to Audio/Music sub-bin.
+
+        Creates a Music sub-bin under Audio if needed.
+        Returns the imported MediaPoolItem or None.
+        """
+        if not self._media_pool:
+            return None
+
+        # Get or create Audio/Music bin
+        audio_bin = bins.get("Audio")
+        music_bin = None
+        if audio_bin:
+            try:
+                subs = audio_bin.GetSubFolderList() or []
+                for s in subs:
+                    if s.GetName() == "Music":
+                        music_bin = s
+                        break
+                if not music_bin:
+                    music_bin = self._media_pool.AddSubFolder(audio_bin, "Music")
+            except Exception:
+                pass
+
+        target = music_bin or audio_bin
+        items = self.import_media([path], target)
+        return items[0] if items else None
+
+    def place_music_on_track(
+        self,
+        clip: Any,
+        track_index: int = 2,
+        fades: Optional[Dict[str, float]] = None,
+    ) -> bool:
+        """Append a music clip to an audio track and apply fades.
+
+        Args:
+            clip: MediaPoolItem to place.
+            track_index: Audio track number (1-based). Default A2.
+            fades: Dict with fade_in_sec, fade_out_sec.
+        """
+        ok = self.append_clips_to_timeline([clip], track_index=track_index, media_type=2)
+        if ok and fades:
+            items = self.get_timeline_items("audio", track_index)
+            if items:
+                last = items[-1]
+                self.set_clip_fade(
+                    last,
+                    fades.get("fade_in_sec", 0),
+                    fades.get("fade_out_sec", 0),
+                )
+        return ok
+
+    def set_clip_fade(
+        self,
+        clip_item: Any,
+        fade_in_sec: float = 0.0,
+        fade_out_sec: float = 0.0,
+    ) -> bool:
+        """Set fade in/out on a timeline clip item.
+
+        Attempts SetProperty for FadeIn/FadeOut (version-dependent).
+        """
+        try:
+            fps = 30.0
+            if self._project:
+                try:
+                    fps_str = self._project.GetSetting("timelineFrameRate")
+                    if fps_str:
+                        fps = float(fps_str)
+                except Exception:
+                    pass
+
+            ok = True
+            if fade_in_sec > 0:
+                frames_in = int(fade_in_sec * fps)
+                r = clip_item.SetProperty("FadeIn", frames_in)
+                if not r:
+                    ok = False
+            if fade_out_sec > 0:
+                frames_out = int(fade_out_sec * fps)
+                r = clip_item.SetProperty("FadeOut", frames_out)
+                if not r:
+                    ok = False
+            return ok
+        except Exception:
+            return False
+
     def set_clip_duration(self, clip_item: Any, frames: int) -> bool:
         """Set the duration of a timeline item (clip) in frames."""
         try:

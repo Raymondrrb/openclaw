@@ -55,7 +55,10 @@ from rayvault.policies import (
     DURATION_TOLERANCE_SEC, LUFS_TARGET, LUFS_TOLERANCE, TRUE_PEAK_MAX,
     MIN_CACHE_FREE_GB, MIN_EXPORT_HEADROOM_MULTIPLIER, MIN_EXPORT_HEADROOM_BASE_GB,
     BLACK_LUMA_THRESHOLD, BLACK_FRAME_MIN_RATIO, RED_CHANNEL_DOMINANCE,
+    SOUNDTRACK_MUSIC_GAIN_DB, SOUNDTRACK_CROSSFADE_IN_SEC,
+    SOUNDTRACK_CROSSFADE_OUT_SEC,
 )
+from rayvault.fairlight_contract import FairlightContract, verify_bus_contract
 
 # Render states (for manifest tracking)
 RS_STARTED = "RENDER_STARTED"
@@ -450,7 +453,7 @@ def gate_disk_space(
 # ---------------------------------------------------------------------------
 
 
-def compute_inputs_hash(run_dir: Path) -> str:
+def compute_inputs_hash(run_dir: Path, soundtrack_sha1: str = "") -> str:
     """Compute global render inputs hash for idempotency."""
     parts = []
     for name in ("05_render_config.json",):
@@ -466,6 +469,9 @@ def compute_inputs_hash(run_dir: Path) -> str:
     if audio.exists():
         st = audio.stat()
         parts.append(f"audio:{st.st_size}:{int(st.st_mtime)}")
+
+    if soundtrack_sha1:
+        parts.append(f"soundtrack:{soundtrack_sha1}")
 
     parts.append(f"engine:davinci")
     return sha1_text("|".join(parts))
@@ -707,8 +713,14 @@ def assemble(
         render_config.get("canvas", {"w": 1920, "h": 1080, "fps": 30}),
     )
 
+    # Soundtrack SHA1 for inputs hash
+    _soundtrack_sha1 = ""
+    _st_block = manifest.get("audio", {}).get("soundtrack", {})
+    if _st_block.get("enabled"):
+        _soundtrack_sha1 = _st_block.get("track_sha1", "")
+
     # Inputs hash
-    inputs_hash = compute_inputs_hash(run_dir)
+    inputs_hash = compute_inputs_hash(run_dir, soundtrack_sha1=_soundtrack_sha1)
 
     # Check idempotency
     receipt_path = run_dir / "publish" / "render_receipt.json"
@@ -872,6 +884,83 @@ def assemble(
     if audio_clip:
         bridge.append_clips_to_timeline([audio_clip], track_index=1, media_type=2)
 
+    # --- Build A2 (soundtrack) ---
+    soundtrack_receipt = None
+    soundtrack_decision = manifest.get("audio", {}).get("soundtrack", {})
+    if soundtrack_decision.get("enabled"):
+        st_audio = soundtrack_decision.get("audio_path", "")
+        st_path = Path(st_audio) if st_audio else None
+
+        if st_path and st_path.exists():
+            # Add A2 track
+            bridge.add_track("audio")
+
+            # Import music to Audio/Music bin
+            music_clip_item = bridge.import_music(str(st_path), bins)
+
+            fades_applied = False
+            if music_clip_item:
+                # Place on A2 with fades
+                fades_cfg = soundtrack_decision.get("fades", {})
+                fades_dict = {
+                    "fade_in_sec": fades_cfg.get("fade_in_sec", SOUNDTRACK_CROSSFADE_IN_SEC),
+                    "fade_out_sec": fades_cfg.get("fade_out_sec", SOUNDTRACK_CROSSFADE_OUT_SEC),
+                }
+                placed = bridge.place_music_on_track(
+                    music_clip_item, track_index=2, fades=fades_dict,
+                )
+
+                if placed:
+                    fades_applied = True
+                    # Set volume via gain_db (convert dB to linear for Resolve)
+                    gain_db = soundtrack_decision.get("gain_db", SOUNDTRACK_MUSIC_GAIN_DB)
+                    items_a2 = bridge.get_timeline_items("audio", 2)
+                    if items_a2:
+                        linear = 10 ** (gain_db / 20.0)
+                        try:
+                            items_a2[-1].SetProperty("Volume", linear)
+                        except Exception:
+                            pass
+
+            # Build soundtrack receipt (broadcast hardening — full chain of custody)
+            soundtrack_receipt = {
+                "track_id": soundtrack_decision.get("track_id", ""),
+                "license_tier": soundtrack_decision.get("license_tier", ""),
+                "track_sha1": soundtrack_decision.get("track_sha1", ""),
+                "bpm": soundtrack_decision.get("bpm"),
+                "motif_group": soundtrack_decision.get("motif_group", ""),
+                "source": soundtrack_decision.get("source", ""),
+                "publish_policy": soundtrack_decision.get("publish_policy", ""),
+                "applied_in_davinci": music_clip_item is not None,
+                "ai_music_editor": soundtrack_decision.get("ai_music_editor", {
+                    "attempted": False,
+                    "success": False,
+                    "proof": None,
+                }),
+                "ducking_applied": False,
+                "fades_applied": fades_applied,
+                "safety_jitter": soundtrack_decision.get("safety_jitter", {}),
+                "chapter_gain_jitter": soundtrack_decision.get("chapter_gain_jitter", []),
+                "conform_cache_key": soundtrack_decision.get("conform_cache_key", ""),
+                "fallback_used": soundtrack_decision.get("fallback_plan", "")
+                    if soundtrack_decision.get("loop_count", 1) > 1 else "",
+                "loop_count": soundtrack_decision.get("loop_count", 1),
+                "gain_db": soundtrack_decision.get("gain_db", SOUNDTRACK_MUSIC_GAIN_DB),
+                "post_checks": {},
+            }
+
+            # Update audio proof in manifest
+            if manifest_path.exists():
+                try:
+                    m = read_json(manifest_path)
+                    proof = m.setdefault("audio_proof", {})
+                    proof["has_external_music"] = True
+                    proof["music_license_tier"] = soundtrack_decision.get("license_tier", "")
+                    proof["music_track_id"] = soundtrack_decision.get("track_id", "")
+                    atomic_write_json(manifest_path, m)
+                except Exception:
+                    pass
+
     # --- Build V2 (overlays) ---
     # Overlay PNGs are placed on V2 in segment order.
     # Due to API limitations, overlays are appended sequentially.
@@ -998,6 +1087,32 @@ def assemble(
                 f"t={suspect['timestamp']}s red_ratio={suspect['red_ratio']}"
             )
 
+    # --- Bus contract verification ---
+    bus_contract_result = None
+    if soundtrack_receipt:
+        contract = FairlightContract.default()
+        bus_contract_result = verify_bus_contract(contract, {"soundtrack_receipt": soundtrack_receipt})
+        soundtrack_receipt["bus_contract"] = bus_contract_result.to_dict()
+
+    # --- Audio postcheck (broadcast QA) ---
+    postcheck_dict = None
+    if final_output.exists():
+        try:
+            from rayvault.audio_postcheck import (
+                run_audio_postcheck, write_postcheck_json,
+            )
+            postcheck_result = run_audio_postcheck(
+                final_output, render_config, audio_duration,
+            )
+            postcheck_dict = postcheck_result.to_dict()
+            # Write standalone postcheck JSON
+            write_postcheck_json(final_output.parent, postcheck_result)
+            # Patch into soundtrack_receipt if present
+            if soundtrack_receipt is not None:
+                soundtrack_receipt["post_checks"] = postcheck_dict
+        except Exception:
+            pass
+
     elapsed = time.monotonic() - t_start
     output_sha1 = sha1_file(final_output) if final_output.exists() else None
     output_bytes = final_output.stat().st_size if final_output.exists() else 0
@@ -1046,6 +1161,10 @@ def assemble(
         "verify_warnings": verify.warnings,
         "elapsed_sec": round(elapsed, 2),
     }
+    if soundtrack_receipt:
+        receipt["soundtrack_receipt"] = soundtrack_receipt
+    if postcheck_dict:
+        receipt["audio_postcheck"] = postcheck_dict
     atomic_write_json(run_dir / "publish" / "render_receipt.json", receipt)
 
     # --- Update manifest ---

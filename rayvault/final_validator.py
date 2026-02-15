@@ -365,6 +365,81 @@ def gate_pacing(run_dir: Path) -> GateResult:
         return GateResult("pacing", True, f"pacing check error: {e}")
 
 
+def gate_soundtrack_compliance(manifest: Dict[str, Any]) -> GateResult:
+    """Gate 14: soundtrack license tier must match publish policy.
+
+    - If soundtrack not enabled: PASS (skipped)
+    - If license_tier == RED and auto-publish: FAIL
+    - If license_tier == AMBER and not BLOCKED_FOR_REVIEW: FAIL
+    - If enabled but audio_proof.has_external_music != True: FAIL
+    """
+    audio = manifest.get("audio", {})
+    st = audio.get("soundtrack", {})
+
+    if not st.get("enabled"):
+        return GateResult(
+            "soundtrack_compliance", True, "soundtrack not enabled (skipped)"
+        )
+
+    tier = st.get("license_tier", "")
+    policy = st.get("publish_policy", "")
+
+    # RED tier must never auto-publish
+    if tier == "RED" and policy == "AUTO_PUBLISH":
+        return GateResult(
+            "soundtrack_compliance", False,
+            f"RED tier cannot AUTO_PUBLISH (tier={tier}, policy={policy})"
+        )
+
+    # AMBER must be BLOCKED_FOR_REVIEW
+    if tier == "AMBER" and policy != "BLOCKED_FOR_REVIEW":
+        return GateResult(
+            "soundtrack_compliance", False,
+            f"AMBER tier must be BLOCKED_FOR_REVIEW (policy={policy})"
+        )
+
+    # If soundtrack enabled, audio_proof must reflect external music
+    proof = manifest.get("audio_proof", {})
+    if not proof.get("has_external_music"):
+        return GateResult(
+            "soundtrack_compliance", False,
+            "soundtrack enabled but audio_proof.has_external_music != True"
+        )
+
+    return GateResult(
+        "soundtrack_compliance", True,
+        f"tier={tier}, policy={policy}"
+    )
+
+
+def gate_audio_postcheck(manifest: Dict[str, Any]) -> GateResult:
+    """Gate 15: audio postcheck must pass if present.
+
+    - If audio_postcheck section in receipt: FAIL if ok == False
+    - If missing: WARN (not yet run)
+    """
+    render = manifest.get("render", {})
+    receipt_postcheck = render.get("audio_postcheck")
+
+    # Also check soundtrack_receipt.post_checks in render receipt
+    # (assembled in davinci_assembler)
+    if receipt_postcheck is None:
+        # Not yet run — pass with warning
+        return GateResult(
+            "audio_postcheck", True,
+            "no audio_postcheck section (not yet run)"
+        )
+
+    if receipt_postcheck.get("ok") is False:
+        errors = receipt_postcheck.get("errors", [])
+        return GateResult(
+            "audio_postcheck", False,
+            f"audio postcheck FAILED: {'; '.join(errors)}"
+        )
+
+    return GateResult("audio_postcheck", True, "audio postcheck OK")
+
+
 def gate_claims_validation(manifest: Dict[str, Any]) -> GateResult:
     claims = manifest.get("claims_validation", {})
     status = claims.get("status", "")
@@ -449,6 +524,12 @@ def validate_run(
 
     # Gate 13: Pacing (editorial quality — long static segments blocked)
     gates.append(gate_pacing(run_dir))
+
+    # Gate 14: Soundtrack compliance (license tier vs publish policy)
+    gates.append(gate_soundtrack_compliance(manifest))
+
+    # Gate 15: Audio postcheck (loudness, duration, balance)
+    gates.append(gate_audio_postcheck(manifest))
 
     verdict = _build_verdict(run_id, gates)
 

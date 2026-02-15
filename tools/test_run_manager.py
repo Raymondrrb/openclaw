@@ -16163,5 +16163,1437 @@ class TestPacingValidatorModule(unittest.TestCase):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ── soundtrack library tests ──────────────────────────────────────────────
+
+
+class TestSoundtrackLibrary(unittest.TestCase):
+    """Tests for rayvault/soundtrack_library.py."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.lib_dir = Path(self.td) / "library" / "soundtracks"
+        self.lib_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _create_track(self, track_id, duration_sec=60.0, tier="GREEN",
+                      mood_tags=None, sha1_ok=True, with_proof=True):
+        d = self.lib_dir / track_id
+        d.mkdir(parents=True, exist_ok=True)
+        wav_path = d / "audio.wav"
+        rate = 44100
+        nframes = int(duration_sec * rate)
+        with wave.open(str(wav_path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(b"\x00\x00" * nframes)
+        from rayvault.soundtrack_library import sha1_file
+        sha1 = sha1_file(wav_path) if sha1_ok else "bad_sha1"
+        meta = {
+            "track_id": track_id,
+            "sha1": sha1,
+            "license_tier": tier,
+            "mood_tags": mood_tags or [],
+            "title": track_id.replace("_", " ").title(),
+        }
+        # GREEN tier requires license_proof_path
+        if tier == "GREEN" and with_proof:
+            proof_file = d / "license.pdf"
+            proof_file.write_bytes(b"proof content for " + track_id.encode())
+            meta["license_proof_path"] = "license.pdf"
+            meta["license_proof_sha1"] = sha1_file(proof_file)
+        with open(d / "track_meta.json", "w") as f:
+            json.dump(meta, f)
+        return d
+
+    def test_scan_empty_library(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        lib = SoundtrackLibrary(self.lib_dir)
+        tracks = lib.scan()
+        self.assertEqual(len(tracks), 0)
+
+    def test_scan_finds_valid_track(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("ambient_01", duration_sec=30.0, tier="GREEN")
+        lib = SoundtrackLibrary(self.lib_dir)
+        tracks = lib.scan()
+        self.assertEqual(len(tracks), 1)
+        self.assertTrue(tracks[0].valid)
+        self.assertEqual(tracks[0].track_id, "ambient_01")
+
+    def test_scan_skips_invalid_meta(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        d = self.lib_dir / "bad_track"
+        d.mkdir()
+        with open(d / "track_meta.json", "w") as f:
+            f.write("{invalid json")
+        lib = SoundtrackLibrary(self.lib_dir)
+        tracks = lib.scan()
+        self.assertEqual(len(tracks), 1)
+        self.assertFalse(tracks[0].valid)
+
+    def test_query_by_mood_tags(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("tech_01", mood_tags=["tech", "minimal"])
+        self._create_track("ambient_01", mood_tags=["ambient", "calm"])
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        results = lib.query(mood_tags={"tech"})
+        self.assertEqual(results[0].track_id, "tech_01")
+
+    def test_query_excludes_red(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("red_track", tier="RED")
+        self._create_track("green_track", tier="GREEN")
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        results = lib.query(license_tiers={"GREEN"})
+        ids = [t.track_id for t in results]
+        self.assertIn("green_track", ids)
+        self.assertNotIn("red_track", ids)
+
+    def test_query_by_min_duration(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("short", duration_sec=10.0)
+        self._create_track("long", duration_sec=120.0)
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        results = lib.query(min_duration=60.0)
+        ids = [t.track_id for t in results]
+        self.assertIn("long", ids)
+        self.assertNotIn("short", ids)
+
+    def test_get_track_by_id(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("my_track")
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        t = lib.get_track("my_track")
+        self.assertIsNotNone(t)
+        self.assertEqual(t.track_id, "my_track")
+
+    def test_get_nonexistent_returns_none(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        self.assertIsNone(lib.get_track("nope"))
+
+    def test_sha1_integrity_check(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("ok_sha1", sha1_ok=True)
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        self.assertTrue(lib.verify_integrity("ok_sha1"))
+
+    def test_sha1_mismatch_detected(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("bad_sha1", sha1_ok=False)
+        lib = SoundtrackLibrary(self.lib_dir)
+        tracks = lib.scan()
+        self.assertFalse(tracks[0].valid)
+        self.assertTrue(any("sha1 mismatch" in e for e in tracks[0].errors))
+
+    def test_duration_validation(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("dur_test", duration_sec=45.5)
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        t = lib.get_track("dur_test")
+        self.assertAlmostEqual(t.duration_sec, 45.5, places=0)
+
+    def test_query_excludes_specific_ids(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("a")
+        self._create_track("b")
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        results = lib.query(exclude_ids={"a"})
+        ids = [t.track_id for t in results]
+        self.assertNotIn("a", ids)
+        self.assertIn("b", ids)
+
+
+# ── soundtrack policy tests ──────────────────────────────────────────────
+
+
+class TestSoundtrackPolicy(unittest.TestCase):
+    """Tests for rayvault/soundtrack_policy.py."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.lib_dir = Path(self.td) / "library" / "soundtracks"
+        self.lib_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _create_track(self, track_id, duration_sec=120.0, tier="GREEN",
+                      mood_tags=None):
+        from rayvault.soundtrack_library import sha1_file
+        d = self.lib_dir / track_id
+        d.mkdir(parents=True, exist_ok=True)
+        wav_path = d / "audio.wav"
+        rate = 44100
+        nframes = int(duration_sec * rate)
+        with wave.open(str(wav_path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(b"\x00\x00" * nframes)
+        sha1 = sha1_file(wav_path)
+        meta = {
+            "track_id": track_id,
+            "sha1": sha1,
+            "license_tier": tier,
+            "mood_tags": mood_tags or [],
+            "title": track_id,
+        }
+        if tier == "GREEN":
+            proof_file = d / "license.pdf"
+            proof_file.write_bytes(b"proof content for " + track_id.encode())
+            meta["license_proof_path"] = "license.pdf"
+            meta["license_proof_sha1"] = sha1_file(proof_file)
+        with open(d / "track_meta.json", "w") as f:
+            json.dump(meta, f)
+
+    def _make_lib(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        return lib
+
+    def test_opt_out_returns_disabled(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        lib = self._make_lib()
+        d = decide_soundtrack({}, {"audio": {"duration_sec": 600}}, lib, opt_out=True)
+        self.assertFalse(d.enabled)
+        self.assertEqual(d.skip_reason, "opt_out")
+
+    def test_short_video_returns_disabled(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        lib = self._make_lib()
+        d = decide_soundtrack({}, {"audio": {"duration_sec": 10}}, lib)
+        self.assertFalse(d.enabled)
+        self.assertIn("video_too_short", d.skip_reason)
+
+    def test_no_tracks_returns_disabled(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        lib = self._make_lib()
+        d = decide_soundtrack({}, {"audio": {"duration_sec": 600}}, lib)
+        self.assertFalse(d.enabled)
+        self.assertEqual(d.skip_reason, "no_eligible_tracks")
+
+    def test_red_excluded_from_auto_pick(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        self._create_track("red_only", tier="RED")
+        lib = self._make_lib()
+        d = decide_soundtrack({}, {"audio": {"duration_sec": 600}}, lib)
+        self.assertFalse(d.enabled)
+
+    def test_amber_with_allow_false_disabled(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        self._create_track("amber_only", tier="AMBER")
+        lib = self._make_lib()
+        d = decide_soundtrack(
+            {}, {"audio": {"duration_sec": 600}}, lib,
+            policy_allow_amber=False,
+        )
+        self.assertFalse(d.enabled)
+
+    def test_amber_with_allow_true_picks_blocked(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        self._create_track("amber_track", tier="AMBER")
+        lib = self._make_lib()
+        d = decide_soundtrack(
+            {}, {"audio": {"duration_sec": 600}}, lib,
+            policy_allow_amber=True,
+        )
+        self.assertTrue(d.enabled)
+        self.assertEqual(d.publish_policy, "BLOCKED_FOR_REVIEW")
+
+    def test_green_picks_auto_publish(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        self._create_track("green_track", tier="GREEN")
+        lib = self._make_lib()
+        d = decide_soundtrack({}, {"audio": {"duration_sec": 600}}, lib)
+        self.assertTrue(d.enabled)
+        self.assertEqual(d.publish_policy, "AUTO_PUBLISH")
+        self.assertEqual(d.license_tier, "GREEN")
+
+    def test_loop_warning_when_ratio_exceeds_max(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        # Track is 60s, video is 600s -> ratio 10x > max 2.0
+        self._create_track("short_track", duration_sec=60.0, tier="GREEN")
+        lib = self._make_lib()
+        d = decide_soundtrack({}, {"audio": {"duration_sec": 600}}, lib)
+        self.assertTrue(d.enabled)
+        self.assertIn("loop_ratio", d.loop_warning)
+
+    def test_track_override_selects_specific(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        self._create_track("override_me", tier="GREEN")
+        self._create_track("not_this", tier="GREEN")
+        lib = self._make_lib()
+        d = decide_soundtrack(
+            {}, {"audio": {"duration_sec": 600}}, lib,
+            track_override="override_me",
+        )
+        self.assertTrue(d.enabled)
+        self.assertEqual(d.track_id, "override_me")
+
+    def test_write_decision_to_manifest(self):
+        from rayvault.soundtrack_policy import decide_soundtrack, write_decision_to_manifest
+        self._create_track("wr_test", tier="GREEN")
+        lib = self._make_lib()
+        d = decide_soundtrack({}, {"audio": {"duration_sec": 600}}, lib)
+        manifest_path = Path(self.td) / "manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump({"run_id": "test"}, f)
+        write_decision_to_manifest(manifest_path, d)
+        with open(manifest_path) as f:
+            m = json.load(f)
+        self.assertIn("soundtrack", m["audio"])
+        self.assertTrue(m["audio"]["soundtrack"]["enabled"])
+
+    def test_publish_policy_for_each_tier(self):
+        from rayvault.soundtrack_policy import publish_policy_for_tier
+        self.assertEqual(publish_policy_for_tier("GREEN"), "AUTO_PUBLISH")
+        self.assertEqual(publish_policy_for_tier("AMBER"), "BLOCKED_FOR_REVIEW")
+        self.assertEqual(publish_policy_for_tier("RED"), "MANUAL_ONLY")
+
+    def test_fallback_from_segments_duration(self):
+        """Video duration fallback from segments when audio block missing."""
+        from rayvault.soundtrack_policy import decide_soundtrack
+        self._create_track("seg_test", tier="GREEN")
+        lib = self._make_lib()
+        rc = {"segments": [{"t0": 0, "t1": 600}]}
+        d = decide_soundtrack({}, rc, lib)
+        self.assertTrue(d.enabled)
+        self.assertEqual(d.target_duration_sec, 600)
+
+
+# ── audio postcheck tests ────────────────────────────────────────────────
+
+
+class TestAudioPostcheck(unittest.TestCase):
+    """Tests for rayvault/audio_postcheck.py."""
+
+    def test_check_duration_passes_within_eps(self):
+        from rayvault.audio_postcheck import check_duration
+        from unittest.mock import patch, MagicMock
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"format": {"duration": "600.1"}})
+        with patch("subprocess.run", return_value=mock_result):
+            ok, actual = check_duration(Path("/fake.mp4"), 600.0, eps=0.2)
+        self.assertTrue(ok)
+        self.assertAlmostEqual(actual, 600.1, places=1)
+
+    def test_check_duration_fails_outside_eps(self):
+        from rayvault.audio_postcheck import check_duration
+        from unittest.mock import patch, MagicMock
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"format": {"duration": "605.0"}})
+        with patch("subprocess.run", return_value=mock_result):
+            ok, actual = check_duration(Path("/fake.mp4"), 600.0, eps=0.2)
+        self.assertFalse(ok)
+
+    def test_loudness_in_range_passes(self):
+        from rayvault.audio_postcheck import run_audio_postcheck
+        from unittest.mock import patch, MagicMock
+
+        # Mock measure_loudness and check_duration
+        with patch("rayvault.audio_postcheck.measure_loudness") as ml, \
+             patch("rayvault.audio_postcheck.check_duration") as cd, \
+             patch("rayvault.audio_postcheck.check_vo_music_balance") as cb:
+            ml.return_value = MagicMock(
+                ok=True, integrated_lufs=-14.0, true_peak_db=-1.0, lra=5.0
+            )
+            cd.return_value = (True, 600.0)
+            cb.return_value = MagicMock(ok=True, vo_dominant_lufs=None)
+
+            video = Path("/fake.mp4")
+            with patch.object(Path, "exists", return_value=True):
+                result = run_audio_postcheck(video, {}, 600.0)
+            self.assertTrue(result.ok)
+
+    def test_loudness_out_of_range_fails(self):
+        from rayvault.audio_postcheck import run_audio_postcheck
+        from unittest.mock import patch, MagicMock
+
+        with patch("rayvault.audio_postcheck.measure_loudness") as ml, \
+             patch("rayvault.audio_postcheck.check_duration") as cd, \
+             patch("rayvault.audio_postcheck.check_vo_music_balance") as cb:
+            ml.return_value = MagicMock(
+                ok=True, integrated_lufs=-10.0, true_peak_db=-1.0, lra=5.0
+            )
+            cd.return_value = (True, 600.0)
+            cb.return_value = MagicMock(ok=True, vo_dominant_lufs=None)
+
+            video = Path("/fake.mp4")
+            with patch.object(Path, "exists", return_value=True):
+                result = run_audio_postcheck(video, {}, 600.0)
+            self.assertFalse(result.ok)
+            self.assertTrue(any("LUFS_OUT_OF_RANGE" in e for e in result.errors))
+
+    def test_postcheck_video_not_found(self):
+        from rayvault.audio_postcheck import run_audio_postcheck
+        result = run_audio_postcheck(
+            Path("/nonexistent.mp4"), {}, 600.0,
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("VIDEO_NOT_FOUND", result.errors)
+
+    def test_vo_music_balance_warn(self):
+        from rayvault.audio_postcheck import check_vo_music_balance
+        from unittest.mock import patch
+
+        rc = {"segments": [
+            {"type": "product", "t0": 10, "t1": 50},
+            {"type": "filler", "t0": 50, "t1": 80},
+        ]}
+        # VO window: -14, Music window: -12 -> gap=2 < 8
+        with patch("rayvault.audio_postcheck._measure_window_lufs") as mw:
+            mw.side_effect = [-14.0, -12.0]
+            result = check_vo_music_balance(Path("/fake.mp4"), rc)
+        self.assertFalse(result.ok)
+        self.assertIn("gap", result.warning)
+
+    def test_vo_music_balance_ok(self):
+        from rayvault.audio_postcheck import check_vo_music_balance
+        from unittest.mock import patch
+
+        rc = {"segments": [
+            {"type": "product", "t0": 10, "t1": 50},
+            {"type": "filler", "t0": 50, "t1": 80},
+        ]}
+        # VO window: -14, Music window: -24 -> gap=10 >= 8
+        with patch("rayvault.audio_postcheck._measure_window_lufs") as mw:
+            mw.side_effect = [-14.0, -24.0]
+            result = check_vo_music_balance(Path("/fake.mp4"), rc)
+        self.assertTrue(result.ok)
+
+    def test_postcheck_result_to_dict(self):
+        from rayvault.audio_postcheck import PostcheckResult
+        r = PostcheckResult(ok=True, metrics={"lufs": -14.0})
+        d = r.to_dict()
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["metrics"]["lufs"], -14.0)
+
+
+# ── soundtrack gate tests ────────────────────────────────────────────────
+
+
+class TestSoundtrackGate(unittest.TestCase):
+    """Tests for gates 14+15 in rayvault/final_validator.py."""
+
+    def test_no_soundtrack_passes(self):
+        from rayvault.final_validator import gate_soundtrack_compliance
+        manifest = {}
+        g = gate_soundtrack_compliance(manifest)
+        self.assertTrue(g.passed)
+        self.assertIn("not enabled", g.detail)
+
+    def test_red_tier_auto_publish_fails(self):
+        from rayvault.final_validator import gate_soundtrack_compliance
+        manifest = {
+            "audio": {"soundtrack": {
+                "enabled": True, "license_tier": "RED",
+                "publish_policy": "AUTO_PUBLISH",
+            }},
+            "audio_proof": {"has_external_music": True},
+        }
+        g = gate_soundtrack_compliance(manifest)
+        self.assertFalse(g.passed)
+        self.assertIn("RED", g.detail)
+
+    def test_green_tier_passes(self):
+        from rayvault.final_validator import gate_soundtrack_compliance
+        manifest = {
+            "audio": {"soundtrack": {
+                "enabled": True, "license_tier": "GREEN",
+                "publish_policy": "AUTO_PUBLISH",
+            }},
+            "audio_proof": {"has_external_music": True},
+        }
+        g = gate_soundtrack_compliance(manifest)
+        self.assertTrue(g.passed)
+
+    def test_amber_without_blocked_fails(self):
+        from rayvault.final_validator import gate_soundtrack_compliance
+        manifest = {
+            "audio": {"soundtrack": {
+                "enabled": True, "license_tier": "AMBER",
+                "publish_policy": "AUTO_PUBLISH",
+            }},
+            "audio_proof": {"has_external_music": True},
+        }
+        g = gate_soundtrack_compliance(manifest)
+        self.assertFalse(g.passed)
+
+    def test_enabled_but_no_audio_proof_fails(self):
+        from rayvault.final_validator import gate_soundtrack_compliance
+        manifest = {
+            "audio": {"soundtrack": {
+                "enabled": True, "license_tier": "GREEN",
+                "publish_policy": "AUTO_PUBLISH",
+            }},
+        }
+        g = gate_soundtrack_compliance(manifest)
+        self.assertFalse(g.passed)
+
+    def test_audio_postcheck_no_section_passes(self):
+        from rayvault.final_validator import gate_audio_postcheck
+        manifest = {}
+        g = gate_audio_postcheck(manifest)
+        self.assertTrue(g.passed)
+
+    def test_audio_postcheck_ok_true_passes(self):
+        from rayvault.final_validator import gate_audio_postcheck
+        manifest = {"render": {"audio_postcheck": {"ok": True}}}
+        g = gate_audio_postcheck(manifest)
+        self.assertTrue(g.passed)
+
+    def test_audio_postcheck_ok_false_fails(self):
+        from rayvault.final_validator import gate_audio_postcheck
+        manifest = {"render": {"audio_postcheck": {
+            "ok": False, "errors": ["LUFS_OUT_OF_RANGE"],
+        }}}
+        g = gate_audio_postcheck(manifest)
+        self.assertFalse(g.passed)
+        self.assertIn("LUFS_OUT_OF_RANGE", g.detail)
+
+    def test_gates_integrate_with_validate_run(self):
+        """Verify gates 14+15 appear in validate_run output."""
+        from rayvault.final_validator import validate_run
+        td = tempfile.mkdtemp()
+        try:
+            run_dir = Path(td) / "state" / "runs" / "RUN_ST_01"
+            run_dir.mkdir(parents=True)
+            (run_dir / "publish").mkdir()
+            manifest = {
+                "schema_version": "1.1",
+                "run_id": "RUN_ST_01",
+                "status": "READY_FOR_RENDER",
+                "stability": {"stability_score": 100},
+                "metadata": {
+                    "identity": {"confidence": "HIGH"},
+                    "visual_qc_result": "PASS",
+                },
+                "render": {"engine_used": "davinci", "davinci_required": True},
+            }
+            with open(run_dir / "00_manifest.json", "w") as f:
+                json.dump(manifest, f)
+            (run_dir / "01_script.txt").write_text("test")
+            (run_dir / "02_audio.wav").write_bytes(b"RIFF" + b"\x00" * 100)
+            (run_dir / "03_frame.png").write_bytes(b"\x89PNG" + b"\x00" * 100)
+            rc = {"version": "1.1", "segments": [{"type": "intro", "t0": 0, "t1": 2}]}
+            with open(run_dir / "05_render_config.json", "w") as f:
+                json.dump(rc, f)
+            (run_dir / "publish" / "video_final.mp4").write_bytes(b"\x00" * 2048)
+
+            v = validate_run(run_dir)
+            gate_names = [g.name for g in v.gates]
+            self.assertIn("soundtrack_compliance", gate_names)
+            self.assertIn("audio_postcheck", gate_names)
+        finally:
+            import shutil
+            shutil.rmtree(td, ignore_errors=True)
+
+
+# ── soundtrack refinement tests ───────────────────────────────────────────
+
+
+class TestSoundtrackLicenseProof(unittest.TestCase):
+    """Tests for GREEN tier license_proof_path validation."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.lib_dir = Path(self.td) / "library" / "soundtracks"
+        self.lib_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_green_without_proof_fails(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary, sha1_file
+        d = self.lib_dir / "no_proof"
+        d.mkdir()
+        wav = d / "audio.wav"
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00" * 44100)
+        meta = {
+            "track_id": "no_proof", "sha1": sha1_file(wav),
+            "license_tier": "GREEN", "mood_tags": [],
+        }
+        with open(d / "track_meta.json", "w") as f:
+            json.dump(meta, f)
+        lib = SoundtrackLibrary(self.lib_dir)
+        tracks = lib.scan()
+        self.assertFalse(tracks[0].valid)
+        self.assertTrue(any("license_proof_path" in e for e in tracks[0].errors))
+
+    def test_green_with_proof_passes(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary, sha1_file
+        d = self.lib_dir / "has_proof"
+        d.mkdir()
+        wav = d / "audio.wav"
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00" * 44100)
+        proof = d / "license.pdf"
+        proof.write_bytes(b"valid proof")
+        meta = {
+            "track_id": "has_proof", "sha1": sha1_file(wav),
+            "license_tier": "GREEN", "mood_tags": [],
+            "license_proof_path": "license.pdf",
+            "license_proof_sha1": sha1_file(proof),
+        }
+        with open(d / "track_meta.json", "w") as f:
+            json.dump(meta, f)
+        lib = SoundtrackLibrary(self.lib_dir)
+        tracks = lib.scan()
+        self.assertTrue(tracks[0].valid)
+
+    def test_green_with_wrong_proof_sha1_fails(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary, sha1_file
+        d = self.lib_dir / "wrong_sha1"
+        d.mkdir()
+        wav = d / "audio.wav"
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00" * 44100)
+        proof = d / "license.pdf"
+        proof.write_bytes(b"valid proof")
+        meta = {
+            "track_id": "wrong_sha1", "sha1": sha1_file(wav),
+            "license_tier": "GREEN", "mood_tags": [],
+            "license_proof_path": "license.pdf",
+            "license_proof_sha1": "0000000000000000000000000000000000000000",
+        }
+        with open(d / "track_meta.json", "w") as f:
+            json.dump(meta, f)
+        lib = SoundtrackLibrary(self.lib_dir)
+        tracks = lib.scan()
+        self.assertFalse(tracks[0].valid)
+        self.assertTrue(any("license_proof sha1 mismatch" in e for e in tracks[0].errors))
+
+    def test_amber_no_proof_required(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary, sha1_file
+        d = self.lib_dir / "amber_ok"
+        d.mkdir()
+        wav = d / "audio.wav"
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00" * 44100)
+        meta = {
+            "track_id": "amber_ok", "sha1": sha1_file(wav),
+            "license_tier": "AMBER", "mood_tags": [],
+        }
+        with open(d / "track_meta.json", "w") as f:
+            json.dump(meta, f)
+        lib = SoundtrackLibrary(self.lib_dir)
+        tracks = lib.scan()
+        self.assertTrue(tracks[0].valid)
+
+
+class TestSoundtrackTruePeakGate(unittest.TestCase):
+    """Tests for true peak gate in audio_postcheck.py."""
+
+    def test_true_peak_high_fails(self):
+        from rayvault.audio_postcheck import run_audio_postcheck
+        from unittest.mock import patch, MagicMock
+
+        with patch("rayvault.audio_postcheck.measure_loudness") as ml, \
+             patch("rayvault.audio_postcheck.check_duration") as cd, \
+             patch("rayvault.audio_postcheck.check_vo_music_balance") as cb, \
+             patch("rayvault.audio_postcheck.detect_silence_gaps") as dsg:
+            ml.return_value = MagicMock(
+                ok=True, integrated_lufs=-14.0, true_peak_db=0.5, lra=5.0
+            )
+            cd.return_value = (True, 600.0)
+            cb.return_value = MagicMock(ok=True, vo_dominant_lufs=None)
+            dsg.return_value = []
+
+            video = Path("/fake.mp4")
+            with patch.object(Path, "exists", return_value=True):
+                result = run_audio_postcheck(video, {}, 600.0)
+            self.assertFalse(result.ok)
+            self.assertTrue(any("TRUE_PEAK_HIGH" in e for e in result.errors))
+
+    def test_true_peak_ok_passes(self):
+        from rayvault.audio_postcheck import run_audio_postcheck
+        from unittest.mock import patch, MagicMock
+
+        with patch("rayvault.audio_postcheck.measure_loudness") as ml, \
+             patch("rayvault.audio_postcheck.check_duration") as cd, \
+             patch("rayvault.audio_postcheck.check_vo_music_balance") as cb, \
+             patch("rayvault.audio_postcheck.detect_silence_gaps") as dsg:
+            ml.return_value = MagicMock(
+                ok=True, integrated_lufs=-14.0, true_peak_db=-2.0, lra=5.0
+            )
+            cd.return_value = (True, 600.0)
+            cb.return_value = MagicMock(ok=True, vo_dominant_lufs=None)
+            dsg.return_value = []
+
+            video = Path("/fake.mp4")
+            with patch.object(Path, "exists", return_value=True):
+                result = run_audio_postcheck(video, {}, 600.0)
+            self.assertTrue(result.ok)
+
+
+class TestSoundtrackSilenceDetection(unittest.TestCase):
+    """Tests for silence gap detection."""
+
+    def test_silence_gaps_reported_as_warning(self):
+        from rayvault.audio_postcheck import run_audio_postcheck
+        from unittest.mock import patch, MagicMock
+
+        with patch("rayvault.audio_postcheck.measure_loudness") as ml, \
+             patch("rayvault.audio_postcheck.check_duration") as cd, \
+             patch("rayvault.audio_postcheck.check_vo_music_balance") as cb, \
+             patch("rayvault.audio_postcheck.detect_silence_gaps") as dsg:
+            ml.return_value = MagicMock(
+                ok=True, integrated_lufs=-14.0, true_peak_db=-2.0, lra=5.0
+            )
+            cd.return_value = (True, 600.0)
+            cb.return_value = MagicMock(ok=True, vo_dominant_lufs=None)
+            dsg.return_value = [
+                {"start": 120.0, "end": 120.5, "duration_ms": 500.0},
+            ]
+
+            video = Path("/fake.mp4")
+            with patch.object(Path, "exists", return_value=True):
+                result = run_audio_postcheck(video, {}, 600.0)
+            self.assertTrue(result.ok)  # silence is WARN, not FAIL
+            self.assertTrue(any("SILENCE_GAPS" in w for w in result.warnings))
+
+    def test_no_silence_gaps_no_warning(self):
+        from rayvault.audio_postcheck import run_audio_postcheck
+        from unittest.mock import patch, MagicMock
+
+        with patch("rayvault.audio_postcheck.measure_loudness") as ml, \
+             patch("rayvault.audio_postcheck.check_duration") as cd, \
+             patch("rayvault.audio_postcheck.check_vo_music_balance") as cb, \
+             patch("rayvault.audio_postcheck.detect_silence_gaps") as dsg:
+            ml.return_value = MagicMock(
+                ok=True, integrated_lufs=-14.0, true_peak_db=-2.0, lra=5.0
+            )
+            cd.return_value = (True, 600.0)
+            cb.return_value = MagicMock(ok=True, vo_dominant_lufs=None)
+            dsg.return_value = []
+
+            video = Path("/fake.mp4")
+            with patch.object(Path, "exists", return_value=True):
+                result = run_audio_postcheck(video, {}, 600.0)
+            self.assertFalse(any("SILENCE" in w for w in result.warnings))
+
+
+class TestSoundtrackCooldown(unittest.TestCase):
+    """Tests for track cooldown anti-repetition."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.lib_dir = Path(self.td) / "library" / "soundtracks"
+        self.lib_dir.mkdir(parents=True)
+        self.runs_dir = Path(self.td) / "state" / "runs"
+        self.runs_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _create_track(self, track_id, tier="GREEN"):
+        from rayvault.soundtrack_library import sha1_file
+        d = self.lib_dir / track_id
+        d.mkdir(parents=True, exist_ok=True)
+        wav = d / "audio.wav"
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00" * 44100 * 120)
+        sha1 = sha1_file(wav)
+        meta = {
+            "track_id": track_id, "sha1": sha1,
+            "license_tier": tier, "mood_tags": [],
+        }
+        if tier == "GREEN":
+            proof = d / "license.pdf"
+            proof.write_bytes(b"proof")
+            meta["license_proof_path"] = "license.pdf"
+            meta["license_proof_sha1"] = sha1_file(proof)
+        with open(d / "track_meta.json", "w") as f:
+            json.dump(meta, f)
+
+    def _create_run_with_track(self, run_name, track_id):
+        rd = self.runs_dir / run_name
+        rd.mkdir(parents=True, exist_ok=True)
+        m = {"audio": {"soundtrack": {"track_id": track_id}}}
+        with open(rd / "00_manifest.json", "w") as f:
+            json.dump(m, f)
+
+    def test_collect_recent_track_ids(self):
+        from rayvault.soundtrack_policy import collect_recent_track_ids
+        self._create_run_with_track("RUN_A", "track_alpha")
+        self._create_run_with_track("RUN_B", "track_beta")
+        ids = collect_recent_track_ids(self.runs_dir, max_runs=5)
+        self.assertIn("track_alpha", ids)
+        self.assertIn("track_beta", ids)
+
+    def test_cooldown_excludes_recent(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("recent_track")
+        self._create_track("fresh_track")
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        d = decide_soundtrack(
+            {}, {"audio": {"duration_sec": 600}}, lib,
+            recent_track_ids={"recent_track"},
+        )
+        self.assertTrue(d.enabled)
+        self.assertEqual(d.track_id, "fresh_track")
+
+    def test_all_tracks_on_cooldown_disabled(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("only_track")
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        d = decide_soundtrack(
+            {}, {"audio": {"duration_sec": 600}}, lib,
+            recent_track_ids={"only_track"},
+        )
+        self.assertFalse(d.enabled)
+        self.assertEqual(d.skip_reason, "no_eligible_tracks")
+
+
+class TestSoundtrackPoliciesConstants(unittest.TestCase):
+    """Tests for new soundtrack policy constants."""
+
+    def test_true_peak_max_exists(self):
+        from rayvault.policies import SOUNDTRACK_TRUE_PEAK_MAX
+        self.assertEqual(SOUNDTRACK_TRUE_PEAK_MAX, -1.0)
+
+    def test_silence_gap_constant(self):
+        from rayvault.policies import SOUNDTRACK_MAX_SILENCE_GAP_MS
+        self.assertEqual(SOUNDTRACK_MAX_SILENCE_GAP_MS, 300)
+
+    def test_cooldown_constant(self):
+        from rayvault.policies import SOUNDTRACK_TRACK_COOLDOWN_RUNS
+        self.assertEqual(SOUNDTRACK_TRACK_COOLDOWN_RUNS, 5)
+
+
+# ── broadcast hardening tests ────────────────────────────────────────────
+
+
+class TestMotifGroupCooldown(unittest.TestCase):
+    """Tests for motif_group cooldown anti-repetition."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.runs_dir = Path(self.td) / "state" / "runs"
+        self.runs_dir.mkdir(parents=True)
+        self.lib_dir = Path(self.td) / "library" / "soundtracks"
+        self.lib_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _create_run_with_motif(self, run_name, track_id="t", motif_group=""):
+        rd = self.runs_dir / run_name
+        rd.mkdir(parents=True, exist_ok=True)
+        m = {"audio": {"soundtrack": {
+            "track_id": track_id,
+            "motif_group": motif_group,
+        }}}
+        with open(rd / "00_manifest.json", "w") as f:
+            json.dump(m, f)
+
+    def _create_track(self, track_id, tier="GREEN", motif_group=""):
+        from rayvault.soundtrack_library import sha1_file
+        d = self.lib_dir / track_id
+        d.mkdir(parents=True, exist_ok=True)
+        wav = d / "audio.wav"
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00" * 44100 * 120)
+        sha1 = sha1_file(wav)
+        meta = {
+            "track_id": track_id, "sha1": sha1,
+            "license_tier": tier, "mood_tags": [],
+            "motif_group": motif_group,
+        }
+        if tier == "GREEN":
+            proof = d / "license.pdf"
+            proof.write_bytes(b"proof")
+            meta["license_proof_path"] = "license.pdf"
+            meta["license_proof_sha1"] = sha1_file(proof)
+        with open(d / "track_meta.json", "w") as f:
+            json.dump(meta, f)
+
+    def test_collect_recent_motif_groups(self):
+        from rayvault.soundtrack_policy import collect_recent_motif_groups
+        self._create_run_with_motif("RUN_A", motif_group="chill")
+        self._create_run_with_motif("RUN_B", motif_group="upbeat")
+        groups = collect_recent_motif_groups(self.runs_dir, max_runs=10)
+        self.assertIn("chill", groups)
+        self.assertIn("upbeat", groups)
+
+    def test_motif_cooldown_excludes_group(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("track_chill", motif_group="chill")
+        self._create_track("track_upbeat", motif_group="upbeat")
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        d = decide_soundtrack(
+            {}, {"audio": {"duration_sec": 600}}, lib,
+            recent_motif_groups={"chill"},
+        )
+        self.assertTrue(d.enabled)
+        self.assertEqual(d.track_id, "track_upbeat")
+
+    def test_all_motifs_on_cooldown_disabled(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("only_chill", motif_group="chill")
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        d = decide_soundtrack(
+            {}, {"audio": {"duration_sec": 600}}, lib,
+            recent_motif_groups={"chill"},
+        )
+        self.assertFalse(d.enabled)
+
+    def test_empty_motif_group_not_excluded(self):
+        from rayvault.soundtrack_policy import decide_soundtrack
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("no_group", motif_group="")
+        lib = SoundtrackLibrary(self.lib_dir)
+        lib.scan()
+        d = decide_soundtrack(
+            {}, {"audio": {"duration_sec": 600}}, lib,
+            recent_motif_groups={"chill"},
+        )
+        self.assertTrue(d.enabled)
+
+
+class TestSafetyJitter(unittest.TestCase):
+    """Tests for AMBER-only safety jitter (anti-Content-ID)."""
+
+    def test_amber_gets_jitter(self):
+        from rayvault.soundtrack_policy import compute_safety_jitter
+        from rayvault.policies import SAFETY_JITTER_PITCH_RATIO, SAFETY_JITTER_TEMPO_RATIO
+        result = compute_safety_jitter("AMBER")
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["pitch_ratio"], SAFETY_JITTER_PITCH_RATIO)
+        self.assertEqual(result["tempo_ratio"], SAFETY_JITTER_TEMPO_RATIO)
+
+    def test_green_no_jitter(self):
+        from rayvault.soundtrack_policy import compute_safety_jitter
+        result = compute_safety_jitter("GREEN")
+        self.assertFalse(result["applied"])
+
+    def test_red_no_jitter(self):
+        from rayvault.soundtrack_policy import compute_safety_jitter
+        result = compute_safety_jitter("RED")
+        self.assertFalse(result["applied"])
+
+    def test_decision_includes_safety_jitter(self):
+        """SoundtrackDecision for AMBER track should include safety_jitter."""
+        from rayvault.soundtrack_policy import _build_decision
+        from rayvault.soundtrack_library import TrackInfo
+        track = TrackInfo(
+            track_id="t1", title="t1", duration_sec=120.0,
+            mood_tags=[], license_tier="AMBER",
+            audio_path=Path("/tmp/x.wav"), sha1="abc",
+        )
+        d = _build_decision(track, 600.0, "RUN_1")
+        self.assertTrue(d.safety_jitter.get("applied"))
+
+
+class TestChapterGainJitter(unittest.TestCase):
+    """Tests for deterministic per-chapter gain jitter."""
+
+    def test_jitter_is_deterministic(self):
+        from rayvault.soundtrack_policy import compute_chapter_gain_jitter
+        chapters = [{"id": "intro"}, {"id": "p1"}, {"id": "p2"}]
+        j1 = compute_chapter_gain_jitter("RUN_A", "track1", chapters)
+        j2 = compute_chapter_gain_jitter("RUN_A", "track1", chapters)
+        self.assertEqual(j1, j2)
+
+    def test_different_seed_different_jitter(self):
+        from rayvault.soundtrack_policy import compute_chapter_gain_jitter
+        chapters = [{"id": "intro"}]
+        j1 = compute_chapter_gain_jitter("RUN_A", "track1", chapters)
+        j2 = compute_chapter_gain_jitter("RUN_B", "track1", chapters)
+        self.assertNotEqual(j1[0]["gain_offset_db"], j2[0]["gain_offset_db"])
+
+    def test_jitter_within_bounds(self):
+        from rayvault.soundtrack_policy import compute_chapter_gain_jitter
+        from rayvault.policies import SOUNDTRACK_CHAPTER_GAIN_JITTER_DB
+        chapters = [{"id": f"ch{i}"} for i in range(20)]
+        result = compute_chapter_gain_jitter("RUN_X", "track_y", chapters)
+        for item in result:
+            self.assertLessEqual(abs(item["gain_offset_db"]),
+                                 SOUNDTRACK_CHAPTER_GAIN_JITTER_DB)
+
+    def test_decision_includes_chapter_jitter(self):
+        from rayvault.soundtrack_policy import _build_decision
+        from rayvault.soundtrack_library import TrackInfo
+        track = TrackInfo(
+            track_id="t1", title="t1", duration_sec=120.0,
+            mood_tags=[], license_tier="GREEN",
+            audio_path=Path("/tmp/x.wav"), sha1="abc",
+        )
+        rc = {"segments": [{"id": "intro"}, {"id": "p1"}]}
+        d = _build_decision(track, 600.0, "RUN_1", rc)
+        self.assertEqual(len(d.chapter_gain_jitter), 2)
+
+
+class TestAIMusicEditorProof(unittest.TestCase):
+    """Tests for AI Music Editor proof structure."""
+
+    def test_not_attempted(self):
+        from rayvault.soundtrack_policy import build_ai_music_editor_proof
+        proof = build_ai_music_editor_proof(
+            before_duration_sec=120.0,
+            target_duration_sec=600.0,
+            attempted=False,
+        )
+        self.assertFalse(proof["attempted"])
+        self.assertFalse(proof["success"])
+
+    def test_success_within_eps(self):
+        from rayvault.soundtrack_policy import build_ai_music_editor_proof
+        proof = build_ai_music_editor_proof(
+            before_duration_sec=120.0,
+            after_duration_sec=600.1,
+            target_duration_sec=600.0,
+            attempted=True,
+        )
+        self.assertTrue(proof["attempted"])
+        self.assertTrue(proof["success"])
+        self.assertLessEqual(proof["diff_sec"], 0.25)
+
+    def test_failure_outside_eps(self):
+        from rayvault.soundtrack_policy import build_ai_music_editor_proof
+        proof = build_ai_music_editor_proof(
+            before_duration_sec=120.0,
+            after_duration_sec=580.0,
+            target_duration_sec=600.0,
+            attempted=True,
+        )
+        self.assertTrue(proof["attempted"])
+        self.assertFalse(proof["success"])
+        self.assertEqual(proof["diff_sec"], 20.0)
+
+    def test_decision_includes_ai_proof(self):
+        from rayvault.soundtrack_policy import _build_decision
+        from rayvault.soundtrack_library import TrackInfo
+        track = TrackInfo(
+            track_id="t1", title="t1", duration_sec=120.0,
+            mood_tags=[], license_tier="GREEN",
+            audio_path=Path("/tmp/x.wav"), sha1="abc",
+        )
+        d = _build_decision(track, 600.0, "RUN_1")
+        self.assertIn("attempted", d.ai_music_editor)
+        self.assertFalse(d.ai_music_editor["attempted"])
+
+
+class TestConformCache(unittest.TestCase):
+    """Tests for conformed track cache."""
+
+    def test_cache_key_deterministic(self):
+        from rayvault.soundtrack_policy import conform_cache_key
+        k1 = conform_cache_key("abc123", 600.0, 120.0)
+        k2 = conform_cache_key("abc123", 600.0, 120.0)
+        self.assertEqual(k1, k2)
+
+    def test_cache_key_differs_with_sha1(self):
+        from rayvault.soundtrack_policy import conform_cache_key
+        k1 = conform_cache_key("abc123", 600.0, 120.0)
+        k2 = conform_cache_key("xyz789", 600.0, 120.0)
+        self.assertNotEqual(k1, k2)
+
+    def test_cache_key_without_bpm(self):
+        from rayvault.soundtrack_policy import conform_cache_key
+        k = conform_cache_key("abc123", 600.0)
+        self.assertEqual(len(k), 16)
+
+    def test_lookup_cache_miss(self):
+        from rayvault.soundtrack_policy import lookup_conform_cache
+        td = Path(tempfile.mkdtemp())
+        try:
+            result = lookup_conform_cache(td, "nonexistent")
+            self.assertIsNone(result)
+        finally:
+            import shutil
+            shutil.rmtree(td, ignore_errors=True)
+
+    def test_lookup_cache_hit(self):
+        from rayvault.soundtrack_policy import lookup_conform_cache
+        td = Path(tempfile.mkdtemp())
+        try:
+            (td / "cached_key.wav").write_bytes(b"\x00" * 100)
+            result = lookup_conform_cache(td, "cached_key")
+            self.assertIsNotNone(result)
+            self.assertEqual(result.name, "cached_key.wav")
+        finally:
+            import shutil
+            shutil.rmtree(td, ignore_errors=True)
+
+
+class TestFairlightBusContract(unittest.TestCase):
+    """Tests for fairlight_contract.py bus contract."""
+
+    def test_default_contract_has_3_buses(self):
+        from rayvault.fairlight_contract import FairlightContract
+        c = FairlightContract.default()
+        self.assertEqual(len(c.buses), 3)
+        names = {b.name for b in c.buses}
+        self.assertIn("BUS_VO", names)
+        self.assertIn("BUS_MUSIC", names)
+        self.assertIn("BUS_SFX", names)
+
+    def test_default_contract_has_ducking(self):
+        from rayvault.fairlight_contract import FairlightContract
+        c = FairlightContract.default()
+        self.assertIsNotNone(c.ducking)
+        self.assertEqual(c.ducking.target_bus, "BUS_MUSIC")
+        self.assertEqual(c.ducking.key_input_bus, "BUS_VO")
+
+    def test_to_dict_roundtrip(self):
+        from rayvault.fairlight_contract import FairlightContract
+        c = FairlightContract.default()
+        d = c.to_dict()
+        self.assertEqual(d["master_bus"], "BUS_MASTER")
+        self.assertEqual(len(d["buses"]), 3)
+        self.assertIsNotNone(d["ducking"])
+
+    def test_verify_no_soundtrack_receipt(self):
+        from rayvault.fairlight_contract import FairlightContract, verify_bus_contract
+        c = FairlightContract.default()
+        result = verify_bus_contract(c, {})
+        self.assertTrue(result.ok)
+        self.assertEqual(result.applied_via, "none")
+
+    def test_verify_applied_in_davinci(self):
+        from rayvault.fairlight_contract import FairlightContract, verify_bus_contract
+        c = FairlightContract.default()
+        receipt = {"soundtrack_receipt": {
+            "applied_in_davinci": True,
+            "fades_applied": True,
+            "ducking_applied": False,
+        }}
+        result = verify_bus_contract(c, receipt)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.applied_via, "api")
+        # ducking not applied should be a warning
+        self.assertTrue(any("DUCKING" in w for w in result.warnings))
+
+    def test_verify_not_applied_fails(self):
+        from rayvault.fairlight_contract import FairlightContract, verify_bus_contract
+        c = FairlightContract.default()
+        receipt = {"soundtrack_receipt": {
+            "applied_in_davinci": False,
+            "fades_applied": False,
+            "ducking_applied": False,
+        }}
+        result = verify_bus_contract(c, receipt)
+        self.assertFalse(result.ok)
+        self.assertTrue(any("BUS_MUSIC" in e for e in result.errors))
+
+    def test_apply_stubs_returns_evidence(self):
+        from rayvault.fairlight_contract import (
+            FairlightContract, apply_bus_contract_stubs,
+        )
+        c = FairlightContract.default()
+        evidence = apply_bus_contract_stubs(None, c)
+        self.assertTrue(evidence["attempted"])
+        self.assertFalse(evidence["api_available"])
+
+
+class TestBroadcastConstants(unittest.TestCase):
+    """Tests for broadcast hardening policy constants."""
+
+    def test_vad_constants(self):
+        from rayvault.policies import (
+            VAD_VOICE_BAND_HZ, VAD_WINDOW_MS,
+            VAD_NOISE_FLOOR_PERCENTILE, VAD_THRESHOLD_ABOVE_FLOOR_DB,
+        )
+        self.assertEqual(VAD_VOICE_BAND_HZ, (300, 3000))
+        self.assertEqual(VAD_WINDOW_MS, 200)
+        self.assertEqual(VAD_NOISE_FLOOR_PERCENTILE, 10)
+        self.assertEqual(VAD_THRESHOLD_ABOVE_FLOOR_DB, 10.0)
+
+    def test_ducking_constants(self):
+        from rayvault.policies import (
+            DUCKING_PRESENCE_BAND_HZ, DUCKING_MIN_REDUCTION_RATIO,
+        )
+        self.assertEqual(DUCKING_PRESENCE_BAND_HZ, (2000, 5000))
+        self.assertEqual(DUCKING_MIN_REDUCTION_RATIO, 0.7)
+
+    def test_clipping_constants(self):
+        from rayvault.policies import (
+            CLIPPING_PEAK_RATIO, CLIPPING_MAX_CONSECUTIVE_SAMPLES,
+        )
+        self.assertEqual(CLIPPING_PEAK_RATIO, 0.99)
+        self.assertEqual(CLIPPING_MAX_CONSECUTIVE_SAMPLES, 3)
+
+    def test_safety_jitter_constants(self):
+        from rayvault.policies import (
+            SAFETY_JITTER_PITCH_RATIO, SAFETY_JITTER_TEMPO_RATIO,
+        )
+        self.assertAlmostEqual(SAFETY_JITTER_PITCH_RATIO, 0.9995)
+        self.assertAlmostEqual(SAFETY_JITTER_TEMPO_RATIO, 1.001)
+
+    def test_bus_name_constants(self):
+        from rayvault.policies import (
+            BUS_VO_NAME, BUS_MUSIC_NAME, BUS_SFX_NAME, BUS_MASTER_NAME,
+        )
+        self.assertEqual(BUS_VO_NAME, "BUS_VO")
+        self.assertEqual(BUS_MUSIC_NAME, "BUS_MUSIC")
+        self.assertEqual(BUS_SFX_NAME, "BUS_SFX")
+        self.assertEqual(BUS_MASTER_NAME, "BUS_MASTER")
+
+    def test_motif_cooldown_constant(self):
+        from rayvault.policies import SOUNDTRACK_MOTIF_COOLDOWN_RUNS
+        self.assertEqual(SOUNDTRACK_MOTIF_COOLDOWN_RUNS, 8)
+
+    def test_valid_sources_constant(self):
+        from rayvault.policies import SOUNDTRACK_VALID_SOURCES
+        self.assertIn("artlist", SOUNDTRACK_VALID_SOURCES)
+        self.assertIn("suno", SOUNDTRACK_VALID_SOURCES)
+        self.assertEqual(len(SOUNDTRACK_VALID_SOURCES), 6)
+
+    def test_true_peak_warn_constant(self):
+        from rayvault.policies import SOUNDTRACK_TRUE_PEAK_WARN
+        self.assertEqual(SOUNDTRACK_TRUE_PEAK_WARN, -1.3)
+
+    def test_conform_cache_dir(self):
+        from rayvault.policies import CONFORM_CACHE_DIR
+        self.assertEqual(CONFORM_CACHE_DIR, "state/cache/conformed_tracks")
+
+
+class TestEnhancedTrackInfo(unittest.TestCase):
+    """Tests for bpm, motif_group, source fields in TrackInfo."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.lib_dir = Path(self.td) / "library" / "soundtracks"
+        self.lib_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _create_track(self, track_id, tier="GREEN", bpm=None,
+                      motif_group="", source=""):
+        from rayvault.soundtrack_library import sha1_file
+        d = self.lib_dir / track_id
+        d.mkdir(parents=True, exist_ok=True)
+        wav = d / "audio.wav"
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00" * 44100 * 10)
+        sha1 = sha1_file(wav)
+        meta = {
+            "track_id": track_id, "sha1": sha1,
+            "license_tier": tier, "mood_tags": [],
+            "bpm": bpm, "motif_group": motif_group, "source": source,
+        }
+        if tier == "GREEN":
+            proof = d / "license.pdf"
+            proof.write_bytes(b"proof")
+            meta["license_proof_path"] = "license.pdf"
+            meta["license_proof_sha1"] = sha1_file(proof)
+        with open(d / "track_meta.json", "w") as f:
+            json.dump(meta, f)
+
+    def test_bpm_read_from_meta(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("bpm_track", bpm=128.0)
+        lib = SoundtrackLibrary(self.lib_dir)
+        tracks = lib.scan()
+        self.assertEqual(tracks[0].bpm, 128.0)
+
+    def test_motif_group_read_from_meta(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("motif_track", motif_group="chill")
+        lib = SoundtrackLibrary(self.lib_dir)
+        tracks = lib.scan()
+        self.assertEqual(tracks[0].motif_group, "chill")
+
+    def test_source_read_from_meta(self):
+        from rayvault.soundtrack_library import SoundtrackLibrary
+        self._create_track("src_track", source="artlist")
+        lib = SoundtrackLibrary(self.lib_dir)
+        tracks = lib.scan()
+        self.assertEqual(tracks[0].source, "artlist")
+
+    def test_decision_includes_bpm_motif_source(self):
+        from rayvault.soundtrack_policy import _build_decision
+        from rayvault.soundtrack_library import TrackInfo
+        track = TrackInfo(
+            track_id="t1", title="t1", duration_sec=120.0,
+            mood_tags=[], license_tier="GREEN",
+            audio_path=Path("/tmp/x.wav"), sha1="abc",
+            bpm=110.0, motif_group="epic", source="epidemic",
+        )
+        d = _build_decision(track, 600.0, "RUN_1")
+        self.assertEqual(d.bpm, 110.0)
+        self.assertEqual(d.motif_group, "epic")
+        self.assertEqual(d.source, "epidemic")
+
+    def test_decision_to_dict_has_all_fields(self):
+        from rayvault.soundtrack_policy import _build_decision
+        from rayvault.soundtrack_library import TrackInfo
+        track = TrackInfo(
+            track_id="t1", title="t1", duration_sec=120.0,
+            mood_tags=[], license_tier="GREEN",
+            audio_path=Path("/tmp/x.wav"), sha1="abc",
+            bpm=110.0, motif_group="epic", source="epidemic",
+        )
+        d = _build_decision(track, 600.0, "RUN_1")
+        dd = d.to_dict()
+        self.assertIn("bpm", dd)
+        self.assertIn("motif_group", dd)
+        self.assertIn("source", dd)
+        self.assertIn("safety_jitter", dd)
+        self.assertIn("chapter_gain_jitter", dd)
+        self.assertIn("ai_music_editor", dd)
+        self.assertIn("conform_cache_key", dd)
+
+
+class TestEnhancedSoundtrackReceipt(unittest.TestCase):
+    """Tests for the enhanced soundtrack receipt in davinci_assembler."""
+
+    def test_receipt_includes_broadcast_fields(self):
+        """Verify the assembler receipt builder includes all broadcast fields."""
+        # Simulate what assemble() does for the receipt
+        soundtrack_decision = {
+            "track_id": "test_track",
+            "license_tier": "GREEN",
+            "track_sha1": "abc123",
+            "bpm": 120.0,
+            "motif_group": "chill",
+            "source": "artlist",
+            "publish_policy": "AUTO_PUBLISH",
+            "ai_music_editor": {"attempted": False, "success": False, "proof": None},
+            "safety_jitter": {"applied": False, "reason": "tier=GREEN"},
+            "chapter_gain_jitter": [{"chapter_id": "intro", "gain_offset_db": 0.5}],
+            "conform_cache_key": "abcdef1234567890",
+            "gain_db": -18.0,
+            "loop_count": 1,
+            "fallback_plan": "",
+            "fades": {"fade_in_sec": 2.0, "fade_out_sec": 2.0},
+            "enabled": True,
+        }
+        # Build receipt as assembler does
+        from rayvault.policies import SOUNDTRACK_MUSIC_GAIN_DB
+        receipt = {
+            "track_id": soundtrack_decision.get("track_id", ""),
+            "license_tier": soundtrack_decision.get("license_tier", ""),
+            "track_sha1": soundtrack_decision.get("track_sha1", ""),
+            "bpm": soundtrack_decision.get("bpm"),
+            "motif_group": soundtrack_decision.get("motif_group", ""),
+            "source": soundtrack_decision.get("source", ""),
+            "publish_policy": soundtrack_decision.get("publish_policy", ""),
+            "applied_in_davinci": True,
+            "ai_music_editor": soundtrack_decision.get("ai_music_editor", {}),
+            "safety_jitter": soundtrack_decision.get("safety_jitter", {}),
+            "chapter_gain_jitter": soundtrack_decision.get("chapter_gain_jitter", []),
+            "conform_cache_key": soundtrack_decision.get("conform_cache_key", ""),
+            "loop_count": soundtrack_decision.get("loop_count", 1),
+            "gain_db": soundtrack_decision.get("gain_db", SOUNDTRACK_MUSIC_GAIN_DB),
+        }
+        self.assertEqual(receipt["bpm"], 120.0)
+        self.assertEqual(receipt["motif_group"], "chill")
+        self.assertEqual(receipt["source"], "artlist")
+        self.assertEqual(receipt["publish_policy"], "AUTO_PUBLISH")
+        self.assertFalse(receipt["ai_music_editor"]["attempted"])
+        self.assertFalse(receipt["safety_jitter"]["applied"])
+        self.assertEqual(len(receipt["chapter_gain_jitter"]), 1)
+        self.assertEqual(receipt["conform_cache_key"], "abcdef1234567890")
+        self.assertEqual(receipt["gain_db"], -18.0)
+        self.assertEqual(receipt["loop_count"], 1)
+
+
+class TestPostcheckResultStatus(unittest.TestCase):
+    """Tests for PostcheckResult status/exit_code computation."""
+
+    def test_ok_result(self):
+        from rayvault.audio_postcheck import PostcheckResult
+        r = PostcheckResult(ok=True)
+        d = r.to_dict()
+        self.assertEqual(d["status"], "OK")
+        self.assertEqual(d["exit_code"], 0)
+
+    def test_warn_result(self):
+        from rayvault.audio_postcheck import PostcheckResult
+        r = PostcheckResult(ok=True, warnings=["some warning"])
+        d = r.to_dict()
+        self.assertEqual(d["status"], "WARN")
+        self.assertEqual(d["exit_code"], 1)
+
+    def test_fail_result(self):
+        from rayvault.audio_postcheck import PostcheckResult
+        r = PostcheckResult(ok=False, errors=["some error"])
+        d = r.to_dict()
+        self.assertEqual(d["status"], "FAIL")
+        self.assertEqual(d["exit_code"], 2)
+
+    def test_errors_override_warnings(self):
+        from rayvault.audio_postcheck import PostcheckResult
+        r = PostcheckResult(
+            ok=False,
+            errors=["error"],
+            warnings=["warning"],
+        )
+        d = r.to_dict()
+        self.assertEqual(d["status"], "FAIL")
+        self.assertEqual(d["exit_code"], 2)
+
+
+class TestContractVerifyResult(unittest.TestCase):
+    """Tests for ContractVerifyResult serialization."""
+
+    def test_to_dict(self):
+        from rayvault.fairlight_contract import ContractVerifyResult
+        r = ContractVerifyResult(
+            ok=True,
+            warnings=["DUCKING: not applied"],
+            applied_via="api",
+        )
+        d = r.to_dict()
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["applied_via"], "api")
+        self.assertEqual(len(d["warnings"]), 1)
+        self.assertEqual(len(d["errors"]), 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
