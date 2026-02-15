@@ -83,6 +83,8 @@ USER.md
 .agent/*.json
 !.agent/workflows/
 local/
+/local/
+package-lock.json
 
 # Python tools
 .pytest_cache/

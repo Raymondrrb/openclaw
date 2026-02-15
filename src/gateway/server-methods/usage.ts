@@ -25,6 +25,7 @@ import {
   type DiscoveredSession,
 } from "../../infra/session-cost-usage.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
+import { buildUsageAggregateTail } from "../../shared/usage-aggregates.js";
 import {
   ErrorCodes,
   errorShape,
@@ -496,11 +497,13 @@ export const usageHandlers: GatewayRequestHandlers = {
     };
 
     for (const merged of limitedEntries) {
+      const agentId = parseAgentSessionKey(merged.key)?.agentId;
       const usage = await loadSessionCostSummary({
         sessionId: merged.sessionId,
         sessionEntry: merged.storeEntry,
         sessionFile: merged.sessionFile,
         config,
+        agentId,
         startMs,
         endMs,
       });
@@ -519,7 +522,6 @@ export const usageHandlers: GatewayRequestHandlers = {
         aggregateTotals.missingCostEntries += usage.missingCostEntries;
       }
 
-      const agentId = parseAgentSessionKey(merged.key)?.agentId;
       const channel = merged.storeEntry?.channel ?? merged.storeEntry?.origin?.provider;
       const chatType = merged.storeEntry?.chatType ?? merged.storeEntry?.origin?.chatType;
 
@@ -691,6 +693,14 @@ export const usageHandlers: GatewayRequestHandlers = {
       return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
     };
 
+    const tail = buildUsageAggregateTail({
+      byChannelMap: byChannelMap,
+      latencyTotals,
+      dailyLatencyMap,
+      modelDailyMap,
+      dailyMap: dailyAggregateMap,
+    });
+
     const aggregates: SessionsUsageAggregates = {
       messages: aggregateMessages,
       tools: {
@@ -717,35 +727,7 @@ export const usageHandlers: GatewayRequestHandlers = {
       byAgent: Array.from(byAgentMap.entries())
         .map(([id, totals]) => ({ agentId: id, totals }))
         .toSorted((a, b) => b.totals.totalCost - a.totals.totalCost),
-      byChannel: Array.from(byChannelMap.entries())
-        .map(([name, totals]) => ({ channel: name, totals }))
-        .toSorted((a, b) => b.totals.totalCost - a.totals.totalCost),
-      latency:
-        latencyTotals.count > 0
-          ? {
-              count: latencyTotals.count,
-              avgMs: latencyTotals.sum / latencyTotals.count,
-              minMs: latencyTotals.min === Number.POSITIVE_INFINITY ? 0 : latencyTotals.min,
-              maxMs: latencyTotals.max,
-              p95Ms: latencyTotals.p95Max,
-            }
-          : undefined,
-      dailyLatency: Array.from(dailyLatencyMap.values())
-        .map((entry) => ({
-          date: entry.date,
-          count: entry.count,
-          avgMs: entry.count ? entry.sum / entry.count : 0,
-          minMs: entry.min === Number.POSITIVE_INFINITY ? 0 : entry.min,
-          maxMs: entry.max,
-          p95Ms: entry.p95Max,
-        }))
-        .toSorted((a, b) => a.date.localeCompare(b.date)),
-      modelDaily: Array.from(modelDailyMap.values()).toSorted(
-        (a, b) => a.date.localeCompare(b.date) || b.cost - a.cost,
-      ),
-      daily: Array.from(dailyAggregateMap.values()).toSorted((a, b) =>
-        a.date.localeCompare(b.date),
-      ),
+      ...tail,
     };
 
     const result: SessionsUsageResult = {
@@ -796,6 +778,7 @@ export const usageHandlers: GatewayRequestHandlers = {
       sessionEntry: entry,
       sessionFile,
       config,
+      agentId,
       maxPoints: 200,
     });
 
@@ -849,6 +832,7 @@ export const usageHandlers: GatewayRequestHandlers = {
       sessionEntry: entry,
       sessionFile,
       config,
+      agentId,
       limit,
     });
 

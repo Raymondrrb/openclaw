@@ -1,9 +1,11 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import { buildModelAliasIndex } from "../../agents/model-selection.js";
+import { saveSessionStore } from "../../config/sessions.js";
+import { formatZonedTimestamp } from "../../infra/format-time/format-datetime.ts";
 import { enqueueSystemEvent, resetSystemEventsForTest } from "../../infra/system-events.js";
 import { applyResetModelOverride } from "./session-reset-model.js";
 import { prependSystemEvents } from "./session-updates.js";
@@ -16,18 +18,31 @@ vi.mock("../../agents/model-catalog.js", () => ({
   ]),
 }));
 
-describe("initSessionState reset triggers in WhatsApp groups", () => {
-  async function createStorePath(prefix: string): Promise<string> {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-    return path.join(root, "sessions.json");
-  }
+let suiteRoot = "";
+let suiteCase = 0;
 
+beforeAll(async () => {
+  suiteRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-session-resets-suite-"));
+});
+
+afterAll(async () => {
+  await fs.rm(suiteRoot, { recursive: true, force: true });
+  suiteRoot = "";
+  suiteCase = 0;
+});
+
+async function createStorePath(prefix: string): Promise<string> {
+  const root = path.join(suiteRoot, `${prefix}${++suiteCase}`);
+  await fs.mkdir(root);
+  return path.join(root, "sessions.json");
+}
+
+describe("initSessionState reset triggers in WhatsApp groups", () => {
   async function seedSessionStore(params: {
     storePath: string;
     sessionKey: string;
     sessionId: string;
   }): Promise<void> {
-    const { saveSessionStore } = await import("../../config/sessions.js");
     await saveSessionStore(params.storePath, {
       [params.sessionKey]: {
         sessionId: params.sessionId,
@@ -256,11 +271,6 @@ describe("initSessionState reset triggers in WhatsApp groups", () => {
 });
 
 describe("initSessionState reset triggers in Slack channels", () => {
-  async function createStorePath(prefix: string): Promise<string> {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-    return path.join(root, "sessions.json");
-  }
-
   async function seedSessionStore(params: {
     storePath: string;
     sessionKey: string;
@@ -452,11 +462,6 @@ describe("applyResetModelOverride", () => {
 });
 
 describe("initSessionState preserves behavior overrides across /new and /reset", () => {
-  async function createStorePath(prefix: string): Promise<string> {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-    return path.join(root, "sessions.json");
-  }
-
   async function seedSessionStoreWithOverrides(params: {
     storePath: string;
     sessionKey: string;
@@ -582,6 +587,49 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
     expect(result.sessionEntry.ttsAuto).toBe("on");
   });
 
+  it("archives previous transcript file on /new reset", async () => {
+    const storePath = await createStorePath("openclaw-reset-archive-");
+    const sessionKey = "agent:main:telegram:dm:user-archive";
+    const existingSessionId = "existing-session-archive";
+    await seedSessionStoreWithOverrides({
+      storePath,
+      sessionKey,
+      sessionId: existingSessionId,
+      overrides: {},
+    });
+    const transcriptPath = path.join(path.dirname(storePath), `${existingSessionId}.jsonl`);
+    await fs.writeFile(
+      transcriptPath,
+      `${JSON.stringify({ message: { role: "user", content: "hello" } })}\n`,
+      "utf-8",
+    );
+
+    const cfg = {
+      session: { store: storePath, idleMinutes: 999 },
+    } as OpenClawConfig;
+
+    const result = await initSessionState({
+      ctx: {
+        Body: "/new",
+        RawBody: "/new",
+        CommandBody: "/new",
+        From: "user-archive",
+        To: "bot",
+        ChatType: "direct",
+        SessionKey: sessionKey,
+        Provider: "telegram",
+        Surface: "telegram",
+      },
+      cfg,
+      commandAuthorized: true,
+    });
+
+    expect(result.isNewSession).toBe(true);
+    expect(result.resetTriggered).toBe(true);
+    const files = await fs.readdir(path.dirname(storePath));
+    expect(files.some((f) => f.startsWith(`${existingSessionId}.jsonl.reset.`))).toBe(true);
+  });
+
   it("idle-based new session does NOT preserve overrides (no entry to read)", async () => {
     const storePath = await createStorePath("openclaw-idle-no-preserve-");
     const sessionKey = "agent:main:telegram:dm:new-user";
@@ -616,25 +664,26 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
 describe("prependSystemEvents", () => {
   it("adds a local timestamp to queued system events by default", async () => {
     vi.useFakeTimers();
-    const originalTz = process.env.TZ;
-    process.env.TZ = "America/Los_Angeles";
-    const timestamp = new Date("2026-01-12T20:19:17Z");
-    vi.setSystemTime(timestamp);
+    try {
+      const timestamp = new Date("2026-01-12T20:19:17Z");
+      const expectedTimestamp = formatZonedTimestamp(timestamp, { displaySeconds: true });
+      vi.setSystemTime(timestamp);
 
-    enqueueSystemEvent("Model switched.", { sessionKey: "agent:main:main" });
+      enqueueSystemEvent("Model switched.", { sessionKey: "agent:main:main" });
 
-    const result = await prependSystemEvents({
-      cfg: {} as OpenClawConfig,
-      sessionKey: "agent:main:main",
-      isMainSession: false,
-      isNewSession: false,
-      prefixedBodyBase: "User: hi",
-    });
+      const result = await prependSystemEvents({
+        cfg: {} as OpenClawConfig,
+        sessionKey: "agent:main:main",
+        isMainSession: false,
+        isNewSession: false,
+        prefixedBodyBase: "User: hi",
+      });
 
-    expect(result).toMatch(/System: \[2026-01-12 12:19:17 [^\]]+\] Model switched\./);
-
-    resetSystemEventsForTest();
-    process.env.TZ = originalTz;
-    vi.useRealTimers();
+      expect(expectedTimestamp).toBeDefined();
+      expect(result).toContain(`System: [${expectedTimestamp}] Model switched.`);
+    } finally {
+      resetSystemEventsForTest();
+      vi.useRealTimers();
+    }
   });
 });
