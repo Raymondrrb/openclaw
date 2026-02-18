@@ -343,8 +343,33 @@ def cmd_research(args) -> int:
                 retry_objs = verify_products(failed, video_id=args.video_id)
                 verified_objs.extend(retry_objs)
 
-        verified = [
-            {
+        # Build shortlist lookup to enrich verified products with research data
+        _sl_lookup = {s.get("product_name", "").lower(): s for s in shortlist}
+
+        verified = []
+        for v in verified_objs:
+            sl = _sl_lookup.get(v.product_name.lower(), {})
+
+            # Build evidence with reasons from shortlist research
+            evidence_enriched = []
+            ebs = sl.get("evidence_by_source", {})
+            for src in v.evidence or sl.get("sources", []):
+                src_copy = dict(src)
+                src_name = src.get("name", "").lower()
+                # Merge reasons from evidence_by_source
+                if not src_copy.get("reasons") and src_name in ebs:
+                    src_copy["reasons"] = ebs[src_name].get("key_claims", [])
+                if not src_copy.get("reasons"):
+                    src_copy["reasons"] = sl.get("reasons", [])
+                evidence_enriched.append(src_copy)
+
+            # Build key_claims from evidence_by_source
+            key_claims = v.key_claims or []
+            if not key_claims:
+                for src_data in ebs.values():
+                    key_claims.extend(src_data.get("key_claims", []))
+
+            verified.append({
                 "product_name": v.product_name,
                 "brand": v.brand,
                 "asin": v.asin,
@@ -358,11 +383,10 @@ def cmd_research(args) -> int:
                 "amazon_image_url": v.amazon_image_url,
                 "match_confidence": v.match_confidence,
                 "verification_method": v.verification_method,
-                "evidence": v.evidence,
-                "key_claims": v.key_claims,
-            }
-            for v in verified_objs
-        ]
+                "evidence": evidence_enriched,
+                "key_claims": key_claims,
+                "downside": sl.get("downside", ""),
+            })
         write_verified(verified_objs, verified_path)
         print(f"  Verified: {len(verified)}/{len(shortlist)}")
 
@@ -418,6 +442,29 @@ def cmd_research(args) -> int:
             f"Verified {len(verified)} products, ranked {len(top5)}",
         ],
     )
+
+    # --- Approval gate: Top 5 products ---
+    from tools.lib.pipeline_approval import request_approval
+
+    no_approval = getattr(args, "no_approval", False)
+    detail_lines = [f"Niche: {niche}"]
+    for p in top5:
+        detail_lines.append(
+            f"  #{p['rank']} {p.get('product_name', '?')}"
+            f" - {p.get('amazon_price', '?')}"
+            f" ({p.get('amazon_rating', '?')}*)"
+            f" [{p.get('category_label', '?')}]"
+        )
+    detail_lines.append("")
+    detail_lines.append("Products saved. Reject to edit products.json.")
+
+    approved = request_approval(
+        "products", f"Top 5 for '{niche}'", detail_lines,
+        video_id=args.video_id, skip=no_approval,
+    )
+    if not approved:
+        print("\nProducts rejected/timed out. Edit products.json and re-run.")
+        return EXIT_ACTION_REQUIRED
 
     print(f"\nWrote {paths.products_json}")
     print(f"\nNext: python3 tools/pipeline.py script --video-id {args.video_id}")
@@ -490,6 +537,16 @@ def cmd_script(args) -> int:
     if products is None:
         print(f"products.json not found: {paths.products_json}")
         print(f"\nNext: python3 tools/pipeline.py research --video-id {args.video_id}")
+        return EXIT_ACTION_REQUIRED
+
+    # Validate product data quality before script generation
+    from tools.lib.amazon_research import validate_products
+    product_errors = validate_products(products)
+    if product_errors:
+        print("Products not ready for script generation:")
+        for e in product_errors:
+            print(f"  - {e}")
+        print(f"\nFix products first: python3 tools/pipeline.py research --video-id {args.video_id}")
         return EXIT_ACTION_REQUIRED
 
     niche = _load_niche(paths)
@@ -581,6 +638,7 @@ def cmd_script(args) -> int:
 
         return _auto_generate_script(
             args.video_id, paths, draft, args.charismatic,
+            no_approval=getattr(args, "no_approval", False),
         )
 
     # Manual mode: check if script.txt already exists
@@ -601,6 +659,8 @@ def _auto_generate_script(
     paths: VideoPaths,
     draft_prompt: str,
     charismatic: str,
+    *,
+    no_approval: bool = False,
 ) -> int:
     """Auto-generate script via OpenAI (draft) + Anthropic (refinement)."""
     import os
@@ -661,6 +721,27 @@ def _auto_generate_script(
         ],
         next_action=f"python3 tools/pipeline.py assets --video-id {video_id}",
     )
+
+    # --- Approval gate: Script ---
+    from tools.lib.pipeline_approval import request_approval
+
+    wc = result.word_count
+    dur = f"{wc / 150:.1f}"
+    script_detail_lines = [
+        f"Words: {wc}",
+        f"Duration: ~{dur} min",
+        f"Charismatic: {charismatic}",
+        f"Path: {result.script_txt_path}",
+        "",
+        "Script saved. Reject to edit script.txt.",
+    ]
+    approved = request_approval(
+        "script", f"Script ({wc} words)", script_detail_lines,
+        video_id=video_id, skip=no_approval,
+    )
+    if not approved:
+        print("\nScript rejected/timed out. Edit script.txt and re-run.")
+        return EXIT_ACTION_REQUIRED
 
     if result.errors:
         print(f"\nWarnings:")
@@ -1156,6 +1237,164 @@ def cmd_assets(args) -> int:
     return EXIT_OK if failed == 0 else EXIT_ERROR
 
 
+def cmd_discover_products(args) -> int:
+    """Discover Amazon products via browser or scrape."""
+    from tools.lib.amazon_research import save_products_json, validate_products
+    from tools.lib.notify import notify_progress
+
+    _print_header(f"Discover Products: {args.video_id}")
+
+    paths = VideoPaths(args.video_id)
+    paths.ensure_dirs()
+
+    # Determine search keyword
+    keyword = args.keyword or _load_niche(paths)
+    if not keyword:
+        print("No keyword provided and niche.txt not found.")
+        print("Use --keyword or run init first.")
+        return EXIT_ACTION_REQUIRED
+
+    # Check if products.json already exists
+    if paths.products_json.is_file() and not args.force:
+        products = _load_products(paths)
+        if products:
+            print(f"products.json already exists with {len(products)} products.")
+            print("Use --force to re-discover.")
+            return EXIT_OK
+
+    source = args.source
+    top_n = args.top_n
+    tag = args.tag
+
+    if source == "browser":
+        try:
+            from tools.amazon_browser import discover_products_browser, AmazonBrowserError
+        except ImportError as exc:
+            print(f"Cannot import amazon_browser: {exc}")
+            print("Install playwright: pip install playwright && playwright install")
+            return EXIT_ERROR
+
+        try:
+            products = discover_products_browser(
+                keyword=keyword,
+                affiliate_tag=tag,
+                top_n=top_n,
+                min_rating=args.min_rating,
+                min_reviews=args.min_reviews,
+            )
+        except AmazonBrowserError as exc:
+            print(f"Browser discovery failed: {exc}")
+            _log_error(args.video_id, "discover-products", str(exc),
+                       context={"source": source, "keyword": keyword})
+            return EXIT_ACTION_REQUIRED
+        finally:
+            try:
+                from tools.amazon_browser import close_session
+                close_session()
+            except Exception:
+                pass
+
+    else:
+        # Scrape path: raw HTTP (existing behavior, may hit 403)
+        print(f"Source '{source}' not yet implemented. Use --source browser.")
+        return EXIT_ERROR
+
+    if not products:
+        print(f"No products found for: {keyword}")
+        return EXIT_ACTION_REQUIRED
+
+    # Validate
+    errors = validate_products(products)
+    if errors:
+        print(f"Validation warnings:")
+        for e in errors:
+            print(f"  - {e}")
+
+    # Save
+    save_products_json(products, paths.products_json, keyword=keyword)
+    print(f"\nSaved {len(products)} products to {paths.products_json}")
+    for p in products:
+        print(f"  #{p.rank}: {p.name} ({p.price}, {p.rating}* {p.reviews_count} reviews)")
+
+    notify_progress(
+        args.video_id, "discover-products", "products_saved",
+        details=[f"Discovered {len(products)} products for '{keyword}'"],
+    )
+
+    print(f"\nNext: python3 tools/pipeline.py script-brief --video-id {args.video_id}")
+    return EXIT_OK
+
+
+def cmd_generate_images(args) -> int:
+    """Generate Dzine images for a video's product set via assets_manifest."""
+    from tools.lib.pipeline_status import update_milestone
+    from tools.lib.notify import notify_progress, notify_action_required
+    from tools.lib.preflight_gate import can_run_assets
+
+    _print_header(f"Generate Images: {args.video_id}")
+
+    # Preflight safety gate
+    ok, reason = can_run_assets(args.video_id)
+    if not ok:
+        print(f"Blocked: {reason}")
+        return EXIT_ACTION_REQUIRED
+
+    # Preflight session check: Brave + Dzine login
+    from tools.lib.preflight import preflight_check as _pf_check
+    pf = _pf_check("assets")
+    if not pf.passed:
+        for f in pf.failures:
+            print(f"Preflight: {f}")
+        return EXIT_ACTION_REQUIRED
+
+    paths = VideoPaths(args.video_id)
+    products = _load_products(paths)
+    if products is None:
+        print(f"products.json not found: {paths.products_json}")
+        print(f"Run discover-products first.")
+        return EXIT_ACTION_REQUIRED
+
+    # Download Amazon reference images (needed for manifest building)
+    print("Downloading Amazon reference images...")
+    ref_images = _download_amazon_images(products, paths)
+    print(f"  {len(ref_images)} reference images available")
+
+    # Generate via manifest-based orchestrator
+    try:
+        from tools.dzine_browser import generate_all_assets
+    except ImportError as exc:
+        print(f"Cannot import dzine_browser: {exc}")
+        print("Install playwright: pip install playwright && playwright install")
+        return EXIT_ERROR
+
+    result = generate_all_assets(
+        video_id=args.video_id,
+        rebuild=args.rebuild,
+        dry_run=args.dry_run,
+    )
+
+    generated = result.get("generated", 0)
+    failed = result.get("failed", 0)
+
+    if not args.dry_run:
+        update_milestone(args.video_id, "assets", "product_images_done")
+
+        if failed == 0:
+            notify_progress(
+                args.video_id, "generate-images", "complete",
+                details=[f"Generated {generated} images, 0 failed"],
+                next_action=f"python3 tools/pipeline.py tts --video-id {args.video_id}",
+            )
+        else:
+            _log_error(args.video_id, "generate-images",
+                       f"{failed} image(s) failed generation",
+                       context={"generated": generated, "failed": failed})
+
+    print(f"\nGenerated: {generated}, Failed: {failed}")
+    print(f"\nNext: python3 tools/pipeline.py tts --video-id {args.video_id}")
+    return EXIT_OK if failed == 0 else EXIT_ERROR
+
+
 def cmd_tts(args) -> int:
     """Generate TTS voiceover chunks."""
     from tools.lib.pipeline_status import update_milestone
@@ -1621,8 +1860,10 @@ def cmd_day(args) -> int:
 
     # --- Step 2: Research ---
     print()
+    no_approval = getattr(args, "no_approval", False)
     research_args = argparse.Namespace(
         video_id=args.video_id, mode="run", dry_run=False, force=force,
+        no_approval=no_approval,
     )
     rc = cmd_research(research_args)
     if rc != EXIT_OK:
@@ -1640,6 +1881,7 @@ def cmd_day(args) -> int:
     script_args = argparse.Namespace(
         video_id=args.video_id, generate=True, force=force,
         charismatic="reality_check",
+        no_approval=no_approval,
     )
     rc = cmd_script(script_args)
     if rc != EXIT_OK:
@@ -1981,6 +2223,8 @@ def main() -> int:
                         help="Show what would be done without doing it")
     p_res.add_argument("--force", action="store_true",
                         help="Force re-run even if intermediate files exist")
+    p_res.add_argument("--no-approval", action="store_true",
+                        help="Skip Telegram approval gates")
 
     # script
     p_script = sub.add_parser("script", help="Generate script prompts / validate script")
@@ -1999,6 +2243,8 @@ def main() -> int:
         help="Disable auto-generation, manual mode only",
     )
     p_script.add_argument("--force", action="store_true", help="Regenerate even if script exists")
+    p_script.add_argument("--no-approval", action="store_true",
+                          help="Skip Telegram approval gates")
 
     # script-brief
     p_brief = sub.add_parser("script-brief", help="Generate structured manual brief for script writing")
@@ -2034,6 +2280,8 @@ def main() -> int:
     p_day.add_argument("--niche", default="", help="Product niche (auto-picked if empty, bypasses cluster)")
     p_day.add_argument("--cluster", default="", help="Force a specific cluster slug")
     p_day.add_argument("--force", action="store_true", help="Force re-run all stages")
+    p_day.add_argument("--no-approval", action="store_true",
+                       help="Skip Telegram approval gates")
 
     # run (full orchestrator)
     p_run = sub.add_parser("run", help="Run full pipeline via multi-agent orchestrator")
@@ -2094,6 +2342,35 @@ def main() -> int:
     p_errors.add_argument("--stale", action="store_true",
                           help="Show unresolved errors older than 7 days")
 
+    # discover-products
+    p_discover = sub.add_parser("discover-products",
+                                help="Discover Amazon products via browser")
+    p_discover.add_argument("--video-id", required=True)
+    p_discover.add_argument("--source", default="browser",
+                            choices=("browser", "scrape"),
+                            help="Discovery method (default: browser)")
+    p_discover.add_argument("--keyword", default="",
+                            help="Search keyword (default: from niche.txt)")
+    p_discover.add_argument("--top-n", type=int, default=5,
+                            help="Number of products to discover")
+    p_discover.add_argument("--tag", default="",
+                            help="Amazon affiliate tag")
+    p_discover.add_argument("--min-rating", type=float, default=3.5,
+                            help="Minimum product rating")
+    p_discover.add_argument("--min-reviews", type=int, default=50,
+                            help="Minimum review count")
+    p_discover.add_argument("--force", action="store_true",
+                            help="Re-discover even if products.json exists")
+
+    # generate-images
+    p_genimg = sub.add_parser("generate-images",
+                              help="Generate Dzine images for product set")
+    p_genimg.add_argument("--video-id", required=True)
+    p_genimg.add_argument("--rebuild", action="store_true",
+                          help="Rebuild assets_manifest.json from products.json")
+    p_genimg.add_argument("--dry-run", action="store_true",
+                          help="Show what would be generated without doing it")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -2107,6 +2384,8 @@ def main() -> int:
         "script-brief": cmd_script_brief,
         "script-review": cmd_script_review,
         "assets": cmd_assets,
+        "discover-products": cmd_discover_products,
+        "generate-images": cmd_generate_images,
         "tts": cmd_tts,
         "broll-plan": cmd_broll_plan,
         "manifest": cmd_manifest,

@@ -308,6 +308,11 @@ def _extract_benefits(product: dict) -> list[str]:
 
 def _extract_downside(product: dict) -> str:
     """Extract an honest downside from evidence, if reviewers mentioned one."""
+    # Pre-extracted downside from research
+    ds = product.get("downside", "").strip()
+    if ds:
+        return ds
+
     for claim in product.get("key_claims", []):
         if any(kw in claim.lower() for kw in _DOWNSIDE_KEYWORDS):
             return claim.strip()
