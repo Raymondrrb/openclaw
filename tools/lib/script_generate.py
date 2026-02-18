@@ -382,6 +382,40 @@ def extract_metadata(text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _try_browser_draft(prompt: str) -> ScriptGenResult:
+    """Attempt draft generation via browser (ChatGPT)."""
+    try:
+        from tools.lib.browser_llm import send_prompt_via_browser
+        result = send_prompt_via_browser(prompt, provider="chatgpt", timeout_s=180)
+        if result.success and result.text:
+            return ScriptGenResult(
+                success=True,
+                text=result.text,
+                model="chatgpt-browser",
+                duration_s=result.duration_s,
+            )
+        return ScriptGenResult(success=False, error=result.error or "Browser draft empty")
+    except Exception as exc:
+        return ScriptGenResult(success=False, error=f"Browser draft error: {exc}")
+
+
+def _try_browser_refinement(prompt: str) -> ScriptGenResult:
+    """Attempt refinement via browser (Claude)."""
+    try:
+        from tools.lib.browser_llm import send_prompt_via_browser
+        result = send_prompt_via_browser(prompt, provider="claude", timeout_s=180)
+        if result.success and result.text:
+            return ScriptGenResult(
+                success=True,
+                text=result.text,
+                model="claude-browser",
+                duration_s=result.duration_s,
+            )
+        return ScriptGenResult(success=False, error=result.error or "Browser refinement empty")
+    except Exception as exc:
+        return ScriptGenResult(success=False, error=f"Browser refinement error: {exc}")
+
+
 def run_script_pipeline(
     draft_prompt: str,
     refine_prompt_template: str,
@@ -390,6 +424,7 @@ def run_script_pipeline(
     openai_key: str = "",
     anthropic_key: str = "",
     skip_refinement: bool = False,
+    use_browser: bool = False,
 ) -> ScriptPipelineResult:
     """Run the full script generation pipeline.
 
@@ -403,9 +438,23 @@ def run_script_pipeline(
     output_dir.mkdir(parents=True, exist_ok=True)
     result = ScriptPipelineResult(success=False)
 
-    # Step 1: Draft via OpenAI
-    print("  Generating draft via OpenAI GPT-4o...")
-    draft_result = generate_draft(draft_prompt, api_key=openai_key)
+    # Step 1: Draft — browser-first (ChatGPT) with API fallback
+    draft_result = None
+    _okey = openai_key or os.environ.get("OPENAI_API_KEY", "")
+
+    if use_browser or not _okey:
+        print("  Generating draft via browser (ChatGPT)...")
+        draft_result = _try_browser_draft(draft_prompt)
+        if not draft_result.success:
+            print(f"  Browser draft failed: {draft_result.error}")
+            if _okey:
+                print("  Falling back to OpenAI API...")
+                draft_result = None  # let API try below
+
+    if draft_result is None:
+        print("  Generating draft via OpenAI GPT-4o...")
+        draft_result = generate_draft(draft_prompt, api_key=openai_key)
+
     result.draft = draft_result
 
     if not draft_result.success:
@@ -432,10 +481,24 @@ def run_script_pipeline(
         result.success = True
         return result
 
-    # Step 2: Refinement via Anthropic
-    print("  Refining via Anthropic Claude...")
+    # Step 2: Refinement — browser-first (Claude) with API fallback
     refine_prompt = refine_prompt_template.replace("(paste draft here)", raw_text)
-    refine_result = generate_refinement(refine_prompt, api_key=anthropic_key)
+    refine_result = None
+    _akey = anthropic_key or os.environ.get("ANTHROPIC_API_KEY", "")
+
+    if use_browser or not _akey:
+        print("  Refining via browser (Claude)...")
+        refine_result = _try_browser_refinement(refine_prompt)
+        if not refine_result.success:
+            print(f"  Browser refinement failed: {refine_result.error}")
+            if _akey:
+                print("  Falling back to Anthropic API...")
+                refine_result = None  # let API try below
+
+    if refine_result is None:
+        print("  Refining via Anthropic Claude...")
+        refine_result = generate_refinement(refine_prompt, api_key=anthropic_key)
+
     result.refinement = refine_result
 
     if not refine_result.success:

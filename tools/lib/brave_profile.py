@@ -60,6 +60,10 @@ ALLOWED_DOMAINS = frozenset({
     "www.elevenlabs.io",
     "dzine.ai",
     "www.dzine.ai",
+    # LLM providers (for browser-based script generation)
+    "claude.ai", "www.claude.ai",
+    "chatgpt.com", "www.chatgpt.com",
+    "chat.openai.com",
     # Review sources (for research agent)
     "google.com",
     "www.google.com",

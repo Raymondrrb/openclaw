@@ -669,16 +669,22 @@ def _auto_generate_script(
     from tools.lib.pipeline_status import update_milestone
     from tools.lib.notify import notify_progress, notify_error
 
-    # Check API keys
+    # Check API keys and browser mode
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    use_browser = os.environ.get("OPENCLAW_BROWSER_LLM", "") == "1" or (
+        not openai_key and not anthropic_key
+    )
 
-    if not openai_key:
-        print("OPENAI_API_KEY not set in .env or environment")
-        print("Add to .env: OPENAI_API_KEY=sk-...")
-        return EXIT_ERROR
+    if use_browser:
+        print("Browser LLM mode: will use logged-in Brave sessions")
+        if openai_key or anthropic_key:
+            print("  (API keys available as fallback)")
+    elif not openai_key:
+        print("OPENAI_API_KEY not set — will try browser for draft")
+        use_browser = True
 
-    skip_refine = not anthropic_key
+    skip_refine = not anthropic_key and not use_browser
     if skip_refine:
         print("ANTHROPIC_API_KEY not set — skipping refinement (using raw draft)")
 
@@ -692,6 +698,7 @@ def _auto_generate_script(
         openai_key=openai_key,
         anthropic_key=anthropic_key,
         skip_refinement=skip_refine,
+        use_browser=use_browser,
     )
 
     if not result.success:
