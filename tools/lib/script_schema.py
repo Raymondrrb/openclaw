@@ -206,6 +206,16 @@ def validate_request(req: ScriptRequest) -> list[str]:
         if not p.name.strip():
             errors.append(f"Product at rank {p.rank} has no name")
 
+        # Require real product data to prevent LLM hallucination
+        if not p.amazon_url.strip():
+            errors.append(f"Product #{p.rank} '{p.name}' has no Amazon URL — run research first")
+
+        if not p.downside.strip():
+            errors.append(f"Product #{p.rank} '{p.name}' has no downside — run research first")
+
+        if not p.benefits:
+            errors.append(f"Product #{p.rank} '{p.name}' has no benefits — run research first")
+
     return errors
 
 
@@ -405,15 +415,15 @@ VIRAL PATTERNS TO APPLY:
 PRODUCTS (ranked 5 to 1):
 {product_block}
 
-MANDATORY STRUCTURE:
-1. Hook (100–150 words) — open with problem or tension, NOT "In today's video"
+MANDATORY STRUCTURE (word counts are HARD minimums — do NOT go under):
+1. Hook (120–145 words) — open with problem or tension, NOT "In today's video"
 2. [Avatar Intro] — will be inserted separately (3–6 sec)
-3. Product #5 (200–300 words)
-4. Product #4 (200–300 words)
-5. Product #3 (200–300 words)
+3. Product #5 (230–280 words)
+4. Product #4 (230–280 words)
+5. Product #3 (230–280 words)
 6. Mid-video retention reset (50–80 words) — pattern interrupt
-7. Product #2 (200–300 words)
-8. Product #1 (200–300 words)
+7. Product #2 (230–280 words)
+8. Product #1 (230–280 words)
 9. Conclusion + CTA + affiliate disclosure
 
 EACH PRODUCT MUST INCLUDE:
@@ -472,7 +482,7 @@ REFINEMENT CHECKLIST:
 
 2. REDUCE repetition: find repeated sentence structures and vary them. Mix short punchy lines with longer explanations.
 
-3. TIGHTEN sentences: cut unnecessary words. If a sentence works shorter, make it shorter.
+3. TIGHTEN sentences: cut filler words, but do NOT trim sections below their minimums. If a product section is already around 230 words, leave it — don't shorten further.
 
 4. CHECK flow: transitions between products should feel natural, not formulaic.
 
@@ -482,7 +492,11 @@ REFINEMENT CHECKLIST:
 
 7. VERIFY each product has an honest downside.
 
-8. VERIFY word count is {SCRIPT_WORD_MIN}–{SCRIPT_WORD_MAX}.
+8. WORD COUNT CHECK (these are HARD floors — expand sections that fall short):
+   - Total script: {SCRIPT_WORD_MIN}–{SCRIPT_WORD_MAX} words
+   - Each product section: minimum 230 words (add real-life context or comparison if under)
+   - Hook: 120–145 words
+   If any section is under its minimum, add useful content (a practical scenario, a comparison to a competitor, or a "who this is NOT for" line).
 
 9. VERIFY affiliate disclosure is present in conclusion.
 

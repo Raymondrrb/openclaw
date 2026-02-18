@@ -768,7 +768,11 @@ def _auto_generate_script(
 def _validate_existing_script(paths: VideoPaths, video_id: str) -> None:
     """Validate an existing script.txt and write metadata."""
     from tools.lib.pipeline_status import update_milestone
-    from tools.lib.script_generate import normalize_section_markers
+    from tools.lib.script_generate import (
+        extract_metadata,
+        extract_script_body,
+        normalize_section_markers,
+    )
     from tools.lib.script_schema import (
         SECTION_ORDER,
         SPEAKING_WPM,
@@ -777,9 +781,11 @@ def _validate_existing_script(paths: VideoPaths, video_id: str) -> None:
         validate_script,
     )
 
-    text = paths.script_txt.read_text(encoding="utf-8")
-    # Normalize informal browser-LLM markers to formal [SECTION] markers
-    text = normalize_section_markers(text)
+    raw_text = paths.script_txt.read_text(encoding="utf-8")
+    # Extract clean script body (normalizes markers + strips metadata)
+    text = extract_script_body(raw_text)
+    # Extract metadata (avatar intro, description, thumbnails)
+    meta = extract_metadata(raw_text)
 
     # Parse sections
     marker_map = {
@@ -817,7 +823,22 @@ def _validate_existing_script(paths: VideoPaths, video_id: str) -> None:
             content="\n".join(current_lines).strip(),
         ))
 
-    output = ScriptOutput(sections=sections)
+    # If avatar_intro is in metadata but missing from body sections,
+    # insert a placeholder section after hook (browser LLMs put it as metadata)
+    section_types = [s.section_type for s in sections]
+    if "avatar_intro" not in section_types and meta.get("avatar_intro"):
+        hook_idx = section_types.index("hook") + 1 if "hook" in section_types else 0
+        sections.insert(hook_idx, ScriptSection(
+            section_type="avatar_intro",
+            content="(avatar intro — see metadata)",
+        ))
+
+    output = ScriptOutput(
+        sections=sections,
+        avatar_intro=meta.get("avatar_intro", ""),
+        youtube_description=meta.get("youtube_description", ""),
+        thumbnail_headlines=meta.get("thumbnail_headlines", []),
+    )
     errors = validate_script(output)
 
     # Write script_meta.json

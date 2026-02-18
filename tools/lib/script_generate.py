@@ -250,6 +250,12 @@ _AVATAR_INTRO_RE = re.compile(
     r"^#{0,3}\s*\[?\s*avatar\s+intro\s*\]?\s*$",
     re.IGNORECASE,
 )
+# Title/preamble lines that browser LLMs add before the actual script content.
+# These get stripped so they don't inflate the hook word count.
+_PREAMBLE_RE = re.compile(
+    r"^(#{1,3}\s+)?.{5,60}\s*[–—\-]\s*(refined|draft|final|edited|revised)\s+(script|version)\s*$",
+    re.IGNORECASE,
+)
 
 
 def normalize_section_markers(text: str) -> str:
@@ -286,6 +292,10 @@ def normalize_section_markers(text: str) -> str:
 
     for line in lines:
         stripped = line.strip()
+
+        # Strip title/preamble lines (e.g. "Robot Vacuum Ranking – Refined Script")
+        if not found_first_product and _PREAMBLE_RE.match(stripped):
+            continue
 
         # Check for inline avatar intro marker
         if _AVATAR_INTRO_RE.match(stripped):
@@ -385,7 +395,8 @@ def extract_script_body(text: str) -> str:
         metadata_signals = (
             "avatar intro", "youtube description", "short youtube",
             "thumbnail headline", "thumbnail option", "---", "===",
-            "i hope this", "here's the", "let me know",
+            "i hope this", "here's the script", "here's the refined",
+            "let me know",
         )
         for i in range(conclusion_idx + 1, len(lines)):
             lower = lines[i].strip().lower()
