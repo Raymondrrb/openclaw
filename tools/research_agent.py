@@ -55,8 +55,9 @@ _BRANDS = (
     r"Herman Miller|Secretlab|Autonomous|FlexiSpot|"
     r"Peak Design|Osprey|Away|Samsonite|"
     r"Canon|Nikon|GoPro|DJI|Fujifilm|Insta360|"
-    r"Eufy|Roborock|Dreame|Tineco|Shark|"
-    r"CalDigit|Satechi|Belkin|"
+    r"Eufy|Roborock|Dreame|Tineco|Shark|ECOVACS|Narwal|"
+    r"CalDigit|Satechi|Belkin|Mophie|OtterBox|Ugreen|Baseus|"
+    r"RAVPower|Scosche|Zendure|INIU|Nitecore|BioLite|"
     r"MSI|ViewSonic|Gigabyte|AOC|"
     r"Technics|Denon|Yamaha|Sonos|"
     r"Yeti|HydroFlask|Stanley|"
@@ -64,7 +65,12 @@ _BRANDS = (
     r"Marshall|Bang & Olufsen|B&O|KEF|Klipsch|"
     r"Nespresso|De'Longhi|Fellow|Baratza|"
     r"Theragun|Therabody|Hyperice|"
-    r"Cambridge Audio|Cricut|Brother|Silhouette"
+    r"Cambridge Audio|Cricut|Brother|Silhouette|"
+    r"Travelpro|Delsey|Briggs & Riley|RIMOWA|Monos|CALPAK|July|"
+    r"American Tourister|TravelPro|Paravel|Mokobara|"
+    r"Levoit|Coway|Honeywell|Blueair|Winix|Molekule|"
+    r"Weber|Traeger|Solo Stove|Blackstone|Camp Chef|"
+    r"Renpho|Withings|Oura|Whoop"
 )
 
 _BRAND_RE = re.compile(rf"\b({_BRANDS})\b", re.IGNORECASE)
@@ -363,10 +369,22 @@ def _extract_products_from_headings(
 
     # Label prefixes to strip from headings
     _label_strip_re = re.compile(
-        r"^(?:Our\s+pick|Top\s+pick|Best\s+(?:overall|budget|cheap|"
-        r"affordable|premium|splurge|upgrade|value|for\s+\w+)|"
-        r"Upgrade\s+pick|Also\s+great|Runner[- ]up|Editor'?s?\s+choice|"
+        r"^(?:Our\s+pick|Top\s+pick|Budget\s+pick|Upgrade\s+pick|"
+        r"Best\s+(?:overall|budget|cheap|affordable|premium|splurge|"
+        r"upgrade|value|for\s+\w+)|"
+        r"Also\s+great|Runner[- ]up|Editor'?s?\s+choice|"
         r"Editors'\s+choice)\s*[:—\-–]\s*",
+        re.IGNORECASE,
+    )
+
+    # Editorial phrases that disqualify a heading as a product name
+    _editorial_phrases = re.compile(
+        r"worth\s+considering|we\s+recommend|everything\s+we|"
+        r"why\s+you|how\s+we|what\s+to|who\s+this|"
+        r"care\s+and|look\s+forward|further\s+reading|"
+        r"the\s+competition|meet\s+your|key\s+specs|"
+        r"flaws\s+but|not\s+dealbreakers|has\s+held\s+up|"
+        r"soft-sided|hard-sided|other\s+\w+\s+worth",
         re.IGNORECASE,
     )
 
@@ -384,14 +402,29 @@ def _extract_products_from_headings(
         if not cleaned_heading:
             continue
 
-        # Look for brand
-        bm = _BRAND_RE.search(cleaned_heading)
-        if not bm:
+        # Skip editorial headings
+        if _editorial_phrases.search(cleaned_heading):
             continue
 
-        brand = bm.group(1)
-        # Everything from brand to end of heading is the candidate name
-        candidate = cleaned_heading[bm.start():]
+        # Look for brand
+        bm = _BRAND_RE.search(cleaned_heading)
+        if bm:
+            brand = bm.group(1)
+            # Everything from brand to end of heading is the candidate name
+            candidate = cleaned_heading[bm.start():]
+        elif _tag == "h3":
+            # Fallback: short h3 headings (2-6 words) are often product names
+            # First capitalized word = brand, rest = model
+            words = cleaned_heading.split()
+            if len(words) < 2 or len(words) > 6:
+                continue
+            # Must start with a capitalized word (not a stop-word)
+            if words[0][0].islower() or words[0].lower() in _FIRST_WORD_STOP:
+                continue
+            brand = words[0]
+            candidate = cleaned_heading
+        else:
+            continue
         # Trim trailing noise: common suffix words
         candidate = re.sub(
             r"\s+(?:" + _STOP_WORDS_PATTERN + r")(?:\s.*)?$",
@@ -618,8 +651,8 @@ def _extract_products_from_page(
 def _extract_reasons(lines: list[str], product_line: int, brand: str) -> list[str]:
     """Extract 2-4 key reasons from lines near a product mention."""
     reasons: list[str] = []
-    # Look at the next 10 lines for reason-like sentences
-    block = lines[product_line:product_line + 12]
+    # Look at the next 30 lines for reason-like sentences
+    block = lines[product_line:product_line + 30]
 
     for line in block:
         line = line.strip()
@@ -629,17 +662,28 @@ def _extract_reasons(lines: list[str], product_line: int, brand: str) -> list[st
         lower = line.lower()
         # Look for sentences with quality indicators
         if any(kw in lower for kw in [
+            # Audio
             "sound", "noise cancel", "battery", "comfort", "fit",
             "bass", "treble", "build quality", "water", "sweat",
-            "price", "affordable", "premium", "value",
-            "best", "great", "excellent", "impressive", "stellar",
-            "durable", "lightweight", "compact", "portable",
             "microphone", "call quality", "latency", "codec",
             "anc", "transparency", "spatial audio",
             # General product qualities
+            "price", "affordable", "premium", "value",
+            "best", "great", "excellent", "impressive", "stellar",
+            "durable", "lightweight", "compact", "portable",
             "performance", "design", "feature", "quality", "reliable",
             "powerful", "efficient", "fast", "quiet", "bright",
             "sharp", "crisp", "smooth", "sturdy", "elegant",
+            # Robot vacuums / home
+            "suction", "navigation", "mapping", "mopping", "self-empty",
+            "obstacle", "carpet", "hardwood", "pet hair", "dustbin",
+            "dock", "station", "runtime", "cleaning",
+            # Travel / luggage
+            "wheel", "zipper", "spinner", "expandable", "tsa",
+            "carry-on", "cabin", "overhead", "packing",
+            # Tech / chargers
+            "charging", "watt", "capacity", "usb-c", "output",
+            "port", "cable", "mah",
         ]):
             # Clean up the reason
             reason = line.strip()
@@ -679,15 +723,27 @@ _DOWNSIDE_PATTERNS = [
 
 def _extract_downside(lines: list[str], product_line: int, brand: str) -> str:
     """Extract a single primary downside from lines near a product mention."""
-    block = lines[product_line:product_line + 15]
+    # First pass: look for "Flaws" section within 40 lines
+    block = lines[product_line:product_line + 40]
+    in_flaws = False
     for line in block:
-        line = line.strip()
-        if not line or len(line) < 15 or len(line) > 200:
+        stripped = line.strip()
+        lower = stripped.lower()
+        if re.search(r"flaws?\b|dealbreaker", lower):
+            in_flaws = True
             continue
-        lower = line.lower()
+        if in_flaws and stripped and len(stripped) >= 15 and len(stripped) <= 200:
+            return stripped[:150]
+
+    # Second pass: downside patterns in nearby lines
+    for line in block:
+        stripped = line.strip()
+        if not stripped or len(stripped) < 15 or len(stripped) > 200:
+            continue
+        lower = stripped.lower()
         for pat in _DOWNSIDE_PATTERNS:
             if re.search(pat, lower):
-                return line.strip()[:150]
+                return stripped[:150]
     return ""
 
 
@@ -724,11 +780,11 @@ def _open_and_extract(
                 headings, source_name, url, text,
             )
             products = _deduplicate_products(products)
-            if len(products) >= 3:
+            if len(products) >= 2:
                 print(f"    Heading-first: {len(products)} products", file=sys.stderr)
 
     # Fallback: text-based extraction (with improved regex + validator)
-    if len(products) < 3:
+    if len(products) < 2:
         products = _extract_products_from_page(text, source_name, url)
 
     report.products_found = products
