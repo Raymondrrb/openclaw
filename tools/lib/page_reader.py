@@ -86,6 +86,68 @@ def html_to_text(html: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Heading extraction — preserves H2/H3 structure from HTML
+# ---------------------------------------------------------------------------
+
+_HEADING_TAGS = frozenset({"h2", "h3"})
+
+# Sections whose headings are not product picks
+_HEADING_SKIP_PARENTS = frozenset({
+    "nav", "footer", "header", "aside",
+})
+
+
+class _HeadingExtractor(HTMLParser):
+    """Extract text of <h2> and <h3> elements, skipping nav/footer/etc."""
+
+    def __init__(self):
+        super().__init__()
+        self._headings: list[tuple[str, str]] = []  # (tag, text)
+        self._in_heading: str = ""
+        self._current_text: list[str] = []
+        self._skip_depth: int = 0
+
+    def handle_starttag(self, tag: str, attrs):
+        tag_lower = tag.lower()
+        if tag_lower in _HEADING_SKIP_PARENTS:
+            self._skip_depth += 1
+        elif tag_lower in _HEADING_TAGS and self._skip_depth == 0:
+            self._in_heading = tag_lower
+            self._current_text = []
+
+    def handle_endtag(self, tag: str):
+        tag_lower = tag.lower()
+        if tag_lower in _HEADING_SKIP_PARENTS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        elif tag_lower == self._in_heading:
+            text = " ".join("".join(self._current_text).split()).strip()
+            if text:
+                self._headings.append((self._in_heading, text))
+            self._in_heading = ""
+            self._current_text = []
+
+    def handle_data(self, data: str):
+        if self._in_heading:
+            self._current_text.append(data)
+
+    def get_headings(self) -> list[tuple[str, str]]:
+        return list(self._headings)
+
+
+def extract_headings(html: str) -> list[tuple[str, str]]:
+    """Extract (tag, text) pairs for all <h2>/<h3> elements in *html*.
+
+    Skips headings inside <nav>, <footer>, <header>, <aside>.
+    """
+    parser = _HeadingExtractor()
+    try:
+        parser.feed(html)
+    except Exception:
+        pass
+    return parser.get_headings()
+
+
+# ---------------------------------------------------------------------------
 # HTTP fetch
 # ---------------------------------------------------------------------------
 
@@ -212,3 +274,44 @@ def fetch_page_text(
             return text, "browser"
 
     return "", "failed"
+
+
+def fetch_page_data(
+    url: str,
+    *,
+    persist_to: str | Path | None = None,
+    cache: object | None = None,
+) -> tuple[str, str, str | None]:
+    """Fetch a page and return (text, method, raw_html).
+
+    Same cost-ordered pipeline as ``fetch_page_text`` but also preserves
+    the raw HTML when the fetch method produces it (HTTP or browser).
+    Markdown-first methods return *raw_html=None* because no HTML is
+    available in that path.
+    """
+    # 1. Markdown-first (no raw HTML available)
+    try:
+        from tools.lib.markdown_fetch import fetch_markdown
+        result = fetch_markdown(url, persist_to=persist_to, cache=cache)
+        if result.ok and len(result.text) > 200:
+            return result.text, result.method, None
+    except ImportError:
+        pass
+    except Exception as exc:
+        print(f"  [page_reader] Markdown fetch error: {exc}", file=sys.stderr)
+
+    # 2. HTTP HTML fetch — keep raw HTML
+    html = _http_fetch(url)
+    if html and len(html) > 500:
+        text = html_to_text(html)
+        if len(text) > 200:
+            return text, "http", html
+
+    # 3. Browser fallback — keep raw HTML
+    html = _browser_fetch(url)
+    if html and len(html) > 500:
+        text = html_to_text(html)
+        if len(text) > 200:
+            return text, "browser", html
+
+    return "", "failed", None

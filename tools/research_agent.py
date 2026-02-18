@@ -27,7 +27,7 @@ if str(_repo) not in sys.path:
     sys.path.insert(0, str(_repo))
 
 from tools.lib.common import load_env_file, now_iso, project_root
-from tools.lib.page_reader import fetch_page_text
+from tools.lib.page_reader import extract_headings, fetch_page_data, fetch_page_text
 from tools.lib.web_search import web_search
 
 # ---------------------------------------------------------------------------
@@ -258,6 +258,220 @@ def _extract_date(text: str) -> str:
     return ""
 
 
+# Expanded stop-words — terminate model name capture
+_STOP_WORDS_PATTERN = (
+    r"is|are|has|was|with|for|and|the|our|we|vs|offers?|from|this|comes|"
+    r"delivers|features|best|top|most|these|here|such|than|like|rated|"
+    r"that|can|will|should|which|its|they|you|it|also|very|really|quite|"
+    r"do|does|did|been|being|would|could|their|your|his|her|an|as|at|by|"
+    r"but|if|in|into|so|up|more|not|only|just|still|some|each|every|new|"
+    r"old|any|all|review|editor|pick|choice|update|price|value|above|"
+    r"below|around|over|between|sound|wireless|earbuds?|headphones?|"
+    r"speakers?|budget|premium|affordable|overall|compact|portable"
+)
+
+# Regex for first-word stop check (superset of old inline list)
+_FIRST_WORD_STOP = frozenset({
+    "is", "are", "has", "was", "the", "a", "an", "and", "or", "for",
+    "with", "best", "top", "most", "these", "here", "such", "than",
+    "like", "rated", "that", "can", "will", "should", "which", "its",
+    "they", "you", "it", "also", "very", "really", "quite", "do",
+    "does", "did", "been", "being", "would", "could", "their", "your",
+    "his", "her", "as", "at", "by", "but", "if", "in", "into", "so",
+    "up", "more", "not", "only", "just", "still", "some", "each",
+    "every", "new", "old", "any", "all",
+})
+
+# Phrase-like verbs — a model name should not contain these
+_PHRASE_VERBS_RE = re.compile(
+    r"\b(?:is|are|was|were|has|have|had|do|does|did|can|will|"
+    r"would|could|should|being|been|comes?|makes?|goes?|takes?|"
+    r"sounds?|feels?|looks?|works?)\b",
+    re.IGNORECASE,
+)
+
+
+def _clean_product_name(raw_name: str, brand: str) -> str | None:
+    """Validate and clean a product name. Returns None if garbage.
+
+    Rules:
+    - Model part (after brand) must be 1-5 words
+    - Total name (brand + model) max 6 words
+    - Model must not start with a stop-word
+    - Model must not look like a phrase (verb + subject)
+    - Model must contain at least 1 alphanumeric token (digit, hyphen, or uppercase)
+    """
+    name = re.sub(r"\s+", " ", raw_name).strip()
+    if not name:
+        return None
+
+    # Strip brand prefix to get model
+    model = name
+    if brand and name.lower().startswith(brand.lower()):
+        model = name[len(brand):].strip()
+
+    if not model:
+        return None
+
+    words = model.split()
+
+    # Model: 1-5 words
+    if len(words) > 5:
+        return None
+
+    # Total name: max 6 words
+    total_words = name.split()
+    if len(total_words) > 6:
+        return None
+
+    # First word of model must not be a stop-word
+    if words[0].lower() in _FIRST_WORD_STOP:
+        return None
+
+    # Must not contain phrase-like verbs (e.g., "earbuds do sound great")
+    if _PHRASE_VERBS_RE.search(model):
+        return None
+
+    # Must contain at least 1 "real model" token: digit, hyphen, or uppercase letter
+    has_model_token = bool(re.search(r"[0-9\-]", model)) or any(
+        c.isupper() for c in model if c.isalpha()
+    )
+    if not has_model_token:
+        return None
+
+    return name
+
+
+def _extract_products_from_headings(
+    headings: list[tuple[str, str]],
+    source_name: str,
+    url: str,
+    full_text: str,
+) -> list[ProductEvidence]:
+    """Heading-first product extraction from structured HTML headings.
+
+    For each h2/h3:
+    1. Strip label prefixes ("Our pick:", "Best budget:", etc.)
+    2. Look for brand in _BRAND_RE
+    3. Extract a clean model name directly from the heading text
+    4. Find reasons/downside in the full_text near the heading
+    """
+    products: list[ProductEvidence] = []
+    seen_names: set[str] = set()
+    date = _extract_date(full_text)
+    lines = full_text.splitlines()
+
+    # Label prefixes to strip from headings
+    _label_strip_re = re.compile(
+        r"^(?:Our\s+pick|Top\s+pick|Best\s+(?:overall|budget|cheap|"
+        r"affordable|premium|splurge|upgrade|value|for\s+\w+)|"
+        r"Upgrade\s+pick|Also\s+great|Runner[- ]up|Editor'?s?\s+choice|"
+        r"Editors'\s+choice)\s*[:—\-–]\s*",
+        re.IGNORECASE,
+    )
+
+    for _tag, raw_heading in headings:
+        # Try to detect a category label
+        label = ""
+        heading_lower = raw_heading.lower()
+        for cat in _CATEGORY_LABELS:
+            if cat in heading_lower:
+                label = cat
+                break
+
+        # Strip label prefix to get the product part
+        cleaned_heading = _label_strip_re.sub("", raw_heading).strip()
+        if not cleaned_heading:
+            continue
+
+        # Look for brand
+        bm = _BRAND_RE.search(cleaned_heading)
+        if not bm:
+            continue
+
+        brand = bm.group(1)
+        # Everything from brand to end of heading is the candidate name
+        candidate = cleaned_heading[bm.start():]
+        # Trim trailing noise: common suffix words
+        candidate = re.sub(
+            r"\s+(?:" + _STOP_WORDS_PATTERN + r")(?:\s.*)?$",
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        candidate = re.sub(r"\s+", " ", candidate).strip().rstrip(".")
+
+        if not candidate or candidate.lower() == brand.lower():
+            continue
+
+        cleaned = _clean_product_name(candidate, brand)
+        if not cleaned:
+            continue
+
+        name_key = cleaned.lower()
+        if name_key in seen_names:
+            continue
+        seen_names.add(name_key)
+
+        # Find the heading text in full_text to locate context
+        product_line = 0
+        for idx, line in enumerate(lines):
+            if brand in line and any(w in line for w in cleaned.split()[-2:]):
+                product_line = idx
+                break
+
+        reasons = _extract_reasons(lines, product_line, brand)
+        downside = _extract_downside(lines, product_line, brand)
+        warranty = _extract_warranty(lines, product_line)
+
+        from tools.lib.buyer_trust import confidence_tag
+        reason_conf = [confidence_tag(r) for r in reasons]
+
+        products.append(ProductEvidence(
+            product_name=cleaned,
+            brand=brand,
+            category_label=label,
+            reasons=reasons,
+            reason_confidence=reason_conf,
+            downside=downside,
+            warranty_signal=warranty,
+            source_name=source_name,
+            source_url=url,
+            source_date=date,
+        ))
+
+    return products
+
+
+def _deduplicate_products(products: list[ProductEvidence]) -> list[ProductEvidence]:
+    """Remove near-duplicate products, keeping the shortest (cleanest) name.
+
+    If "Sony LinkBuds Fit" and "Sony LinkBuds Fit earbuds do" both exist,
+    keep only the shorter one.
+    """
+    if len(products) <= 1:
+        return products
+
+    # Sort by name length (shortest first)
+    sorted_products = sorted(products, key=lambda p: len(p.product_name))
+    kept: list[ProductEvidence] = []
+    kept_lower: list[str] = []
+
+    for p in sorted_products:
+        p_lower = p.product_name.lower()
+        # Check if this is a substring of an already-kept product or vice-versa
+        is_dup = False
+        for kl in kept_lower:
+            if kl in p_lower or p_lower in kl:
+                is_dup = True
+                break
+        if not is_dup:
+            kept.append(p)
+            kept_lower.append(p_lower)
+
+    return kept
+
+
 def _extract_products_from_page(
     text: str, source_name: str, url: str
 ) -> list[ProductEvidence]:
@@ -298,7 +512,7 @@ def _extract_products_from_page(
             model_match = re.match(
                 r"\s+([\w][\w\s\-\.\/\(\)]+?)"
                 r"(?:\s*[\,\;\|\·]|\s+[\-\—]\s+|\.\s+[A-Z]"
-                r"|\s+(?:is|are|has|was|with|for|and|the|our|we|vs|offers?|from|this|comes|delivers|features)\b|$)",
+                r"|\s+(?:" + _STOP_WORDS_PATTERN + r")\b|$)",
                 after,
             )
             if model_match:
@@ -307,6 +521,11 @@ def _extract_products_from_page(
                     continue
                 full_name = f"{brand} {model}".strip()
                 full_name = re.sub(r"\s+", " ", full_name)
+
+                cleaned = _clean_product_name(full_name, brand)
+                if not cleaned:
+                    continue
+                full_name = cleaned
                 name_key = full_name.lower()
 
                 if name_key in seen_names or len(full_name) > 80:
@@ -345,18 +564,20 @@ def _extract_products_from_page(
             model_match = re.match(
                 r"\s+([\w][\w\s\-\.\/\(\)]+?)"
                 r"(?:\s*[\,\;\|\·]|\s+[\-\—]\s+|\.\s+[A-Z]"
-                r"|\s+(?:is|are|has|was|with|for|and|the|our|we|vs|offers?|from|this|comes|delivers|features)\b|$)",
+                r"|\s+(?:" + _STOP_WORDS_PATTERN + r")\b|$)",
                 after,
             )
             if model_match:
                 model = model_match.group(1).strip().rstrip(".")
                 if len(model) <= 1:
                     continue
-                first_word = model.split()[0].lower() if model.split() else ""
-                if first_word in ("is", "are", "has", "was", "the", "a", "and", "or", "for", "with"):
-                    continue
                 full_name = f"{brand} {model}".strip()
                 full_name = re.sub(r"\s+", " ", full_name)
+
+                cleaned = _clean_product_name(full_name, brand)
+                if not cleaned:
+                    continue
+                full_name = cleaned
                 name_key = full_name.lower()
 
                 if name_key in seen_names or len(full_name) > 80:
@@ -391,7 +612,7 @@ def _extract_products_from_page(
                     source_date=date,
                 ))
 
-    return products
+    return _deduplicate_products(products)
 
 
 def _extract_reasons(lines: list[str], product_line: int, brand: str) -> list[str]:
@@ -478,7 +699,7 @@ def _open_and_extract(
 
     print(f"\n  Opening {source_name}: {url[:80]}...", file=sys.stderr)
 
-    text, method = fetch_page_text(url)
+    text, method, raw_html = fetch_page_data(url)
     report.fetch_method = method
 
     if not text:
@@ -494,8 +715,21 @@ def _open_and_extract(
     if report.date:
         print(f"    Date: {report.date}", file=sys.stderr)
 
-    # Extract products
-    products = _extract_products_from_page(text, source_name, url)
+    # Heading-first extraction when raw HTML is available
+    products: list[ProductEvidence] = []
+    if raw_html:
+        headings = extract_headings(raw_html)
+        if headings:
+            products = _extract_products_from_headings(
+                headings, source_name, url, text,
+            )
+            if len(products) >= 3:
+                print(f"    Heading-first: {len(products)} products", file=sys.stderr)
+
+    # Fallback: text-based extraction (with improved regex + validator)
+    if len(products) < 3:
+        products = _extract_products_from_page(text, source_name, url)
+
     report.products_found = products
 
     print(f"    Products found: {len(products)}", file=sys.stderr)
