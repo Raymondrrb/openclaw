@@ -344,6 +344,26 @@ def normalize_section_markers(text: str) -> str:
     return "\n".join(result)
 
 
+_FORMAL_MARKERS = (
+    "[HOOK]", "[AVATAR_INTRO]",
+    "[PRODUCT_5]", "[PRODUCT_4]", "[PRODUCT_3]", "[PRODUCT_2]", "[PRODUCT_1]",
+    "[RETENTION_RESET]", "[CONCLUSION]",
+)
+
+
+def _match_marker(line: str) -> str | None:
+    """Return the formal marker if *line* starts with one, else None.
+
+    Handles lines like ``[PRODUCT_5] — Narwal Freo Pro`` by matching
+    the bracket prefix and ignoring any trailing product name.
+    """
+    upper = line.strip().upper()
+    for marker in _FORMAL_MARKERS:
+        if upper == marker or upper.startswith(marker + " ") or upper.startswith(marker + "\t"):
+            return marker
+    return None
+
+
 def extract_script_body(text: str) -> str:
     """Extract the script body from LLM output.
 
@@ -355,18 +375,10 @@ def extract_script_body(text: str) -> str:
     text = normalize_section_markers(text)
     lines = text.splitlines()
 
-    # Known section markers (case-insensitive)
-    section_markers = {
-        "[HOOK]", "[AVATAR_INTRO]",
-        "[PRODUCT_5]", "[PRODUCT_4]", "[PRODUCT_3]", "[PRODUCT_2]", "[PRODUCT_1]",
-        "[RETENTION_RESET]", "[CONCLUSION]",
-    }
-
     # Find first section marker
     start_idx = -1
     for i, line in enumerate(lines):
-        stripped = line.strip().upper()
-        if stripped in section_markers:
+        if _match_marker(line):
             start_idx = i
             break
 
@@ -385,7 +397,7 @@ def extract_script_body(text: str) -> str:
     # metadata sections (avatar intro, description, thumbnail, ---).
     conclusion_idx = -1
     for i in range(len(lines) - 1, start_idx - 1, -1):
-        if lines[i].strip().upper() == "[CONCLUSION]":
+        if _match_marker(lines[i]) == "[CONCLUSION]":
             conclusion_idx = i
             break
 
@@ -444,7 +456,10 @@ def extract_metadata(text: str) -> dict:
             continue
 
         if "avatar intro" in lower and (
-            ":" in lower or "script" in lower or lower == "avatar intro"
+            ":" in lower or "script" in lower
+            or lower == "avatar intro"
+            or lower.startswith("avatar intro (")
+            or lower.startswith("avatar intro\t")
         ):
             in_avatar = True
             in_description = False

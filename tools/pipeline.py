@@ -769,9 +769,9 @@ def _validate_existing_script(paths: VideoPaths, video_id: str) -> None:
     """Validate an existing script.txt and write metadata."""
     from tools.lib.pipeline_status import update_milestone
     from tools.lib.script_generate import (
+        _match_marker,
         extract_metadata,
         extract_script_body,
-        normalize_section_markers,
     )
     from tools.lib.script_schema import (
         SECTION_ORDER,
@@ -784,8 +784,12 @@ def _validate_existing_script(paths: VideoPaths, video_id: str) -> None:
     raw_text = paths.script_txt.read_text(encoding="utf-8")
     # Extract clean script body (normalizes markers + strips metadata)
     text = extract_script_body(raw_text)
-    # Extract metadata (avatar intro, description, thumbnails)
-    meta = extract_metadata(raw_text)
+    # Extract metadata — try script_final.txt first (has full LLM output),
+    # then fall back to script.txt (metadata may have been stripped)
+    meta_source = raw_text
+    if paths.script_final.is_file():
+        meta_source = paths.script_final.read_text(encoding="utf-8")
+    meta = extract_metadata(meta_source)
 
     # Parse sections
     marker_map = {
@@ -805,14 +809,14 @@ def _validate_existing_script(paths: VideoPaths, video_id: str) -> None:
     current_lines: list[str] = []
 
     for line in text.splitlines():
-        stripped = line.strip().upper()
-        if stripped in marker_map:
+        matched = _match_marker(line)
+        if matched and matched in marker_map:
             if current_key:
                 sections.append(ScriptSection(
                     section_type=current_key,
                     content="\n".join(current_lines).strip(),
                 ))
-            current_key = marker_map[stripped]
+            current_key = marker_map[matched]
             current_lines = []
         elif current_key:
             current_lines.append(line)

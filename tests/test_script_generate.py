@@ -19,6 +19,7 @@ if str(_repo) not in sys.path:
     sys.path.insert(0, str(_repo))
 
 from tools.lib.script_generate import (
+    _match_marker,
     extract_metadata,
     extract_script_body,
     normalize_section_markers,
@@ -374,6 +375,53 @@ class TestExtractScriptBodyBrowser(unittest.TestCase):
         ]
         for m in markers:
             self.assertIn(m, result, f"Missing marker: {m}")
+
+
+class TestMatchMarker(unittest.TestCase):
+    """Test _match_marker() with various line formats."""
+
+    def test_exact_marker(self):
+        self.assertEqual(_match_marker("[PRODUCT_5]"), "[PRODUCT_5]")
+
+    def test_marker_with_product_name(self):
+        self.assertEqual(_match_marker("[PRODUCT_5] — Narwal Freo Pro"), "[PRODUCT_5]")
+
+    def test_marker_with_dash(self):
+        self.assertEqual(_match_marker("[PRODUCT_3] - Dreame D20 Plus"), "[PRODUCT_3]")
+
+    def test_marker_with_whitespace(self):
+        self.assertEqual(_match_marker("  [HOOK]  "), "[HOOK]")
+
+    def test_non_marker_returns_none(self):
+        self.assertIsNone(_match_marker("Just a regular line"))
+
+    def test_conclusion_exact(self):
+        self.assertEqual(_match_marker("[CONCLUSION]"), "[CONCLUSION]")
+
+    def test_marker_case_insensitive(self):
+        self.assertEqual(_match_marker("[product_5] — Some Name"), "[PRODUCT_5]")
+
+    def test_marker_with_tab_suffix(self):
+        self.assertEqual(_match_marker("[RETENTION_RESET]\tsome text"), "[RETENTION_RESET]")
+
+
+class TestExtractScriptBodySuffixed(unittest.TestCase):
+    """Test extract_script_body() with [MARKER] — Product Name format."""
+
+    def test_suffixed_markers_parsed(self):
+        text = (
+            "[HOOK]\nHook text.\n\n"
+            "[PRODUCT_5] — Narwal Freo Pro\nProduct five text.\n\n"
+            "[PRODUCT_4] — Roborock Saros 10\nProduct four text.\n\n"
+            "[PRODUCT_3] — Dreame D20 Plus\nProduct three text.\n\n"
+            "[RETENTION_RESET]\nReset text.\n\n"
+            "[PRODUCT_2] — Tapo RV30 Max Plus\nProduct two text.\n\n"
+            "[PRODUCT_1] — Roborock Q7 M5+\nProduct one text.\n\n"
+            "[CONCLUSION]\nConclusion text.\n"
+        )
+        result = extract_script_body(text)
+        for m in ("[HOOK]", "[PRODUCT_5]", "[PRODUCT_1]", "[CONCLUSION]"):
+            self.assertIn(m, result)
 
 
 class TestGenerateDraft(unittest.TestCase):

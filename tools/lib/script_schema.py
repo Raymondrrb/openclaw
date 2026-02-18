@@ -337,6 +337,12 @@ def validate_script(output: ScriptOutput) -> list[str]:
         "on the flip side",
         "however",
         "that said",
+        "transparency moment",
+        "honest moment",
+        "fair warning",
+        "won't replace",
+        "won't match",
+        "not a replacement",
     )
     for s in output.sections:
         if s.section_type.startswith("product_"):
