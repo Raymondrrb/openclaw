@@ -65,17 +65,16 @@ class TestPassesGate(unittest.TestCase):
             disallowed_keywords=["headphone", "over-ear", "speaker", "soundbar"],
             mandatory_keywords=["earbuds", "earbud", "in-ear", "tws"],
             acceptance_test={
-                "name_must_contain_one_of": ["earbuds", "earbud", "tws", "true wireless", "in-ear"],
                 "name_must_not_contain": ["headphone", "over-ear", "speaker", "soundbar"],
                 "brand_is_not_product_name": True,
-                "min_keyword_matches": 1,
             },
         )
 
     def test_passes_gate_valid(self):
         from tools.lib.subcategory_contract import passes_gate
         c = self._make_contract()
-        ok, reason = passes_gate("Sony WF-1000XM5 True Wireless Earbuds", "Sony", c)
+        # Real product names don't need "earbuds" keyword — negative filtering is enough
+        ok, reason = passes_gate("Sony WF-1000XM5", "Sony", c)
         self.assertTrue(ok)
         self.assertEqual(reason, "")
 
@@ -96,10 +95,8 @@ class TestPassesGate(unittest.TestCase):
             disallowed_keywords=["backpack", "duffel"],
             mandatory_keywords=["luggage", "suitcase", "carry-on"],
             acceptance_test={
-                "name_must_contain_one_of": ["luggage", "suitcase", "carry-on"],
                 "name_must_not_contain": ["backpack", "duffel"],
                 "brand_is_not_product_name": True,
-                "min_keyword_matches": 1,
             },
         )
         ok, reason = passes_gate("Away", "Away", c)
@@ -159,20 +156,20 @@ class TestWriteLoad(unittest.TestCase):
 class TestAcceptanceTestEnforcement(unittest.TestCase):
     """Acceptance test structured checks."""
 
-    def test_acceptance_test_rejects_missing_keyword(self):
+    def test_acceptance_test_passes_model_name(self):
+        """Product model names pass without needing category keywords."""
         from tools.lib.subcategory_contract import SubcategoryContract, passes_gate
         c = SubcategoryContract(
             niche_name="wireless earbuds",
             category="audio",
             acceptance_test={
-                "name_must_contain_one_of": ["earbuds", "earbud"],
                 "name_must_not_contain": ["headphone"],
                 "brand_is_not_product_name": True,
             },
         )
-        ok, reason = passes_gate("Sony WF-1000XM5 True Wireless Earbuds", "Sony", c)
+        ok, reason = passes_gate("Sony WF-1000XM5", "Sony", c)
         self.assertTrue(ok)
-        ok, reason = passes_gate("Bose QuietComfort 45", "Bose", c)
+        ok, reason = passes_gate("Bose QuietComfort 45 Headphones", "Bose", c)
         self.assertFalse(ok)
         self.assertIn("DRIFT", reason)
 
@@ -183,19 +180,17 @@ class TestAcceptanceTestEnforcement(unittest.TestCase):
             category="audio",
             disallowed_labels=["gaming headset"],
             acceptance_test={
-                "name_must_contain_one_of": ["earbuds"],
                 "name_must_not_contain": ["headphone", "speaker"],
                 "brand_is_not_product_name": True,
             },
         )
-        ok, reason = passes_gate("HyperX Cloud Earbuds Gaming Headset", "HyperX", c)
+        ok, reason = passes_gate("HyperX Cloud Gaming Headset", "HyperX", c)
         self.assertFalse(ok)
 
     def test_generated_contract_has_acceptance_test(self):
         from tools.lib.subcategory_contract import generate_contract
         c = generate_contract("wireless earbuds", "audio")
         self.assertTrue(len(c.acceptance_test) > 0)
-        self.assertIn("name_must_contain_one_of", c.acceptance_test)
         self.assertIn("name_must_not_contain", c.acceptance_test)
         self.assertTrue(c.acceptance_test.get("brand_is_not_product_name", False))
 

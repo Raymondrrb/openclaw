@@ -284,12 +284,18 @@ def fetch_page_data(
 ) -> tuple[str, str, str | None]:
     """Fetch a page and return (text, method, raw_html).
 
-    Same cost-ordered pipeline as ``fetch_page_text`` but also preserves
-    the raw HTML when the fetch method produces it (HTTP or browser).
-    Markdown-first methods return *raw_html=None* because no HTML is
-    available in that path.
+    Prioritises HTTP fetch over markdown so that raw HTML is available
+    for structured heading extraction. Falls back to markdown (no HTML)
+    and then browser.
     """
-    # 1. Markdown-first (no raw HTML available)
+    # 1. HTTP HTML fetch — preferred: gives us raw HTML for headings
+    html = _http_fetch(url)
+    if html and len(html) > 500:
+        text = html_to_text(html)
+        if len(text) > 200:
+            return text, "http", html
+
+    # 2. Markdown fallback (no raw HTML available)
     try:
         from tools.lib.markdown_fetch import fetch_markdown
         result = fetch_markdown(url, persist_to=persist_to, cache=cache)
@@ -299,13 +305,6 @@ def fetch_page_data(
         pass
     except Exception as exc:
         print(f"  [page_reader] Markdown fetch error: {exc}", file=sys.stderr)
-
-    # 2. HTTP HTML fetch — keep raw HTML
-    html = _http_fetch(url)
-    if html and len(html) > 500:
-        text = html_to_text(html)
-        if len(text) > 200:
-            return text, "http", html
 
     # 3. Browser fallback — keep raw HTML
     html = _browser_fetch(url)

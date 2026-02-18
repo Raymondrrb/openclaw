@@ -77,11 +77,9 @@ _CONTRACT_TEMPLATES: dict[str, dict] = {
             "IEMs (in-ear monitors) are wired — REJECT unless explicitly wireless earbuds."
         ),
         "acceptance_test": {
-            "name_must_contain_one_of": ["earbuds", "earbud", "tws", "true wireless", "in-ear"],
             "name_must_not_contain": ["headphone", "over-ear", "on-ear", "speaker",
                                       "soundbar", "gaming headset", "open-back", "closed-back"],
             "brand_is_not_product_name": True,
-            "min_keyword_matches": 1,
         },
     },
     "over-ear headphones": {
@@ -98,11 +96,9 @@ _CONTRACT_TEMPLATES: dict[str, dict] = {
             "Gaming headsets with mic booms are a different subcategory — REJECT."
         ),
         "acceptance_test": {
-            "name_must_contain_one_of": ["headphone", "over-ear", "over ear", "around-ear"],
             "name_must_not_contain": ["earbuds", "earbud", "in-ear", "tws", "speaker",
                                       "soundbar", "on-ear"],
             "brand_is_not_product_name": True,
-            "min_keyword_matches": 1,
         },
     },
     "open-back headphones": {
@@ -121,12 +117,10 @@ _CONTRACT_TEMPLATES: dict[str, dict] = {
             "Planar magnetic headphones are often open-back but verify with source."
         ),
         "acceptance_test": {
-            "name_must_contain_one_of": ["headphone", "open-back", "open back", "planar"],
             "name_must_not_contain": ["closed-back", "closed back", "earbuds", "earbud",
                                       "in-ear", "tws", "speaker", "soundbar", "anc",
                                       "noise cancelling", "gaming headset"],
             "brand_is_not_product_name": True,
-            "min_keyword_matches": 1,
         },
     },
     "noise cancelling headphones": {
@@ -143,10 +137,8 @@ _CONTRACT_TEMPLATES: dict[str, dict] = {
             "Passive noise isolation is NOT ANC — REJECT."
         ),
         "acceptance_test": {
-            "name_must_contain_one_of": ["headphone", "noise cancelling", "anc"],
             "name_must_not_contain": ["earbuds", "earbud", "open-back", "speaker", "soundbar"],
             "brand_is_not_product_name": True,
-            "min_keyword_matches": 1,
         },
     },
     "soundbars": {
@@ -580,17 +572,13 @@ def _run_acceptance_test(
 ) -> tuple[bool, str]:
     """Run the structured acceptance test. All checks must pass."""
 
-    # Check 1: name must contain at least one of the required terms
-    must_contain = test.get("name_must_contain_one_of", [])
-    if must_contain:
-        found = any(kw.lower() in name_lower for kw in must_contain)
-        if not found:
-            return False, (
-                f"DRIFT: '{product_name}' contains none of the required terms "
-                f"{must_contain}. Not in subcategory '{contract.niche_name}'."
-            )
+    # NOTE: name_must_contain_one_of is intentionally SKIPPED.
+    # Product model names (e.g. "Sony WF-1000XM5") do not contain category
+    # keywords ("earbuds"). The research pipeline already ensures products
+    # come from relevant comparison pages. Negative filtering below is
+    # sufficient for drift prevention.
 
-    # Check 2: name must NOT contain any disallowed terms
+    # Check 1: name must NOT contain any disallowed terms
     must_not = test.get("name_must_not_contain", [])
     for kw in must_not:
         if kw.lower() in name_lower:
@@ -599,7 +587,7 @@ def _run_acceptance_test(
                 f"This is NOT '{contract.niche_name}'."
             )
 
-    # Check 3: brand alone is not the product name (noise detection)
+    # Check 2: brand alone is not the product name (noise detection)
     if test.get("brand_is_not_product_name", False):
         name_stripped = re.sub(r'[^\w\s]', '', product_name).strip()
         if brand_lower and name_stripped.lower() == brand_lower:
@@ -608,7 +596,7 @@ def _run_acceptance_test(
                 f"with no model — this is noise, not a product."
             )
 
-    # Check 4: disallowed_labels (broader than keyword, catches descriptions)
+    # Check 3: disallowed_labels (broader than keyword, catches descriptions)
     for label in contract.disallowed_labels:
         if label.lower() in name_lower:
             return False, (

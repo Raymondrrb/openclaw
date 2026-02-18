@@ -60,7 +60,7 @@ _BRANDS = (
     r"MSI|ViewSonic|Gigabyte|AOC|"
     r"Technics|Denon|Yamaha|Sonos|"
     r"Yeti|HydroFlask|Stanley|"
-    r"1MORE|Skullcandy|Tozo|EarFun|Edifier|Moondrop|"
+    r"1MORE|Skullcandy|Tozo|EarFun|Edifier|Moondrop|JLab|"
     r"Marshall|Bang & Olufsen|B&O|KEF|Klipsch|"
     r"Nespresso|De'Longhi|Fellow|Baratza|"
     r"Theragun|Therabody|Hyperice|"
@@ -723,6 +723,7 @@ def _open_and_extract(
             products = _extract_products_from_headings(
                 headings, source_name, url, text,
             )
+            products = _deduplicate_products(products)
             if len(products) >= 3:
                 print(f"    Heading-first: {len(products)} products", file=sys.stderr)
 

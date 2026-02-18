@@ -607,13 +607,13 @@ class TestQAGatekeeperSubcategoryDrift(unittest.TestCase):
             niche_name="wireless earbuds",
             category="audio",
             allowed_subcategory_labels=["earbuds", "tws"],
-            disallowed_labels=["headphone", "speaker"],
+            disallowed_labels=["headphone", "over-ear", "on-ear", "speaker", "soundbar"],
             allowed_keywords=["earbuds", "earbud"],
-            disallowed_keywords=["headphone", "speaker"],
+            disallowed_keywords=["headphone", "speaker", "soundbar"],
             mandatory_keywords=["earbuds", "earbud"],
             acceptance_test={
-                "name_must_contain_one_of": ["earbuds", "earbud"],
-                "name_must_not_contain": ["headphone", "speaker"],
+                "name_must_not_contain": ["headphone", "over-ear", "on-ear",
+                                          "speaker", "soundbar"],
                 "brand_is_not_product_name": True,
             },
         )
