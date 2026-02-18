@@ -1,0 +1,7 @@
+{
+  "total_word_count": 1514,
+  "estimated_duration_min": 10.1,
+  "section_count": 9,
+  "validation_errors": ["Retention reset too short: 43 words (min 50)"],
+  "validated_at": "2026-02-18T21:26:43.588113+00:00"
+}

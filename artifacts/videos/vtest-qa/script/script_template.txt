@@ -1,0 +1,36 @@
+# Script Template: robot vacuum cleaners
+# Target: 1300-1800 words (8-12 min at 150 WPM)
+# Charismatic type: reality_check
+
+[HOOK]
+# 100-150 words. Open with problem/tension.
+
+[AVATAR_INTRO]
+# 3-6 seconds. Brief channel intro.
+
+[PRODUCT_5]
+# 200-300 words. Narwal Freo Pro
+# Include: positioning, 2-3 benefits, target audience, honest downside, transition
+
+[PRODUCT_4]
+# 200-300 words. Roborock Saros 10
+# Include: positioning, 2-3 benefits, target audience, honest downside, transition
+
+[PRODUCT_3]
+# 200-300 words. Dreame D20 Plus
+# Include: positioning, 2-3 benefits, target audience, honest downside, transition
+
+[RETENTION_RESET]
+# 50-80 words. Pattern interrupt / audience question.
+
+[PRODUCT_2]
+# 200-300 words. Tapo RV30 Max Plus
+# Include: positioning, 2-3 benefits, target audience, honest downside, transition
+
+[PRODUCT_1]
+# 200-300 words. Roborock Q7 M5+
+# Include: positioning, 2-3 benefits, target audience, honest downside, transition
+
+[CONCLUSION]
+# CTA + affiliate disclosure.
+# Must include: "affiliate", "commission", "no extra cost"
