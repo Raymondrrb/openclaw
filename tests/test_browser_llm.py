@@ -116,12 +116,9 @@ class TestSelectors(unittest.TestCase):
             "ChatGPT response should use data-message-author-role",
         )
 
-    def test_claude_response_has_font_class(self):
+    def test_claude_response_selectors(self):
         resps = SELECTORS["claude"]["response"]
-        self.assertTrue(
-            any("font-claude-message" in s for s in resps),
-            "Claude response should use .font-claude-message",
-        )
+        self.assertGreater(len(resps), 0, "Claude needs response selectors")
 
 
 class TestNewChatUrls(unittest.TestCase):

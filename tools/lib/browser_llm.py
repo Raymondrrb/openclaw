@@ -36,6 +36,8 @@ class BrowserLLMResult:
 # ---------------------------------------------------------------------------
 
 # Each provider maps logical roles to CSS selectors (tried in order).
+# Locale-independent selectors (data-testid) are preferred over aria-labels,
+# which change with the browser language (EN/PT-BR/etc.).
 SELECTORS: dict[str, dict[str, list[str]]] = {
     "claude": {
         "input": [
@@ -43,20 +45,25 @@ SELECTORS: dict[str, dict[str, list[str]]] = {
             "div[contenteditable='true'][data-placeholder]",
         ],
         "send": [
+            # No data-testid on Claude send — must use aria-label variants
             "button[aria-label='Send Message']",
             "button[aria-label='Send message']",
+            "button[aria-label='Enviar mensagem']",
         ],
         "streaming": [
             "button[aria-label='Stop Response']",
             "button[aria-label='Stop response']",
+            "button[aria-label='Parar resposta']",
         ],
         "response": [
-            ".font-claude-message",
+            ".font-claude-response",
+        ],
+        "streaming_attr": [
+            "[data-is-streaming='true']",
         ],
         "logged_in": [
-            "button[data-testid='user-menu']",
-            "img[alt*='Avatar']",
-            "button[aria-label='Open menu']",
+            "button[data-testid='user-menu-button']",
+            "button[data-testid='model-selector-dropdown']",
         ],
     },
     "chatgpt": {
@@ -67,18 +74,20 @@ SELECTORS: dict[str, dict[str, list[str]]] = {
         "send": [
             "button[data-testid='send-button']",
             "button[aria-label='Send prompt']",
+            "button[aria-label='Enviar prompt']",
         ],
         "streaming": [
             "button[data-testid='stop-button']",
             "button[aria-label='Stop generating']",
+            "button[aria-label='Parar de gerar']",
         ],
         "response": [
             "[data-message-author-role='assistant']",
         ],
         "logged_in": [
-            "button[data-testid='profile-button']",
-            "img[alt='User']",
-            "button[aria-label='Open sidebar']",
+            "button[data-testid='composer-plus-btn']",
+            "#prompt-textarea",
+            "button[data-testid='send-button']",
         ],
     },
 }
@@ -126,58 +135,30 @@ def _start_new_chat(page, provider: str, *, timeout: int = 15000) -> bool:
 
 
 def _send_prompt(page, provider: str, prompt: str, *, timeout: int = 10000) -> bool:
-    """Focus the input, paste text via JS evaluate, and click Send.
+    """Focus the input, insert text, and click Send.
 
-    Both Claude and ChatGPT use ProseMirror (contenteditable).
-    Playwright's fill() doesn't work reliably on these — we use JS to
-    set innerHTML and dispatch an InputEvent so the app detects content.
+    Both Claude and ChatGPT use ProseMirror/contenteditable inputs.
+    innerHTML injection doesn't trigger the app's internal state updates.
+    Playwright's keyboard.insert_text() is reliable for any text size.
     """
     input_sels = SELECTORS.get(provider, {}).get("input", [])
     input_el = _find_first(page, input_sels, timeout=timeout)
     if not input_el:
         return False
 
-    # Get the actual selector that matched for JS evaluation
-    input_selector = None
-    for sel in input_sels:
-        try:
-            if page.locator(sel).first.is_visible():
-                input_selector = sel
-                break
-        except Exception:
-            continue
-
-    if not input_selector:
-        return False
-
-    # Inject text via JS — works for both ProseMirror and regular contenteditable
-    escaped_text = prompt.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-    js_inject = f"""
-    (() => {{
-        const el = document.querySelector("{input_selector}");
-        if (!el) return false;
-        el.focus();
-        // For ProseMirror contenteditable
-        if (el.getAttribute('contenteditable') === 'true') {{
-            el.innerHTML = '<p>' + `{escaped_text}`.replace(/\\n/g, '</p><p>') + '</p>';
-        }} else {{
-            // For textarea/input
-            el.value = `{escaped_text}`;
-        }}
-        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-        return true;
-    }})()
-    """
+    # Focus the input element
     try:
-        result = page.evaluate(js_inject)
-        if not result:
-            return False
+        input_el.click()
+        time.sleep(0.3)
     except Exception:
         return False
 
-    # Small delay for the app to process the input event
-    time.sleep(0.5)
+    # Insert text via Playwright keyboard API (works for large prompts)
+    try:
+        page.keyboard.insert_text(prompt)
+        time.sleep(1)
+    except Exception:
+        return False
 
     # Click Send
     send_sels = SELECTORS.get(provider, {}).get("send", [])
@@ -197,58 +178,65 @@ def _send_prompt(page, provider: str, prompt: str, *, timeout: int = 10000) -> b
     return True
 
 
+def _is_streaming_active(page, provider: str) -> bool:
+    """Check if the LLM is still generating a response."""
+    # Method 1: Claude uses data-is-streaming attribute
+    streaming_attr_sels = SELECTORS.get(provider, {}).get("streaming_attr", [])
+    for sel in streaming_attr_sels:
+        try:
+            if page.locator(sel).count() > 0:
+                return True
+        except Exception:
+            pass
+
+    # Method 2: Stop button visible (both providers)
+    streaming_sels = SELECTORS.get(provider, {}).get("streaming", [])
+    for sel in streaming_sels:
+        try:
+            if page.locator(sel).first.is_visible(timeout=500):
+                return True
+        except Exception:
+            continue
+
+    return False
+
+
 def _wait_for_response(page, provider: str, *, timeout_s: int = 180) -> bool:
     """Wait for the LLM response to complete.
 
-    Dual signal approach:
-    1. Stop/streaming button disappears (streaming finished)
-    2. Response text stabilizes (no changes for 6s = 3 checks x 2s)
+    Triple signal approach:
+    1. data-is-streaming attribute changes to 'false' (Claude)
+    2. Stop/streaming button disappears (both providers)
+    3. Response text stabilizes (no changes for 6s = 3 checks x 2s)
     """
-    streaming_sels = SELECTORS.get(provider, {}).get("streaming", [])
     response_sels = SELECTORS.get(provider, {}).get("response", [])
     deadline = time.time() + timeout_s
 
-    # Phase 1: Wait for streaming to start (stop button appears)
-    # Give it up to 30s to start generating
+    # Phase 1: Wait for response to start (streaming begins or response appears)
     start_deadline = time.time() + 30
-    streaming_started = False
+    started = False
     while time.time() < start_deadline:
-        for sel in streaming_sels:
-            try:
-                if page.locator(sel).first.is_visible(timeout=500):
-                    streaming_started = True
-                    break
-            except Exception:
-                continue
-        if streaming_started:
+        if _is_streaming_active(page, provider):
+            started = True
             break
-        # Also check if a response already appeared (fast response)
+        # Check if a response already appeared (fast response / streaming finished)
         for sel in response_sels:
             try:
-                count = page.locator(sel).count()
-                if count > 0:
-                    streaming_started = True
+                if page.locator(sel).count() > 0:
+                    started = True
                     break
             except Exception:
                 continue
-        if streaming_started:
+        if started:
             break
         time.sleep(1)
 
-    if not streaming_started:
+    if not started:
         return False
 
-    # Phase 2: Wait for streaming to finish (stop button disappears)
+    # Phase 2: Wait for streaming to finish
     while time.time() < deadline:
-        stop_visible = False
-        for sel in streaming_sels:
-            try:
-                if page.locator(sel).first.is_visible(timeout=500):
-                    stop_visible = True
-                    break
-            except Exception:
-                continue
-        if not stop_visible:
+        if not _is_streaming_active(page, provider):
             break
         time.sleep(2)
 
@@ -405,7 +393,7 @@ def send_prompt_via_browser(
             error=f"Browser error: {exc}",
         )
     finally:
-        # Close only the tab we opened, not the shared browser
+        # Close the tab we opened, not the shared browser
         if page:
             try:
                 page.close()
@@ -416,7 +404,10 @@ def send_prompt_via_browser(
                 browser.close()
             except Exception:
                 pass
-        if should_close and pw:
+        # Always stop the Playwright wrapper to free the event loop,
+        # even when using CDP (should_close=False). The shared browser
+        # stays running — we only close our Playwright handle to it.
+        if pw:
             try:
                 pw.stop()
             except Exception:
