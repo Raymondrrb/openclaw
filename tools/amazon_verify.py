@@ -288,7 +288,13 @@ def _browser_verify_product_pdp(
         query = _normalize_search_query(brand, product_name)
         search_url = f"https://www.amazon.com/s?k={urllib.parse.quote_plus(query)}"
         page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
-        page.wait_for_timeout(3000)
+        # Wait for search results to render (not just DOM load)
+        try:
+            page.wait_for_selector(
+                '[data-component-type="s-search-result"]', timeout=10000,
+            )
+        except Exception:
+            page.wait_for_timeout(3000)  # fallback static wait
 
         # Check for captcha / bot detection
         captcha_form = page.locator('form[action*="validateCaptcha"]').count() > 0
@@ -313,8 +319,8 @@ def _browser_verify_product_pdp(
         cards = page.locator('[data-component-type="s-search-result"]')
         count = min(cards.count(), 5)
 
-        # Build (index, card_title, similarity) list sorted by similarity
-        card_info: list[tuple[int, str, float]] = []
+        # Build (index, card_title, similarity, asin) list sorted by similarity
+        card_info: list[tuple[int, str, float, str]] = []
         for i in range(count):
             card = cards.nth(i)
             try:
@@ -323,48 +329,69 @@ def _browser_verify_product_pdp(
                     continue
                 title = ""
                 try:
-                    title_el = card.locator("h2 a span, h2 span").first
-                    title = title_el.inner_text(timeout=2000).strip()
+                    # Amazon 2025+ layout: brand in h2, product in .a-text-normal
+                    brand_text = ""
+                    try:
+                        brand_text = card.locator("h2").first.inner_text(timeout=2000).strip()
+                    except Exception:
+                        pass
+                    model_text = ""
+                    try:
+                        model_text = card.locator(
+                            ".a-size-medium.a-color-base.a-text-normal, "
+                            ".a-size-base-plus.a-color-base.a-text-normal"
+                        ).first.inner_text(timeout=2000).strip()
+                    except Exception:
+                        pass
+                    if brand_text and model_text:
+                        title = f"{brand_text} {model_text}"
+                    elif model_text:
+                        title = model_text
+                    elif brand_text:
+                        title = brand_text
                 except Exception:
                     pass
                 sim = _title_similarity(product_name, title)
                 if sim >= 0.5:
-                    card_info.append((i, title, sim))
+                    card_info.append((i, title, sim, card_asin))
             except Exception:
                 continue
 
         card_info.sort(key=lambda x: -x[2])
 
-        for card_idx, card_title, card_sim in card_info:
-            card = cards.nth(card_idx)
+        if count == 0:
+            print(f"    No search result cards found for: {query}", file=sys.stderr)
+            return None
+
+        if not card_info:
+            # Dump first card title for debugging
+            debug_title = ""
+            if count > 0:
+                try:
+                    t_el = cards.nth(0).locator("h2 a span, h2 span").first
+                    debug_title = t_el.inner_text(timeout=2000).strip()[:80]
+                except Exception:
+                    debug_title = "(could not read)"
+            print(
+                f"    {count} cards but none matched (sim < 0.5) for: {query}"
+                f"  [card0: {debug_title!r}]",
+                file=sys.stderr,
+            )
+            return None
+
+        for card_idx, card_title, card_sim, card_asin in card_info:
 
             try:
-                # Click title link to navigate to PDP
-                title_link = card.locator("h2 a").first
-                title_link.click(timeout=5000)
+                # Navigate directly to PDP via ASIN (avoids click-target issues)
+                asin = card_asin
+                pdp_url = f"https://www.amazon.com/dp/{asin}"
+                page.goto(pdp_url, wait_until="domcontentloaded", timeout=15000)
 
                 # Wait for PDP to load
                 try:
                     page.wait_for_selector("#productTitle", timeout=10000)
                 except Exception:
-                    page.go_back(wait_until="domcontentloaded", timeout=10000)
-                    page.wait_for_timeout(1000)
-                    continue
-
-                # Extract ASIN from URL
-                asin = ""
-                url_match = re.search(r'/dp/([A-Z0-9]{10})', page.url)
-                if url_match:
-                    asin = url_match.group(1)
-                else:
-                    # Fallback: DOM
-                    try:
-                        asin_input = page.locator('input[name="ASIN"]').first
-                        asin = asin_input.get_attribute("value", timeout=2000) or ""
-                    except Exception:
-                        pass
-
-                if not asin:
+                    print(f"    PDP did not load #productTitle for ASIN {asin}", file=sys.stderr)
                     page.go_back(wait_until="domcontentloaded", timeout=10000)
                     page.wait_for_timeout(1000)
                     continue
@@ -376,10 +403,10 @@ def _browser_verify_product_pdp(
                 except Exception:
                     pass
 
-                # Check similarity against PDP title — strict 85% threshold
+                # Check similarity against PDP title
                 pdp_sim = _title_similarity(product_name, pdp_title)
-                if pdp_sim < 0.85:
-                    print(f"    PDP title mismatch ({pdp_sim:.2f} < 0.85): {pdp_title[:60]}", file=sys.stderr)
+                if pdp_sim < 0.70:
+                    print(f"    PDP title mismatch ({pdp_sim:.2f} < 0.70): {pdp_title[:60]}", file=sys.stderr)
                     page.go_back(wait_until="domcontentloaded", timeout=10000)
                     page.wait_for_timeout(1000)
                     continue
@@ -489,7 +516,7 @@ def _browser_verify_product_pdp(
                 if not short_url:
                     ss_error = "ACTION_REQUIRED: SiteStripe not visible -- log in to Amazon Associates"
 
-                confidence = "high" if pdp_sim >= 0.90 else ("medium" if pdp_sim >= 0.85 else "low")
+                confidence = "high" if pdp_sim >= 0.90 else ("medium" if pdp_sim >= 0.75 else "low")
 
                 return VerifiedProduct(
                     product_name=product_name,
@@ -509,6 +536,7 @@ def _browser_verify_product_pdp(
                 )
 
             except Exception as exc:
+                print(f"    PDP exception for ASIN {card_asin}: {exc}", file=sys.stderr)
                 # Try to go back to search results for next card
                 try:
                     page.go_back(wait_until="domcontentloaded", timeout=10000)
@@ -641,8 +669,7 @@ def verify_products(
                 if vp.error:
                     print(f"    Note: {vp.error}", file=sys.stderr)
             elif vp is None and consecutive_failures == 0:
-                # _browser_verify_product_pdp returned None (no match), not an error
-                pass
+                print(f"    NO MATCH: {product_name}", file=sys.stderr)
             else:
                 print(f"    NOT FOUND / verification failed", file=sys.stderr)
 
