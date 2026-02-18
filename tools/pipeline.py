@@ -768,6 +768,7 @@ def _auto_generate_script(
 def _validate_existing_script(paths: VideoPaths, video_id: str) -> None:
     """Validate an existing script.txt and write metadata."""
     from tools.lib.pipeline_status import update_milestone
+    from tools.lib.script_generate import normalize_section_markers
     from tools.lib.script_schema import (
         SECTION_ORDER,
         SPEAKING_WPM,
@@ -777,6 +778,8 @@ def _validate_existing_script(paths: VideoPaths, video_id: str) -> None:
     )
 
     text = paths.script_txt.read_text(encoding="utf-8")
+    # Normalize informal browser-LLM markers to formal [SECTION] markers
+    text = normalize_section_markers(text)
 
     # Parse sections
     marker_map = {

@@ -21,6 +21,7 @@ if str(_repo) not in sys.path:
 from tools.lib.script_generate import (
     extract_metadata,
     extract_script_body,
+    normalize_section_markers,
     generate_draft,
     generate_refinement,
     run_script_pipeline,
@@ -141,6 +142,53 @@ MOCK_ANTHROPIC_RESPONSE = {
 }
 
 
+BROWSER_LLM_SCRIPT = (
+    "You spent hours scrolling Amazon reviews. Half of them are fake.\n"
+    "The other half? Contradictory.\n\n"
+    "#5 – Narwal Freo Pro (Best Alternative)\n"
+    "Starting at number five, the Narwal Freo Pro.\n"
+    "According to RTINGS, this robot vacuum delivers excellent mopping.\n"
+    "However, the dustbin is on the smaller side.\n\n"
+    "#4 – Roborock S8 MaxV Ultra\n"
+    "At number four, the Roborock S8 MaxV Ultra.\n"
+    "Wirecutter calls this a top pick for obstacle avoidance.\n"
+    "That said, the price is steep.\n\n"
+    "#3 – Ecovacs Deebot X2 Omni\n"
+    "Number three, the Ecovacs Deebot X2 Omni.\n"
+    "Its square design cleans corners better than round competitors.\n"
+    "Keep in mind, the app can be confusing.\n\n"
+    "Quick Reset\n"
+    "Have you ever had a robot vacuum get stuck under your couch?\n\n"
+    "#2 – iRobot Roomba j9+\n"
+    "Number two, the Roomba j9+.\n"
+    "Consumer Reports rates this highly for carpet cleaning.\n"
+    "One drawback: no mopping capability.\n\n"
+    "#1 – Roborock Q Revo MaxV\n"
+    "And the number one pick: Roborock Q Revo MaxV.\n"
+    "Best overall value with both vacuuming and mopping.\n"
+    "The trade-off is it's louder than competitors.\n\n"
+    "Conclusion + CTA\n"
+    "Links to all five are in the description below.\n"
+    "Those are affiliate links — I may earn a small commission\n"
+    "at no extra cost to you.\n"
+)
+
+BROWSER_LLM_METADATA = (
+    BROWSER_LLM_SCRIPT + "\n"
+    "---\n\n"
+    "Avatar Intro Script\n"
+    "(Max 320 characters, friendly and direct)\n"
+    "I tested and compared five of the best robot vacuums so you don't have to.\n\n"
+    "Short YouTube description:\n"
+    "The 5 best robot vacuums based on expert reviews from Wirecutter, "
+    "RTINGS, and Consumer Reports. Links are affiliate links.\n\n"
+    "Thumbnail Headline Options\n"
+    "DON'T BUY WRONG\n"
+    "ONLY ONE WORTH IT\n"
+    "BEST ROBOT VACUUMS\n"
+)
+
+
 def _mock_urlopen(response_dict):
     """Create a mock for urllib.request.urlopen that returns response_dict."""
     mock_resp = MagicMock()
@@ -153,6 +201,62 @@ def _mock_urlopen(response_dict):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+class TestNormalizeSectionMarkers(unittest.TestCase):
+    """Test normalize_section_markers() conversion logic."""
+
+    def test_informal_to_formal(self):
+        result = normalize_section_markers(BROWSER_LLM_SCRIPT)
+        self.assertIn("[HOOK]", result)
+        self.assertIn("[PRODUCT_5]", result)
+        self.assertIn("[PRODUCT_4]", result)
+        self.assertIn("[PRODUCT_3]", result)
+        self.assertIn("[PRODUCT_2]", result)
+        self.assertIn("[PRODUCT_1]", result)
+        self.assertIn("[RETENTION_RESET]", result)
+        self.assertIn("[CONCLUSION]", result)
+
+    def test_informal_no_raw_markers_remain(self):
+        result = normalize_section_markers(BROWSER_LLM_SCRIPT)
+        self.assertNotIn("#5 –", result)
+        self.assertNotIn("#4 –", result)
+        self.assertNotIn("Quick Reset", result)
+        self.assertNotIn("Conclusion + CTA", result)
+
+    def test_formal_markers_noop(self):
+        """Already-formal markers should pass through unchanged."""
+        formal = (
+            "[HOOK]\nHook text.\n\n"
+            "[PRODUCT_5]\nProduct five.\n\n"
+            "[CONCLUSION]\nConclusion.\n"
+        )
+        result = normalize_section_markers(formal)
+        self.assertEqual(result, formal)
+
+    def test_hook_inserted_when_content_before_product(self):
+        text = "Some hook content here.\n\n#5 – Product Name\nDetails.\n"
+        result = normalize_section_markers(text)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "[HOOK]")
+
+    def test_no_hook_when_no_content_before_product(self):
+        text = "#5 – Product Name\nDetails.\n"
+        result = normalize_section_markers(text)
+        lines = result.splitlines()
+        self.assertEqual(lines[0], "[PRODUCT_5]")
+
+    def test_mid_video_reset(self):
+        text = "#5 – Prod\nDetails.\n\nMid-Video Reset\nSomething.\n"
+        result = normalize_section_markers(text)
+        self.assertIn("[RETENTION_RESET]", result)
+
+    def test_avatar_intro_inline(self):
+        text = "[HOOK]\nHook.\n\nAvatar Intro\nI'm Ray.\n"
+        # Has formal [HOOK] so won't normalize — let's test pure informal
+        text2 = "Hook content.\n\n#5 – Prod\nDetails.\n\nAvatar Intro\nI'm Ray.\n"
+        result = normalize_section_markers(text2)
+        self.assertIn("[AVATAR_INTRO]", result)
 
 
 class TestExtractScriptBody(unittest.TestCase):
@@ -221,6 +325,55 @@ class TestExtractMetadata(unittest.TestCase):
         meta = extract_metadata("")
         self.assertEqual(meta["avatar_intro"], "")
         self.assertEqual(meta["thumbnail_headlines"], [])
+
+    def test_browser_avatar_intro_script(self):
+        """Browser Claude uses 'Avatar Intro Script' header with parenthetical instructions."""
+        meta = extract_metadata(BROWSER_LLM_METADATA)
+        self.assertIn("robot vacuum", meta["avatar_intro"])
+
+    def test_browser_thumbnail_plain_lines(self):
+        """Browser Claude outputs thumbnail headlines without numbering."""
+        meta = extract_metadata(BROWSER_LLM_METADATA)
+        self.assertEqual(len(meta["thumbnail_headlines"]), 3)
+        self.assertIn("DON'T BUY WRONG", meta["thumbnail_headlines"])
+        self.assertIn("ONLY ONE WORTH IT", meta["thumbnail_headlines"])
+        self.assertIn("BEST ROBOT VACUUMS", meta["thumbnail_headlines"])
+
+    def test_browser_description_extracted(self):
+        meta = extract_metadata(BROWSER_LLM_METADATA)
+        self.assertIn("robot vacuum", meta["youtube_description"])
+
+    def test_parenthetical_meta_instruction_skipped(self):
+        """Lines like '(Max 320 characters, ...)' should not become avatar intro."""
+        meta = extract_metadata(BROWSER_LLM_METADATA)
+        self.assertNotIn("320", meta["avatar_intro"])
+
+
+class TestExtractScriptBodyBrowser(unittest.TestCase):
+    """Test extract_script_body() with informal browser LLM output."""
+
+    def test_browser_script_has_formal_markers(self):
+        result = extract_script_body(BROWSER_LLM_SCRIPT)
+        self.assertIn("[HOOK]", result)
+        self.assertIn("[PRODUCT_5]", result)
+        self.assertIn("[PRODUCT_1]", result)
+        self.assertIn("[RETENTION_RESET]", result)
+        self.assertIn("[CONCLUSION]", result)
+
+    def test_browser_script_word_count_positive(self):
+        result = extract_script_body(BROWSER_LLM_SCRIPT)
+        word_count = len(result.split())
+        self.assertGreater(word_count, 50)
+
+    def test_browser_script_section_count(self):
+        """Should produce all 8 sections (hook + 5 products + reset + conclusion)."""
+        result = extract_script_body(BROWSER_LLM_SCRIPT)
+        markers = [
+            "[HOOK]", "[PRODUCT_5]", "[PRODUCT_4]", "[PRODUCT_3]",
+            "[RETENTION_RESET]", "[PRODUCT_2]", "[PRODUCT_1]", "[CONCLUSION]",
+        ]
+        for m in markers:
+            self.assertIn(m, result, f"Missing marker: {m}")
 
 
 class TestGenerateDraft(unittest.TestCase):
@@ -473,6 +626,7 @@ class TestPipelineScriptGenerate(unittest.TestCase):
             charismatic="reality_check",
             generate=True,
             force=False,
+            no_approval=True,
         )
 
         with patch.dict("os.environ", {
@@ -501,6 +655,7 @@ class TestPipelineScriptGenerate(unittest.TestCase):
             charismatic="reality_check",
             generate=True,
             force=False,
+            no_approval=True,
         )
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": ""}, clear=False):

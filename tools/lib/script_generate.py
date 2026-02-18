@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
 import sys
 import urllib.error
@@ -231,6 +232,108 @@ def generate_refinement(prompt: str, *, api_key: str = "") -> ScriptGenResult:
 # ---------------------------------------------------------------------------
 
 
+# Regex patterns that browser LLMs produce instead of formal [SECTION] markers.
+# Order matters: match #5 before #1 to avoid false positives on substrings.
+_PRODUCT_RE = re.compile(
+    r"^#{0,3}\s*#?(\d)\s*[–—\-:\.]\s*.+$",
+    re.IGNORECASE,
+)
+_RESET_RE = re.compile(
+    r"^#{0,3}\s*(quick\s+reset|mid[- ]?video\s+reset|retention\s+reset)\b",
+    re.IGNORECASE,
+)
+_CONCLUSION_RE = re.compile(
+    r"^#{0,3}\s*(conclusion|conclusion\s*\+?\s*cta)\s*$",
+    re.IGNORECASE,
+)
+_AVATAR_INTRO_RE = re.compile(
+    r"^#{0,3}\s*\[?\s*avatar\s+intro\s*\]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_section_markers(text: str) -> str:
+    """Convert informal browser-LLM section headers to formal [SECTION] markers.
+
+    Browser LLMs (ChatGPT draft + Claude refinement) produce headers like:
+        #5 – Narwal Freo Pro (Best Alternative)
+        Quick Reset
+        Conclusion + CTA
+
+    This normalizes them to:
+        [PRODUCT_5]
+        [RETENTION_RESET]
+        [CONCLUSION]
+
+    Text before the first product marker gets [HOOK] prepended.
+    Already-formal markers ([HOOK], [PRODUCT_5], etc.) pass through unchanged.
+    """
+    lines = text.splitlines()
+
+    # Quick check: if formal markers are already present, return as-is
+    formal_markers = {
+        "[HOOK]", "[AVATAR_INTRO]",
+        "[PRODUCT_5]", "[PRODUCT_4]", "[PRODUCT_3]", "[PRODUCT_2]", "[PRODUCT_1]",
+        "[RETENTION_RESET]", "[CONCLUSION]",
+    }
+    for line in lines:
+        if line.strip().upper() in formal_markers:
+            return text
+
+    result: list[str] = []
+    found_first_product = False
+    has_hook = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Check for inline avatar intro marker
+        if _AVATAR_INTRO_RE.match(stripped):
+            result.append("[AVATAR_INTRO]")
+            continue
+
+        # Check for product markers (#5 – Name, #4 – Name, etc.)
+        m = _PRODUCT_RE.match(stripped)
+        if m:
+            num = m.group(1)
+            if num in "54321":
+                if not found_first_product and not has_hook:
+                    # Insert [HOOK] before first product if there's preceding content
+                    # Find where content starts (skip blank lines at top)
+                    content_before = "\n".join(result).strip()
+                    if content_before:
+                        result.insert(0, "[HOOK]")
+                        has_hook = True
+                found_first_product = True
+                result.append(f"[PRODUCT_{num}]")
+                continue
+
+        # Check for retention reset
+        if _RESET_RE.match(stripped):
+            result.append("[RETENTION_RESET]")
+            continue
+
+        # Check for conclusion
+        if _CONCLUSION_RE.match(stripped):
+            result.append("[CONCLUSION]")
+            continue
+
+        result.append(line)
+
+    # If we found products but no hook was inserted and there's content before first product
+    if found_first_product and not has_hook:
+        # Find the index of the first [PRODUCT_ marker in result
+        for i, line in enumerate(result):
+            if line.strip().startswith("[PRODUCT_"):
+                # Check if there's non-blank content before it
+                before = "\n".join(result[:i]).strip()
+                if before:
+                    result.insert(0, "[HOOK]")
+                break
+
+    return "\n".join(result)
+
+
 def extract_script_body(text: str) -> str:
     """Extract the script body from LLM output.
 
@@ -238,6 +341,8 @@ def extract_script_body(text: str) -> str:
     preamble/postamble text. This extracts just the script portion
     that contains [SECTION] markers.
     """
+    # Normalize informal markers before parsing
+    text = normalize_section_markers(text)
     lines = text.splitlines()
 
     # Known section markers (case-insensitive)
@@ -323,7 +428,13 @@ def extract_metadata(text: str) -> dict:
         stripped = line.strip()
         lower = stripped.lower()
 
-        if "avatar intro" in lower and (":" in lower or "script" in lower):
+        # Skip parenthetical meta-instructions like "(Max 320 characters, ...)"
+        if lower.startswith("(") and lower.endswith(")"):
+            continue
+
+        if "avatar intro" in lower and (
+            ":" in lower or "script" in lower or lower == "avatar intro"
+        ):
             in_avatar = True
             in_description = False
             in_thumbnails = False
@@ -360,7 +471,7 @@ def extract_metadata(text: str) -> dict:
             description_lines.append(stripped)
 
         if in_thumbnails and stripped:
-            # Parse numbered or bulleted headlines
+            # Parse numbered, bulleted, or plain headlines
             headline = stripped
             for prefix in ("1.", "2.", "3.", "4.", "-", "*"):
                 if headline.startswith(prefix):
