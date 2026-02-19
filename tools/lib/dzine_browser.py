@@ -24,7 +24,7 @@ import struct
 import sys
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from tools.lib.common import project_root
@@ -1388,6 +1388,288 @@ def _download_image(url: str, dest: Path) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Vision-based image QA (Claude API)
+# ---------------------------------------------------------------------------
+
+_VISION_API_URL = "https://api.anthropic.com/v1/messages"
+_VISION_MODEL = "claude-haiku-4-5-20251001"  # fast + cheap for QA
+_VISION_TIMEOUT = 60
+
+_IMAGE_QA_PROMPT = """\
+You are an image quality analyst for product photography used in YouTube review videos.
+
+Analyze this generated product image and rate it on these criteria (0-10 each):
+
+1. **product_intact**: Is the product complete? No clipping, no missing parts, no erasure.
+2. **color_fidelity**: Does the product look like a natural, realistic color? (If reference provided, compare.)
+3. **no_phone_fragments**: Are there any rectangular phone-shaped artifacts or ghost fragments on the edges?
+4. **no_ghosting**: Are there smoky/hazy transparency artifacts on product edges?
+5. **background_quality**: Is the background professional, clean, appropriate for a product review?
+6. **overall_composition**: Is the product well-centered, good lighting, visually appealing?
+
+Respond ONLY with this JSON (no markdown, no extra text):
+{"product_intact": N, "color_fidelity": N, "no_phone_fragments": N, "no_ghosting": N, "background_quality": N, "overall_composition": N, "total": N, "issues": ["issue1", ...], "video_ready": true/false}
+
+- "total" = average of all 6 scores
+- "video_ready" = true only if total >= 7.0 AND no_phone_fragments >= 8 AND no_ghosting >= 8
+- "issues" = list of specific problems found (empty if none)
+"""
+
+
+@dataclass
+class ImageQAResult:
+    """Result of vision-based image quality analysis."""
+    product_intact: float = 0.0
+    color_fidelity: float = 0.0
+    no_phone_fragments: float = 0.0
+    no_ghosting: float = 0.0
+    background_quality: float = 0.0
+    overall_composition: float = 0.0
+    total: float = 0.0
+    issues: list[str] = field(default_factory=list)
+    video_ready: bool = False
+    error: str = ""
+
+
+def _analyze_image_qa(image_data: bytes, *, ref_data: bytes | None = None) -> ImageQAResult:
+    """Analyze a product image using Claude Vision API.
+
+    Args:
+        image_data: Raw bytes of the generated image.
+        ref_data: Optional raw bytes of the Amazon reference image for comparison.
+
+    Returns ImageQAResult with scores and issues.
+    """
+    import base64
+    import ssl
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return ImageQAResult(error="ANTHROPIC_API_KEY not set, skipping vision QA")
+
+    # Build content blocks
+    content: list[dict] = []
+
+    # Reference image (if available)
+    if ref_data:
+        content.append({"type": "text", "text": "Reference product image (from Amazon listing):"})
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": _guess_media_type(ref_data),
+                "data": base64.b64encode(ref_data).decode("ascii"),
+            },
+        })
+
+    # Generated image
+    label = "Generated product image to evaluate:" if not ref_data else "Generated image to evaluate (compare against reference above):"
+    content.append({"type": "text", "text": label})
+    content.append({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": _guess_media_type(image_data),
+            "data": base64.b64encode(image_data).decode("ascii"),
+        },
+    })
+
+    content.append({"type": "text", "text": _IMAGE_QA_PROMPT})
+
+    payload = {
+        "model": _VISION_MODEL,
+        "max_tokens": 512,
+        "temperature": 0.0,
+        "messages": [{"role": "user", "content": content}],
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+
+    try:
+        import json as _json
+        data = _json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(_VISION_API_URL, data=data, headers=headers, method="POST")
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=_VISION_TIMEOUT, context=ctx) as resp:
+            body = _json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        return ImageQAResult(error=f"Vision API call failed: {exc}")
+
+    # Parse response
+    text = ""
+    for block in body.get("content", []):
+        if block.get("type") == "text":
+            text += block.get("text", "")
+
+    if not text.strip():
+        return ImageQAResult(error="Empty response from vision API")
+
+    try:
+        import json as _json
+        # Strip markdown fences if present
+        clean = text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+            clean = clean.rsplit("```", 1)[0]
+        result = _json.loads(clean)
+    except (ValueError, KeyError) as exc:
+        return ImageQAResult(error=f"Failed to parse vision response: {exc}\nRaw: {text[:200]}")
+
+    return ImageQAResult(
+        product_intact=float(result.get("product_intact", 0)),
+        color_fidelity=float(result.get("color_fidelity", 0)),
+        no_phone_fragments=float(result.get("no_phone_fragments", 0)),
+        no_ghosting=float(result.get("no_ghosting", 0)),
+        background_quality=float(result.get("background_quality", 0)),
+        overall_composition=float(result.get("overall_composition", 0)),
+        total=float(result.get("total", 0)),
+        issues=result.get("issues", []),
+        video_ready=bool(result.get("video_ready", False)),
+    )
+
+
+def _guess_media_type(data: bytes) -> str:
+    """Guess image media type from magic bytes."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    return "image/png"  # safe default
+
+
+def _select_best_image(
+    urls: list[str],
+    dest: Path,
+    *,
+    ref_path: Path | None = None,
+) -> str | None:
+    """Download all candidate images and pick the best one using vision QA.
+
+    Strategy:
+    1. Download all candidates
+    2. Run Claude Vision QA on each (if API key available)
+    3. Pick the one with highest total score
+    4. Fallback to largest file size if vision unavailable
+
+    Returns the URL of the best image (already saved to dest), or None on failure.
+    """
+    if not urls:
+        return None
+    if len(urls) == 1:
+        if _download_image(urls[0], dest):
+            # Still run QA on single image for logging
+            qa = _analyze_image_qa(dest.read_bytes())
+            if not qa.error:
+                _log_qa("single", qa)
+            return urls[0]
+        return None
+
+    # Download all candidates
+    candidates: list[tuple[str, bytes]] = []
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            if len(data) >= 1024:
+                candidates.append((url, data))
+        except Exception:
+            continue
+
+    if not candidates:
+        return None
+
+    # Load reference image for comparison
+    ref_data = None
+    if ref_path and ref_path.exists():
+        try:
+            ref_data = ref_path.read_bytes()
+        except OSError:
+            pass
+
+    # Try vision-based selection
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if api_key and len(candidates) > 1:
+        scored: list[tuple[str, bytes, ImageQAResult]] = []
+        for url, data in candidates:
+            qa = _analyze_image_qa(data, ref_data=ref_data)
+            scored.append((url, data, qa))
+            if not qa.error:
+                _log_qa(url.split("/")[-1][:30], qa)
+
+        # Filter to those with successful QA
+        with_scores = [(u, d, q) for u, d, q in scored if not q.error]
+        if with_scores:
+            # Sort by total score (descending), then by file size as tiebreaker
+            with_scores.sort(key=lambda x: (x[2].total, len(x[1])), reverse=True)
+            best_url, best_data, best_qa = with_scores[0]
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(best_data)
+            print(f"[dzine] Vision QA selected best of {len(candidates)}: "
+                  f"score={best_qa.total:.1f}/10, "
+                  f"video_ready={best_qa.video_ready}, "
+                  f"size={len(best_data) // 1024}KB",
+                  file=sys.stderr)
+            if best_qa.issues:
+                print(f"[dzine] QA issues: {', '.join(best_qa.issues)}", file=sys.stderr)
+            return best_url
+
+    # Fallback: pick by file size
+    candidates.sort(key=lambda x: len(x[1]), reverse=True)
+    best_url, best_data = candidates[0]
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(best_data)
+    print(f"[dzine] Selected best of {len(candidates)} by size: "
+          f"{len(best_data) // 1024}KB", file=sys.stderr)
+    return best_url
+
+
+def _log_qa(label: str, qa: ImageQAResult) -> None:
+    """Log QA result to stderr."""
+    print(f"[dzine] QA {label}: total={qa.total:.1f} "
+          f"intact={qa.product_intact:.0f} color={qa.color_fidelity:.0f} "
+          f"phone={qa.no_phone_fragments:.0f} ghost={qa.no_ghosting:.0f} "
+          f"bg={qa.background_quality:.0f} comp={qa.overall_composition:.0f}"
+          + (f" ISSUES: {qa.issues}" if qa.issues else ""),
+          file=sys.stderr)
+
+
+def analyze_generated_image(
+    image_path: Path,
+    *,
+    ref_path: Path | None = None,
+) -> ImageQAResult:
+    """Public API: analyze a generated image for video-readiness.
+
+    Sends the image to Claude Vision for quality assessment.
+    Optionally compares against a reference product photo.
+
+    Args:
+        image_path: Path to the generated product image
+        ref_path: Optional path to the Amazon reference image
+
+    Returns ImageQAResult with scores and video_ready flag.
+    """
+    if not image_path.exists():
+        return ImageQAResult(error=f"Image not found: {image_path}")
+
+    image_data = image_path.read_bytes()
+    ref_data = None
+    if ref_path and ref_path.exists():
+        ref_data = ref_path.read_bytes()
+
+    qa = _analyze_image_qa(image_data, ref_data=ref_data)
+    if not qa.error:
+        _log_qa(image_path.name, qa)
+    return qa
+
+
 def _file_sha256(path: Path) -> str:
     """Compute SHA-256 hex digest."""
     h = hashlib.sha256()
@@ -2418,14 +2700,17 @@ def generate_product_faithful(
 
             print(f"[dzine] Results: {len(result_urls)} images", file=sys.stderr)
 
-            # Step 3: Download best result (first one)
-            best_url = result_urls[0]
+            # Step 4: Download all candidates and pick the best one
             if output_path:
                 dest = Path(output_path)
             else:
                 dest = Path(os.path.expanduser("~/Downloads")) / f"dzine_faithful_{int(time.time())}.webp"
 
-            if not _download_image(best_url, dest):
+            best_url = _select_best_image(
+                result_urls, dest,
+                ref_path=Path(product_image_path) if product_image_path else None,
+            )
+            if not best_url:
                 # Fallback: try export canvas instead
                 print("[dzine] Direct download failed, trying export...", file=sys.stderr)
                 export_dest = _export_canvas(page, "PNG", export_scale)

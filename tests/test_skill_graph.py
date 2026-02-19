@@ -239,6 +239,21 @@ class TestPreRunCheck(unittest.TestCase):
         critical_count = sum(1 for w in warnings if "CRITICAL" in w)
         self.assertGreaterEqual(critical_count, 0)
 
+    def test_surfaces_high_severity_active_rules(self):
+        """pre_run_check should surface high-severity active nodes (image QA rules)."""
+        warnings = pre_run_check("product-background")
+        # Image QA rules have severity=high, status=active AND tag=critical
+        # So they may appear as CRITICAL or MANDATORY depending on tags
+        has_qa = any("QA" in w or "Image" in w for w in warnings)
+        self.assertTrue(has_qa, f"Expected image QA warning, got: {warnings}")
+
+    def test_image_qa_rules_surfaced(self):
+        """Image QA rules should appear in pre-run warnings regardless of tool."""
+        for tool in ["product-background", "generative-expand", ""]:
+            warnings = pre_run_check(tool)
+            has_qa = any("Image QA" in w or "generation run" in w.lower() for w in warnings)
+            self.assertTrue(has_qa, f"Expected image QA warning for tool '{tool}', got: {warnings}")
+
 
 class TestRecordLearning(unittest.TestCase):
     """Test recording new learnings."""

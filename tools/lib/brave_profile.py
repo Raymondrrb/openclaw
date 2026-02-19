@@ -248,7 +248,10 @@ def connect_or_launch(*, headless: bool = False):
         try:
             browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{DEFAULT_CDP_PORT}")
             contexts = browser.contexts
-            context = contexts[0] if contexts else browser.new_context()
+            if not contexts:
+                # Never create ephemeral context — it loses cookies (ChatGPT logout bug)
+                raise RuntimeError("CDP connected but no browser contexts found")
+            context = contexts[0]
             return browser, context, False, pw
         except Exception as exc:
             print(f"[brave] CDP connect failed ({exc}), launching fresh", file=sys.stderr)

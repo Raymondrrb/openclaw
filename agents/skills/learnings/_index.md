@@ -19,6 +19,8 @@ Every pipeline run records its outcome here. Before starting any generation, the
 
 ## Recent Learnings (newest first)
 
+- [[2026-02-19-script-quality-rules]] — **MANDATORY**: Script quality standards, feedback loop protocol, and text generation rules. Check BEFORE every script generation.
+- [[2026-02-19-image-qa-rules]] — **MANDATORY**: Pre-generation ref checks + post-generation QA (phone ghosts, ghosting, color fidelity, white-on-white). Check BEFORE every run.
 - [[2026-02-19-bg-remove-prerequisite]] — Product Background requires empty BG. Must run BG Remove first or get "Background is NOT empty" error.
 - [[2026-02-19-identical-images]] — **CRITICAL**: Generative Expand ignores scene prompts. All 18 images came out identical. Switch to Product Background.
 - [[2026-02-19-phone-removal]] — BG Remove treats phones as foreground. Must crop from reference before upload.
@@ -40,6 +42,12 @@ Bad reference images cascade into bad outputs:
 
 - Phones in reference → phones in output ([[2026-02-19-phone-removal]])
 - Complex backgrounds → artifacts in expand ([[2026-02-19-duplicate-dock]])
+
+### Recurring Theme: Quality Over Speed
+
+- Refine scripts until authentic — no limit on passes
+- Redo images if not video-ready — agents have vision QA now
+- Save ALL feedback as learnings — text, image, audio, video
 
 ## Statistics
 

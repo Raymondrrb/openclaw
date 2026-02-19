@@ -431,6 +431,10 @@ def pre_run_check(tool: str, video_id: str = "") -> list[str]:
     """Check learnings for known issues with the planned tool.
 
     Returns list of warning messages. Empty list = no known issues.
+    Surfaces:
+    - Critical learnings (always)
+    - Failure learnings
+    - High-severity active rules (image QA, quality gates)
     """
     warnings = []
     learnings = get_relevant_learnings(tool=tool)
@@ -441,6 +445,16 @@ def pre_run_check(tool: str, video_id: str = "") -> list[str]:
         elif "failure" in node.tags:
             fix = node.frontmatter.get("fix", "")
             warnings.append(f"Known issue: {node.description} (fix: {fix})")
+
+    # Also surface high-severity active rules (e.g. image-qa-rules)
+    all_learnings = scan_learnings()
+    for node in all_learnings:
+        severity = node.frontmatter.get("severity", "")
+        status = node.frontmatter.get("status", "")
+        if severity == "high" and status == "active":
+            # Avoid duplicates from get_relevant_learnings
+            if node not in learnings:
+                warnings.append(f"MANDATORY: {node.description}")
 
     return warnings
 
