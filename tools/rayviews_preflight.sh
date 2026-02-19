@@ -3,10 +3,8 @@ set -euo pipefail
 
 ROOT="/Users/ray/Documents/openclaw"
 
-if [[ "$(pwd)" != "$ROOT"* ]]; then
-  echo "ERROR: wrong workspace. Use: $ROOT" >&2
-  exit 2
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"$SCRIPT_DIR/rayviews_lock.sh" -- true
 
 echo "pwd: $(pwd)"
 echo "branch: $(git branch --show-current)"

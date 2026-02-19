@@ -9,6 +9,7 @@
 - Use this GitHub remote as source of truth: `rayviewslab` (`https://github.com/Raymondrrb/rayviewslab.git`)
 - Do not edit `/Users/ray/Documents/Rayviews` unless explicitly requested for migration.
 - Session preflight (required): `pwd`, `git branch --show-current`, `git remote -v`
+- Hard lock (required): `tools/rayviews_lock.sh -- true` (abort if workspace/repo/remote are wrong)
 - Before implementing RayViews changes, sync canonical baseline:
   - `git fetch rayviewslab`
   - `git pull --rebase rayviewslab main`
