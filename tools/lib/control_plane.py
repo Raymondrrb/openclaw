@@ -245,15 +245,11 @@ def send_telegram(
             rewrite_status = "fallback_raw"
             print(f"WARNING: MiniMax rewrite failed, sending raw message ({e})")
 
-    cmd = [
-        "openclaw", "message", "send",
-        "--channel", "telegram",
-        "--account", account,
-        "--target", chat_id,
-        "--message", final_message,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    ok = result.returncode == 0
+    ok = _send_openclaw_telegram(
+        chat_id=chat_id,
+        account=account,
+        message=final_message,
+    )
     _maybe_log_telegram_message(
         message_kind=message_kind,
         raw_message=message,
@@ -263,3 +259,179 @@ def send_telegram(
         send_ok=ok,
     )
     return ok
+
+
+def _send_openclaw_telegram(
+    *,
+    chat_id: str,
+    account: str,
+    message: str = "",
+    media: str = "",
+    warn_on_error: bool = True,
+) -> bool:
+    """Low-level sender for Telegram via `openclaw message send`."""
+    cmd = [
+        "openclaw", "message", "send",
+        "--channel", "telegram",
+        "--account", account,
+        "--target", chat_id,
+    ]
+    if media.strip():
+        cmd.extend(["--media", media.strip()])
+    if message.strip():
+        cmd.extend(["--message", message])
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode == 0:
+        return True
+    stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
+    detail = stderr or stdout or f"exit={result.returncode}"
+    if warn_on_error:
+        print(f"WARNING: openclaw telegram send failed ({detail})")
+    return False
+
+
+def send_telegram_media(
+    media: str,
+    *,
+    caption: str = "",
+    chat_id: str = "",
+    account: str = "",
+) -> bool:
+    """Send a Telegram media message via OpenClaw CLI.
+
+    `media` can be a local file path or URL.
+    """
+    chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    account = account or os.environ.get("OPENCLAW_TELEGRAM_ACCOUNT", "tg_main")
+    media = str(media or "").strip()
+
+    if not chat_id:
+        print("WARNING: No TELEGRAM_CHAT_ID set, skipping Telegram media send")
+        return False
+    if not media:
+        print("WARNING: Empty media path/url, skipping Telegram media send")
+        return False
+
+    if _send_openclaw_telegram(
+        chat_id=chat_id,
+        account=account,
+        media=media,
+        message=caption,
+        warn_on_error=False,
+    ):
+        return True
+
+    # Fallback: direct Telegram Bot API upload bypasses OpenClaw local-media root restrictions.
+    if _send_media_via_bot_api(media=media, caption=caption, chat_id=chat_id):
+        return True
+
+    print(f"WARNING: openclaw telegram media send failed and bot-api fallback failed (media={media})")
+    return False
+
+
+def _send_media_via_bot_api(*, media: str, caption: str, chat_id: str) -> bool:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        return False
+
+    # URL media can be sent as JSON payload.
+    if media.startswith("http://") or media.startswith("https://"):
+        payload: Dict[str, Any] = {"chat_id": chat_id, "photo": media}
+        if caption.strip():
+            payload["caption"] = caption
+        return _telegram_bot_json_call(token, "sendPhoto", payload)
+
+    path = Path(os.path.expanduser(media))
+    if not path.is_file():
+        return False
+
+    fields: Dict[str, str] = {"chat_id": chat_id}
+    if caption.strip():
+        fields["caption"] = caption
+    files = {
+        "photo": (
+            path.name,
+            path.read_bytes(),
+            "image/png",
+        )
+    }
+    body, boundary = _build_multipart(fields, files)
+    req = Request(
+        f"https://api.telegram.org/bot{token}/sendPhoto",
+        method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        data=body,
+    )
+    try:
+        with urlopen(req, timeout=45) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return bool(data.get("ok"))
+    except Exception:
+        return False
+
+
+def _telegram_bot_json_call(token: str, method: str, payload: Dict[str, Any]) -> bool:
+    req = Request(
+        f"https://api.telegram.org/bot{token}/{method}",
+        method="POST",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urlopen(req, timeout=45) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return bool(data.get("ok"))
+    except Exception:
+        return False
+
+
+def _build_multipart(
+    fields: Dict[str, str],
+    files: Dict[str, tuple[str, bytes, str]],
+) -> tuple[bytes, str]:
+    boundary = hashlib.sha1(os.urandom(16)).hexdigest()
+    parts: list[bytes] = []
+    for name, value in fields.items():
+        parts.append(f"--{boundary}\r\n".encode("utf-8"))
+        parts.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        parts.append(value.encode("utf-8"))
+        parts.append(b"\r\n")
+    for name, (filename, data, content_type) in files.items():
+        parts.append(f"--{boundary}\r\n".encode("utf-8"))
+        parts.append(
+            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode("utf-8")
+        )
+        parts.append(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+        parts.append(data)
+        parts.append(b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(parts), boundary
+
+
+def send_telegram_media_batch(
+    media_items: list[str],
+    *,
+    caption: str = "",
+    chat_id: str = "",
+    account: str = "",
+) -> int:
+    """Send multiple Telegram media items (one message per item).
+
+    Returns number of items successfully sent.
+    """
+    sent = 0
+    for idx, media in enumerate(media_items):
+        item_caption = caption if idx == 0 else ""
+        if send_telegram_media(
+            media,
+            caption=item_caption,
+            chat_id=chat_id,
+            account=account,
+        ):
+            sent += 1
+    return sent

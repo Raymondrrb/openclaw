@@ -16,13 +16,19 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 from lib.common import now_iso, load_env_file
-from lib.control_plane import api_get, send_telegram
+from lib.control_plane import api_get, send_telegram, send_telegram_media
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Smoke test for Telegram notification path")
     p.add_argument("--kind", choices=["gate", "failure", "summary", "generic"], default="generic")
     p.add_argument("--message", default="", help="Optional explicit message")
+    p.add_argument(
+        "--media",
+        action="append",
+        default=[],
+        help="Optional media file/URL to send (repeat for multiple items)",
+    )
     p.add_argument("--dry-run", action="store_true", help="Do not send to Telegram")
     p.add_argument("--load-openclaw-env", action="store_true", default=True,
                    help="Load /Users/ray/Documents/openclaw/.env when present")
@@ -80,6 +86,23 @@ def main() -> int:
     if args.dry_run:
         print("[DRY RUN] message preview:")
         print(msg)
+        if args.media:
+            print(f"[DRY RUN] media items: {len(args.media)}")
+            for media in args.media:
+                print(f"  - {media}")
+        return 0
+
+    if args.media:
+        sent = 0
+        for idx, media in enumerate(args.media):
+            caption = msg if idx == 0 else ""
+            ok_media = send_telegram_media(media, caption=caption)
+            if ok_media:
+                sent += 1
+        if sent != len(args.media):
+            print(f"[FAIL] Telegram media send failed: {sent}/{len(args.media)}")
+            return 1
+        print(f"[OK] Telegram media sent ({sent}/{len(args.media)})")
         return 0
 
     ok = send_telegram(msg, message_kind=args.kind)

@@ -19,6 +19,8 @@ from tools.lib.pipeline_approval import (
     _bot_token,
     _chat_id,
     _is_configured,
+    _normalize_details,
+    _normalize_summary,
     _flush_updates,
     _send_approval_message,
     _poll_for_response,
@@ -40,6 +42,26 @@ class TestHelpers(unittest.TestCase):
     @patch.dict(os.environ, {}, clear=True)
     def test_not_configured(self):
         self.assertFalse(_is_configured())
+
+
+class TestNormalization(unittest.TestCase):
+    def test_summary_placeholder_gets_replaced(self):
+        self.assertEqual(
+            _normalize_summary("gate1", "summary"),
+            "Approval required for gate1",
+        )
+
+    def test_details_placeholder_gets_replaced(self):
+        self.assertEqual(
+            _normalize_details("gate2", ["detail"]),
+            ["Review gate payload 'gate2' before approving."],
+        )
+
+    def test_details_real_content_kept(self):
+        self.assertEqual(
+            _normalize_details("gate2", ["line 1", "line 2"]),
+            ["line 1", "line 2"],
+        )
 
     @patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "  ", "TELEGRAM_CHAT_ID": ""})
     def test_whitespace_not_configured(self):

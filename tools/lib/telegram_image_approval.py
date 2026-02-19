@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import time
 import urllib.error
@@ -29,6 +30,8 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from tools.lib.control_plane import send_telegram, send_telegram_media
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +70,10 @@ def _chat_id() -> str:
 
 def _is_configured() -> bool:
     return bool(_bot_token()) and bool(_chat_id())
+
+
+def _openclaw_channel_ready() -> bool:
+    return bool(_chat_id()) and shutil.which("openclaw") is not None
 
 
 def _api_call(method: str, payload: dict) -> dict | None:
@@ -476,11 +483,44 @@ def request_image_approval(
         return ImageApprovalResult()
 
     # Telegram not configured → auto-approve with warning
-    if not _is_configured():
+    bot_api_ready = _is_configured()
+    channel_ready = _openclaw_channel_ready()
+    if not bot_api_ready and not channel_ready:
         print(
-            "[image_approval] Telegram not configured — auto-approving all images",
+            "[image_approval] Telegram not configured (bot+channel unavailable) — auto-approving all images",
             file=sys.stderr,
         )
+        return _auto_approve()
+
+    # Fallback path: OpenClaw channel can send media, but cannot poll inline callbacks.
+    # We still deliver the generated images to Telegram and auto-approve (unless strict mode).
+    if not bot_api_ready and channel_ready:
+        caption_header = f"[Rayviews Lab] Image previews ({len(images)})"
+        if video_id:
+            caption_header += f" — {video_id}"
+
+        sent = 0
+        for entry in images:
+            line = f"{entry.label} — {entry.product_name} ({entry.variant})"
+            if send_telegram_media(str(entry.path), caption=line):
+                sent += 1
+
+        detail_lines = [
+            f"Sent image previews: {sent}/{len(images)}",
+            "Approval mode: auto (OpenClaw channel fallback, no callback polling)",
+            "To enforce manual approval here, set PIPELINE_IMAGE_APPROVAL_STRICT=1.",
+        ]
+        send_telegram(
+            caption_header + "\n" + "\n".join(detail_lines),
+            message_kind="summary",
+        )
+
+        if os.environ.get("PIPELINE_IMAGE_APPROVAL_STRICT", "").strip() == "1":
+            print(
+                "[image_approval] strict mode enabled with channel fallback — rejecting all images",
+                file=sys.stderr,
+            )
+            return _auto_reject()
         return _auto_approve()
 
     # Build summary

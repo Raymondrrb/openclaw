@@ -25,6 +25,7 @@ from tools.lib.telegram_image_approval import (
     _bot_token,
     _chat_id,
     _is_configured,
+    _openclaw_channel_ready,
     _build_multipart,
     _send_photo,
     _send_media_group,
@@ -93,6 +94,16 @@ class TestHelpers(unittest.TestCase):
     @patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "  ", "TELEGRAM_CHAT_ID": ""})
     def test_whitespace_not_configured(self):
         self.assertFalse(_is_configured())
+
+    @patch.dict(os.environ, {"TELEGRAM_CHAT_ID": "5853624777"}, clear=True)
+    @patch("tools.lib.telegram_image_approval.shutil.which", return_value="/usr/local/bin/openclaw")
+    def test_openclaw_channel_ready(self, mock_which):
+        self.assertTrue(_openclaw_channel_ready())
+
+    @patch.dict(os.environ, {}, clear=True)
+    @patch("tools.lib.telegram_image_approval.shutil.which", return_value="/usr/local/bin/openclaw")
+    def test_openclaw_channel_not_ready_without_chat_id(self, mock_which):
+        self.assertFalse(_openclaw_channel_ready())
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +380,23 @@ class TestNotConfigured(unittest.TestCase):
     def test_no_chat_id_auto_approves(self):
         result = request_image_approval(self.entries)
         self.assertTrue(result.all_approved)
+
+    @patch("tools.lib.telegram_image_approval.send_telegram")
+    @patch("tools.lib.telegram_image_approval.send_telegram_media", return_value=True)
+    @patch("tools.lib.telegram_image_approval._openclaw_channel_ready", return_value=True)
+    @patch("tools.lib.telegram_image_approval._is_configured", return_value=False)
+    @patch.dict(os.environ, {}, clear=True)
+    def test_channel_fallback_sends_images_and_auto_approves(
+        self,
+        _mock_cfg,
+        _mock_channel,
+        mock_send_media,
+        mock_send_text,
+    ):
+        result = request_image_approval(self.entries, video_id="v001")
+        self.assertTrue(result.all_approved)
+        self.assertEqual(mock_send_media.call_count, len(self.entries))
+        mock_send_text.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

@@ -204,6 +204,7 @@ If you use Claude Code on this repo, enforce:
 ```bash
 python3 tools/test_telegram_path.py --kind gate
 python3 tools/test_telegram_path.py --kind summary
+python3 tools/test_telegram_path.py --media "/ABS/path/image1.png" --media "/ABS/path/image2.png"
 python3 tools/test_telegram_path.py --dry-run
 ```
 

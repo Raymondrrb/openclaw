@@ -32,6 +32,17 @@ import uuid
 # Telegram helpers (mirrored from telegram_gate.py — standalone)
 # ---------------------------------------------------------------------------
 
+_PLACEHOLDER_TOKENS = {
+    "summary",
+    "detail",
+    "details",
+    "test",
+    "todo",
+    "tbd",
+    "na",
+    "n/a",
+}
+
 def _bot_token() -> str:
     return os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -254,13 +265,14 @@ def request_approval(
         return True
 
     # Build message text
-    header = f"[Rayviews Lab] {summary}"
-    if video_id:
-        header = f"[Rayviews Lab] {summary}\n\nVideo: {video_id}"
+    normalized_summary = _normalize_summary(gate_name, summary)
+    normalized_details = _normalize_details(gate_name, details)
 
-    if isinstance(details, str):
-        details = [details]
-    body = "\n".join(details)
+    header = f"[Rayviews Lab] Gate {gate_name}: {normalized_summary}"
+    if video_id:
+        header = f"[Rayviews Lab] Gate {gate_name}: {normalized_summary}\n\nVideo: {video_id}"
+
+    body = "\n".join(normalized_details)
 
     text = f"{header}\n\n{body}"
 
@@ -305,3 +317,30 @@ def request_approval(
             return False
     finally:
         _restore_webhook(old_webhook)
+
+
+def _normalize_summary(gate_name: str, summary: str) -> str:
+    raw = str(summary or "").strip()
+    if not raw or raw.lower() in _PLACEHOLDER_TOKENS:
+        return f"Approval required for {gate_name}"
+    return raw
+
+
+def _normalize_details(gate_name: str, details: list[str] | str) -> list[str]:
+    if isinstance(details, str):
+        source = [details]
+    else:
+        source = list(details or [])
+
+    cleaned: list[str] = []
+    for line in source:
+        text = str(line or "").strip()
+        if not text:
+            continue
+        if text.lower() in _PLACEHOLDER_TOKENS:
+            continue
+        cleaned.append(text)
+
+    if cleaned:
+        return cleaned
+    return [f"Review gate payload '{gate_name}' before approving."]
