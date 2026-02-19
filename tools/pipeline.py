@@ -1182,6 +1182,16 @@ def cmd_assets(args) -> int:
         details=[f"Starting Dzine generation: {len(targets)} images"],
     )
 
+    # Backdrop prompts for product_faithful (BG Remove + Expand).
+    # These describe ONLY the background/scene — the product is preserved exactly.
+    _BACKDROP_PROMPTS = {
+        "hero": "Premium dark studio surface with subtle reflections, professional product photography lighting, clean gradient background, soft shadows",
+        "usage1": "Modern living room hardwood floor, clean home environment, soft natural window light, shallow depth of field background",
+        "usage2": "Bedroom wooden floor, cozy home setting, warm soft indoor light, blurred furniture in background",
+        "detail": "Clean white studio surface, soft even lighting from above, minimal neutral background, macro photography setup",
+        "mood": "Dramatic dark surface with volumetric light rays, atmospheric haze, cinematic color grading, moody studio environment",
+    }
+
     for i, (label, dest_path, params) in enumerate(targets):
         print(f"\nGenerating {label} ({i+1}/{len(targets)})...")
 
@@ -1193,23 +1203,56 @@ def cmd_assets(args) -> int:
             if rank in ref_images:
                 params["reference_image"] = str(ref_images[rank])
 
-        req = DzineRequest(**params)
-        req = build_prompts(req)
+        # Product variants with reference images → use product_faithful
+        # (BG Remove + Generative Expand: product stays pixel-perfect)
+        use_faithful = (not is_thumbnail
+                        and params.get("reference_image")
+                        and Path(params["reference_image"]).is_file())
 
-        # Save prompt to prompts dir
-        if is_thumbnail:
-            prompt_path = paths.thumbnail_prompt_path()
-        else:
+        if use_faithful:
+            from tools.lib.dzine_browser import generate_product_faithful
+            ref_path = params["reference_image"]
+            backdrop = _BACKDROP_PROMPTS.get(variant, _BACKDROP_PROMPTS["hero"])
+            aspect = "1:1" if variant == "detail" else "16:9"
+
+            # Save backdrop prompt
             prompt_path = paths.product_prompt_path(rank, variant)
-        prompt_path.parent.mkdir(parents=True, exist_ok=True)
-        prompt_path.write_text(req.prompt, encoding="utf-8")
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            prompt_path.write_text(f"[product_faithful] backdrop: {backdrop}", encoding="utf-8")
 
-        result = generate_image(req, output_path=dest_path)
+            result = generate_product_faithful(
+                ref_path,
+                output_path=dest_path,
+                backdrop_prompt=backdrop,
+                aspect=aspect,
+            )
 
-        if not result.success:
-            # Single retry
-            print(f"  Retry {label}...")
+            if not result.success:
+                print(f"  Retry {label} (faithful)...")
+                result = generate_product_faithful(
+                    ref_path,
+                    output_path=dest_path,
+                    backdrop_prompt=backdrop,
+                    aspect=aspect,
+                )
+        else:
+            req = DzineRequest(**params)
+            req = build_prompts(req)
+
+            # Save prompt to prompts dir
+            if is_thumbnail:
+                prompt_path = paths.thumbnail_prompt_path()
+            else:
+                prompt_path = paths.product_prompt_path(rank, variant)
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            prompt_path.write_text(req.prompt, encoding="utf-8")
+
             result = generate_image(req, output_path=dest_path)
+
+            if not result.success:
+                # Single retry
+                print(f"  Retry {label}...")
+                result = generate_image(req, output_path=dest_path)
 
         if result.success and dest_path.is_file() and dest_path.stat().st_size >= MIN_ASSET_SIZE:
             size_kb = dest_path.stat().st_size // 1024

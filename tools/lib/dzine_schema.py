@@ -432,8 +432,8 @@ MODEL_ROUTING: dict[str, dict[str, str]] = {
         "test": "Z-Image Turbo",          # 3-6s, for rapid prompt testing
     },
     "product": {
-        "primary": "Nano Banana Pro",     # best product fidelity
-        "fallback": "Seedream 4.5",
+        "primary": "Realistic Product",   # faithful product reproduction
+        "fallback": "Nano Banana Pro",
         "test": "Z-Image Turbo",
     },
     "background": {
@@ -456,24 +456,24 @@ MODEL_ROUTING: dict[str, dict[str, str]] = {
 # Per-variant model overrides (more specific than per-asset-type)
 VARIANT_MODEL_ROUTING: dict[str, dict[str, str]] = {
     "hero": {
-        "primary": "Nano Banana Pro",
-        "fallback": "Seedream 4.5",
+        "primary": "Realistic Product",
+        "fallback": "Nano Banana Pro",
     },
     "usage1": {
-        "primary": "Nano Banana Pro",
-        "fallback": "Seedream 4.5",
+        "primary": "Realistic Product",
+        "fallback": "Nano Banana Pro",
     },
     "usage2": {
-        "primary": "Nano Banana Pro",
-        "fallback": "Seedream 4.5",
+        "primary": "Realistic Product",
+        "fallback": "Nano Banana Pro",
     },
     "detail": {
-        "primary": "Nano Banana Pro",     # excellent for close-ups with text/detail
-        "fallback": "Seedream 4.5",
+        "primary": "Realistic Product",
+        "fallback": "Nano Banana Pro",
     },
     "mood": {
-        "primary": "Nano Banana Pro",
-        "fallback": "Seedream 4.5",
+        "primary": "Realistic Product",
+        "fallback": "Nano Banana Pro",
     },
 }
 

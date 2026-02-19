@@ -2152,7 +2152,8 @@ def generate_product_faithful(
         2. BG Remove — isolate product with transparent background
         3. Generative Expand — AI-generates backdrop around the real product
         4. Download best expand result
-        5. Export canvas as final PNG
+
+    Uses the shared session (same Playwright instance across calls).
 
     Args:
         product_image_path: Path to Amazon product photo (JPEG/PNG)
@@ -2163,7 +2164,7 @@ def generate_product_faithful(
 
     Returns GenerationResult with local_path on success.
     """
-    from tools.lib.brave_profile import connect_or_launch, log_action
+    from tools.lib.brave_profile import log_action
 
     log_action("dzine_product_faithful", f"image={Path(product_image_path).name}")
 
@@ -2171,24 +2172,24 @@ def generate_product_faithful(
         return GenerationResult(success=False, error=f"Product image not found: {product_image_path}")
 
     def _attempt():
+        global _session_pw, _session_browser, _session_context, _session_page, _session_should_close
         start = time.monotonic()
 
-        # Connect to browser
+        # Use shared session — reuses Playwright instance across calls
         try:
-            browser, context, should_close, pw = connect_or_launch(headless=False)
+            if _session_context is None:
+                from tools.lib.brave_profile import connect_or_launch
+                browser, context, should_close, pw = connect_or_launch(headless=False)
+                _session_pw = pw
+                _session_browser = browser
+                _session_context = context
+                _session_should_close = should_close
+            context = _session_context
         except RuntimeError as exc:
             return GenerationResult(success=False, error=str(exc))
 
         page = None
         try:
-            # Close existing Dzine tabs
-            for p in context.pages:
-                if "dzine.ai" in (p.url or ""):
-                    try:
-                        p.close()
-                    except Exception:
-                        pass
-
             # Step 1: Create project from product image
             print("[dzine] Creating project from product image...", file=sys.stderr)
             page, canvas_url = _create_project_from_image(context, product_image_path)
@@ -2255,7 +2256,12 @@ def generate_product_faithful(
                 success=False, duration_s=time.monotonic() - start, error=str(exc),
             )
         finally:
-            _safe_cleanup(page, context, should_close, pw)
+            # Only close the project page, not the shared session
+            if page:
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
     return _with_retry(_attempt, label="product_faithful")
 

@@ -299,17 +299,17 @@ class TestModelRouting(unittest.TestCase):
     def test_thumbnail_default_is_nano_banana(self):
         self.assertEqual(recommended_model("thumbnail"), "Nano Banana Pro")
 
-    def test_product_default_is_nano_banana(self):
-        self.assertEqual(recommended_model("product"), "Nano Banana Pro")
+    def test_product_default_is_realistic(self):
+        self.assertEqual(recommended_model("product"), "Realistic Product")
 
     def test_background_is_nano_banana(self):
         self.assertEqual(recommended_model("background"), "Nano Banana Pro")
 
-    def test_detail_variant_is_nano_banana(self):
-        self.assertEqual(recommended_model("product", variant="detail"), "Nano Banana Pro")
+    def test_detail_variant_is_realistic(self):
+        self.assertEqual(recommended_model("product", variant="detail"), "Realistic Product")
 
-    def test_hero_variant_is_nano_banana(self):
-        self.assertEqual(recommended_model("product", variant="hero"), "Nano Banana Pro")
+    def test_hero_variant_is_realistic(self):
+        self.assertEqual(recommended_model("product", variant="hero"), "Realistic Product")
 
     def test_testing_mode_returns_turbo(self):
         self.assertEqual(recommended_model("thumbnail", testing=True), "Z-Image Turbo")
