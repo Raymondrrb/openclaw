@@ -27,9 +27,10 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from rayvault.io import atomic_write_json, read_json, utc_now_iso
 
 # ---------------------------------------------------------------------------
 # Trigger patterns (high-risk commercial claims)
@@ -72,28 +73,8 @@ CLAIM_EVIDENCE_RULES: List[Tuple[str, List[str]]] = [
 # ---------------------------------------------------------------------------
 
 
-def read_json(path: Path) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def normalize_text(s: str) -> str:
-    return re.sub(r"\s+", " ", s.lower()).strip()
+    return re.sub(r"\s+", " ", (s or "").lower()).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +85,12 @@ def normalize_text(s: str) -> str:
 def load_products(products_json: Path) -> List[Dict[str, Any]]:
     data = read_json(products_json)
     items = data.get("items", [])
-    return sorted(items, key=lambda x: int(x.get("rank", 99)))
+    def _rank(x: Dict[str, Any]) -> int:
+        try:
+            return int(x.get("rank", 99))
+        except (ValueError, TypeError):
+            return 99
+    return sorted(items, key=_rank)
 
 
 def collect_allowed_text(product: Dict[str, Any]) -> str:

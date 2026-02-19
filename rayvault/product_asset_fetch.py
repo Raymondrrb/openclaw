@@ -35,7 +35,6 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -48,31 +47,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+from rayvault.io import atomic_write_json, read_json, sha1_file
+
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
-
-
-def read_json(path: Path) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
-
-
-def sha1_file(path: Path) -> str:
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def safe_ext_from_url(url: str, default: str = ".jpg") -> str:
@@ -408,7 +387,10 @@ def run_product_fetch(
     products_summary: List[Dict[str, Any]] = []
 
     for it in items:
-        rank = int(it.get("rank", 0) or 0)
+        try:
+            rank = int(it.get("rank", 0) or 0)
+        except (ValueError, TypeError):
+            rank = 0
         if rank <= 0:
             rank = len(products_summary) + 1
 

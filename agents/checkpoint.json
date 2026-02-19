@@ -1,0 +1,42 @@
+{
+  "goal": "Cost-efficient production-focused Dzine automation for RayviewsLab",
+  "last_completed_step": "Task 2 — Stability: created ExploreGuard wrapper to cap screenshots/DOM dumps",
+  "next_step": "Ready for production runs. Use dzine_quickstart_rayviewslab.md as the canonical reference.",
+  "files_changed": [
+    {
+      "file": "agents/dzine_quickstart_rayviewslab.md",
+      "action": "created",
+      "description": "Compact canonical guide (<2 pages) with 3 production workflows, model choice, camera settings, prompt templates, export settings"
+    },
+    {
+      "file": "agents/dzine_actions.json",
+      "action": "created",
+      "description": "Minimal action map: 6 actions (close_dialogs, product_faithful, product_video, ray_avatar, download_result, export_canvas) with selectors and success criteria"
+    },
+    {
+      "file": "agents/checkpoint.json",
+      "action": "created",
+      "description": "This file — tracks progress"
+    },
+    {
+      "file": "tools/lib/explore_guard.py",
+      "action": "created",
+      "description": "ExploreGuard class: caps screenshots (default 10), observations (50), DOM elements (40). Writes full data to /tmp files, prints only compact summaries to stdout. Prevents context window overflow."
+    }
+  ],
+  "source_docs_consumed": [
+    "agents/dzine_ui_map.md (70KB — 1517 lines)",
+    "agents/dzine_models_guide.md (20KB — 448 lines)",
+    "agents/dzine_workspace_guide.md (15KB — 412 lines)",
+    "agents/dzine_sop.md (35KB — 651 lines)",
+    "agents/dzine_playbook.md (111KB — 1000+ lines)"
+  ],
+  "rules": {
+    "max_actions_per_run": 3,
+    "no_exploration": true,
+    "prefer_local_docs": true,
+    "checkpoint_after_each_action": true,
+    "max_bullets_per_response": 15
+  },
+  "timestamp": "2026-02-13T17:55:00Z"
+}

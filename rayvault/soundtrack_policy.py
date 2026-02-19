@@ -22,7 +22,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -490,10 +489,5 @@ def write_decision_to_manifest(manifest_path: Path, decision: SoundtrackDecision
     audio = manifest.setdefault("audio", {})
     audio["soundtrack"] = decision.to_dict()
 
-    tmp = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, manifest_path)
+    from rayvault.io import atomic_write_json
+    atomic_write_json(manifest_path, manifest)

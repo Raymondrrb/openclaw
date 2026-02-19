@@ -30,6 +30,7 @@ Each node is one complete thought. Follow [[wikilinks]] to go deeper.
 - [[dzine/product-background]] is the correct tool for scene variation, NOT [[dzine/generative-expand]] which only extends canvas uniformly
 - Prompt quality depends on tool choice — [[prompts/tool-prompt-matrix]] maps which prompts work with which tools
 - The [[pipeline/product-faithful]] workflow must select the best of 4 results, not blindly take the first — see [[learnings/2026-02-19-identical-images]]
+- Runtime stability is part of quality: enforce [[pipeline/openclaw-stability-guardrails]] before long browser-driven runs
 
 ## Auto-Improvement Protocol
 

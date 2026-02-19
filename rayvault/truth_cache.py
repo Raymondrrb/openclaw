@@ -36,42 +36,16 @@ import os
 import shutil
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from rayvault.io import atomic_write_json, read_json, sha1_file, utc_now_iso
 
 
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def read_json(path: Path) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-
-def sha1_file(path: Path) -> str:
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -506,8 +480,12 @@ class TruthCache:
         dest = self.approved_broll_path(asin)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(".tmp")
-        shutil.copy2(str(source_mp4), str(tmp))
-        os.replace(tmp, dest)
+        try:
+            shutil.copy2(str(source_mp4), str(tmp))
+            os.replace(tmp, dest)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
         return True
 
     # --- Survival mode ---

@@ -32,14 +32,14 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from rayvault.io import atomic_write_json, read_json, sha1_file, utc_now_iso
 
 
 # ---------------------------------------------------------------------------
@@ -76,34 +76,6 @@ DISPLAY_LINK_PLUS_QR = "LINK_PLUS_QR"
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def read_json(path: Path) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-
-def sha1_file(path: Path) -> str:
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def truncate_text(text: str, max_chars: int) -> str:
@@ -179,6 +151,8 @@ def _has_pyzbar() -> bool:
 
 def _canon_url(url: str) -> str:
     """Canonicalize URL for comparison: strip whitespace + trailing slash."""
+    if not url:
+        return ""
     url = url.strip()
     if url.endswith("/"):
         url = url[:-1]

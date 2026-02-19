@@ -165,17 +165,6 @@ BUS_MASTER_NAME = "BUS_MASTER"
 # Conform cache
 CONFORM_CACHE_DIR = "state/cache/conformed_tracks"
 
-# ---------------------------------------------------------------------------
-# Learning loop
-# ---------------------------------------------------------------------------
-
-LEARNING_GATE_ENABLED = True
-LEARNING_REVISIT_INTERVAL_DAYS = 7
-LEARNING_ARCHIVE_RETENTION_DAYS = 90
-LEARNING_MAX_ACTIVE_RULES_PER_AGENT = 50
-LEARNING_PROMOTION_THRESHOLD_OCCURRENCES = 2
-LEARNING_TOMBSTONE_GRACE_DAYS = 30
-
 MOTION_GROUPS = {
     "zoom_in": {"zoom_in_center", "slow_push_in", "push_in"},
     "zoom_out": {"zoom_out_center", "pull_out"},

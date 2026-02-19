@@ -14,6 +14,11 @@ How the RayviewsLab video production pipeline works.
 - [[product-faithful]] — Current workflow for product images. Uses BG Remove + Generative Expand (NEEDS MIGRATION to Product Background).
 - [[asset-quality-gate]] — How generated assets are validated (size, format, fidelity).
 
+## Runtime Reliability
+
+- [[openclaw-stability-guardrails]] — Prevent and recover OpenClaw process storms on Mac.
+- [[claude-code-execution-contract]] — Prompt contract to keep Claude Code within safe execution patterns.
+
 ## Key Architecture
 
 - Pipeline entry: `tools/pipeline.py` function `cmd_assets()`
@@ -33,3 +38,4 @@ How the RayviewsLab video production pipeline works.
 2. Implement best-of-4 selection (currently takes first result)
 3. Two-step workflow: Product Background → Img2Img for creative variants
 4. Auto-improvement loop to update prompts based on results
+5. Add preflight check in orchestrator to run process pressure check before ChatGPT UI automation

@@ -350,7 +350,7 @@ def main(argv: Optional[list] = None) -> int:
         return 1
 
     try:
-        with open(config_path, "r") as f:
+        with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
     except Exception as e:
         print(f"Failed to parse config: {e}", file=sys.stderr)

@@ -1,2733 +1,4682 @@
 #!/usr/bin/env python3
-"""Production pipeline orchestrator for Rayviews YouTube channel.
+"""
+RayViewsLab — File-driven E2E video production pipeline.
 
-Wraps all individual tools behind repeatable subcommands with validation,
-resumability, and Telegram notifications.
+Each step writes artifacts to pipeline_runs/{run_id}/.
+The next step reads them. No agents calling agents.
+OpenClaw only triggers commands. Quality > speed.
 
-Recommended daily flow:
-    python3 tools/pipeline.py day --video-id <id> [--niche "<niche>"]
-      (runs init → research → script-brief, then stops for human)
-
-    ... human writes script_raw.txt from the brief ...
-
-    python3 tools/pipeline.py script-review --video-id <id>
-    python3 tools/pipeline.py assets --video-id <id> [--force] [--dry-run]
-    python3 tools/pipeline.py tts --video-id <id> [--force] [--patch N ...]
-    python3 tools/pipeline.py manifest --video-id <id>
-
-Individual commands:
-    python3 tools/pipeline.py init --video-id <id> --niche "<niche>"
-    python3 tools/pipeline.py research --video-id <id>
-    python3 tools/pipeline.py script-brief --video-id <id>
-    python3 tools/pipeline.py script --video-id <id> [--charismatic ...]
-    python3 tools/pipeline.py status --video-id <id> | --all
-
-Exit codes: 0=ok, 1=error, 2=action_required
-
-Stdlib only (except Playwright which is imported lazily by dzine_browser).
+Usage:
+    python3 tools/pipeline.py init-run --category desk_gadgets
+    python3 tools/pipeline.py discover-products --run-id RUN_ID
+    python3 tools/pipeline.py generate-script --run-id RUN_ID
+    python3 tools/pipeline.py approve-gate1 --run-id RUN_ID --reviewer Ray --notes "GO"
+    python3 tools/pipeline.py generate-assets --run-id RUN_ID
+    python3 tools/pipeline.py generate-voice --run-id RUN_ID
+    python3 tools/pipeline.py build-davinci --run-id RUN_ID
+    python3 tools/pipeline.py validate-originality --run-id RUN_ID
+    python3 tools/pipeline.py validate-compliance --run-id RUN_ID
+    python3 tools/pipeline.py approve-gate2 --run-id RUN_ID --reviewer Ray --notes "GO"
+    python3 tools/pipeline.py render-and-upload --run-id RUN_ID
+    python3 tools/pipeline.py collect-metrics --run-id RUN_ID
+    python3 tools/pipeline.py run-e2e --category desk_gadgets
+    python3 tools/pipeline.py status --run-id RUN_ID
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import datetime as dt
+import hashlib
 import json
+import logging
+import os
 import re
+import shutil
+import subprocess
 import sys
+import threading
+import time
+import uuid
 from pathlib import Path
-
-# Ensure repo root is on sys.path
-_repo = Path(__file__).resolve().parent.parent
-if str(_repo) not in sys.path:
-    sys.path.insert(0, str(_repo))
-
-from tools.lib.common import load_env_file, now_iso, project_root
-from tools.lib.error_log import log_error as _log_error
-from tools.lib.video_paths import VIDEOS_BASE, VideoPaths
-
-# Load .env early so all tools see credentials
-load_env_file()
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlparse, urlunparse
+from urllib.request import Request, urlopen
 
 # ---------------------------------------------------------------------------
-# Exit codes
+# Paths
 # ---------------------------------------------------------------------------
+BASE_DIR = Path(os.environ.get("PROJECT_ROOT", Path(__file__).resolve().parent.parent))
+RUNS_DIR = BASE_DIR / "pipeline_runs"
+CONFIG_DIR = Path(os.path.expanduser("~/.config/newproject"))
+
+DAILY_CATEGORIES = BASE_DIR / "config" / "daily_categories.json"
+
+CHANNEL_NAME = "RayViewsLab"
+DEFAULT_VOICE = "Thomas Louis"
+DEFAULT_AFFILIATE_TAG = ""  # Set when tag is configured
+SCHEMA_VERSION = "1.0.0"
+DISCLOSURE_INTRO_SHORT = "As an Amazon Associate I earn from qualifying purchases."
+MINIMAX_ENV = CONFIG_DIR / "minimax.env"
+ELEVENLABS_ENV = CONFIG_DIR / "elevenlabs.env"
+SCHEMAS_DIR = BASE_DIR / "schemas"
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_ACTION_REQUIRED = 2
+
+STEP_CONTRACTS: Dict[str, Dict[str, Any]] = {
+    "init-run": {
+        "inputs": [],
+        "outputs": ["run.json"],
+    },
+    "discover-products": {
+        "inputs": ["run.json"],
+        "outputs": ["products.json", "products.csv", "discovery_receipt.json"],
+    },
+    "plan-variations": {
+        "inputs": ["run.json", "products.json"],
+        "outputs": ["variation_plan.json"],
+    },
+    "generate-script": {
+        "inputs": ["run.json", "products.json"],
+        "outputs": ["script.json", "security/input_guard_report.json"],
+    },
+    "generate-assets": {
+        "inputs": ["run.json", "script.json", "products.json"],
+        "outputs": ["assets_manifest.json"],
+    },
+    "generate-voice": {
+        "inputs": ["run.json", "script.json"],
+        "outputs": ["voice/timestamps.json", "voice/full_narration.txt"],
+    },
+    "build-davinci": {
+        "inputs": ["run.json", "script.json", "assets_manifest.json", "voice/timestamps.json"],
+        "outputs": ["davinci/project.json"],
+    },
+    "convert-to-rayvault": {
+        "inputs": ["run.json", "script.json", "products.json"],
+        "outputs": ["rayvault/05_render_config.json", "rayvault/00_manifest.json"],
+    },
+    "validate-originality": {
+        "inputs": ["run.json", "script.json", "products.json"],
+        "outputs": ["originality_report.json"],
+    },
+    "validate-compliance": {
+        "inputs": ["run.json", "script.json", "products.json", "assets_manifest.json", "rayvault/00_manifest.json"],
+        "outputs": ["compliance_report.json", "upload/disclosure_snippets.json", "upload/pinned_comment.txt"],
+    },
+    "render-and-upload": {
+        "inputs": ["run.json", "davinci/render_ready.flag", "davinci/project.json"],
+        "outputs": ["upload/youtube_url.txt", "upload/youtube_video_id.txt"],
+    },
+    "collect-metrics": {
+        "inputs": ["run.json", "upload/youtube_video_id.txt"],
+        "outputs": ["metrics/metrics.json"],
+    },
+    "approve-gate1": {
+        "inputs": ["run.json"],
+        "outputs": ["run.json"],
+    },
+    "reject-gate1": {
+        "inputs": ["run.json"],
+        "outputs": ["run.json"],
+    },
+    "approve-gate2": {
+        "inputs": ["run.json"],
+        "outputs": ["run.json"],
+    },
+    "reject-gate2": {
+        "inputs": ["run.json"],
+        "outputs": ["run.json"],
+    },
+}
+
+STEP_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
+    # DaVinci stages are pinned to the Mac controller by policy.
+    "build-davinci": {"os_in": ["darwin"], "davinci_available": True},
+    "render-and-upload": {"os_in": ["darwin"], "davinci_available": True},
+}
+
+# Local imports for script execution from project root.
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+# Supabase env from shared library
+from video_pipeline_lib import supabase_env  # noqa: E402
+from lib.contract_runtime import (
+    build_receipt,
+    collect_file_hashes,
+    sha1_json,
+    validate_schema,
+    write_jsonl,
+)  # noqa: E402
+from lib.injection_guard import (  # noqa: E402
+    sanitize_external_text,
+    scan_product_inputs,
+    should_block_generation,
+)
+from lib.ops_tier import decide_ops_tier, decision_to_dict, detect_ops_paused  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+def setup_logger(run_dir: Path, step_name: str) -> logging.Logger:
+    log_dir = run_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger(f"pipeline.{step_name}")
+    logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        fh = logging.FileHandler(log_dir / f"{step_name}.log", encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(fh)
+        sh = logging.StreamHandler()
+        sh.setLevel(logging.INFO)
+        sh.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+        logger.addHandler(sh)
+    return logger
+
+
+# ---------------------------------------------------------------------------
+# Atomic file writes
+# ---------------------------------------------------------------------------
+
+def atomic_write_json(path: Path, data: Any) -> Path:
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    return path
+
+
+def atomic_write_text(path: Path, text: str) -> Path:
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Supabase ops events
+# ---------------------------------------------------------------------------
+
+
+# supabase_env() imported from video_pipeline_lib (single source of truth)
+
+
+def log_ops_event(run_id: str, kind: str, data: Optional[Dict] = None) -> bool:
+    sb_url, sb_key = supabase_env()
+    if not sb_url or not sb_key:
+        return False
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    event_hash = hashlib.sha256(
+        f"{run_id}:{kind}:{now_iso}:{uuid.uuid4().hex}".encode("utf-8")
+    ).hexdigest()[:48]
+    row = {
+        "event_hash": event_hash,
+        "ts": now_iso,
+        "type": kind,
+        "message": f"{kind} ({run_id})",
+        "data": {
+            "run_id": run_id,
+            **(data or {}),
+        },
+    }
+    try:
+        req = Request(
+            f"{sb_url.rstrip('/')}/rest/v1/ops_agent_events",
+            method="POST",
+            data=json.dumps([row]).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "apikey": sb_key,
+                "Authorization": f"Bearer {sb_key}",
+                "Prefer": "return=minimal",
+            },
+        )
+        with urlopen(req, timeout=10) as resp:
+            resp.read()
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Contract-first runtime helpers
+# ---------------------------------------------------------------------------
+
+
+def _schema_file(name: str) -> Path:
+    return SCHEMAS_DIR / name
+
+
+def _safe_step_name(step_name: str) -> str:
+    return re.sub(r"[^a-z0-9_\\-]+", "_", step_name.lower()).strip("_")
+
+
+def _receipt_path(run_dir: Path, step_name: str) -> Path:
+    return run_dir / "receipts" / f"{_safe_step_name(step_name)}.json"
+
+
+def _jsonl_log_path(run_dir: Path, step_name: str) -> Path:
+    return run_dir / "logs" / f"{_safe_step_name(step_name)}.jsonl"
+
+
+def _redact_sensitive(args_dict: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key, value in args_dict.items():
+        k = str(key).lower()
+        if any(s in k for s in ("secret", "token", "password", "api_key", "key")):
+            out[key] = "***REDACTED***" if value else ""
+        else:
+            out[key] = value
+    return out
+
+
+def _args_snapshot(args: argparse.Namespace) -> Dict[str, Any]:
+    raw = {}
+    for key, value in vars(args).items():
+        if key == "func":
+            continue
+        if isinstance(value, Path):
+            raw[key] = str(value)
+        else:
+            raw[key] = value
+    return _redact_sensitive(raw)
+
+
+def _read_json(path: Path) -> Dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _validate_run_file(run_dir: Path, context: str) -> None:
+    run_json = run_dir / "run.json"
+    if not run_json.exists():
+        raise RuntimeError(f"{context}: missing run.json")
+    data = _read_json(run_json)
+    validate_schema(
+        schema_path=_schema_file("run.schema.json"),
+        data=data,
+        context=f"{context} run.schema.json",
+    )
+
+
+def _required_files_exist(run_dir: Path, required_files: List[str]) -> None:
+    missing = [rel for rel in required_files if not (run_dir / rel).exists()]
+    if missing:
+        raise RuntimeError(f"Missing required input files: {', '.join(missing)}")
+
+
+def _build_job_contract(
+    *,
+    run_id: str,
+    step_name: str,
+    command_name: str,
+    args: argparse.Namespace,
+    required_files: List[str],
+    file_hashes: Dict[str, str],
+    requirements: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    job = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "step_name": step_name,
+        "command": command_name,
+        "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "inputs": {
+            "args": _args_snapshot(args),
+            "required_files": required_files,
+            "file_digests": file_hashes,
+        },
+        "requirements": requirements or {},
+        "distributed": {
+            "controller_node": os.environ.get("RAYVAULT_CONTROLLER_ID", "mac-controller"),
+            "preferred_worker": os.environ.get("RAYVAULT_WORKER_ID", ""),
+        },
+    }
+    validate_schema(
+        schema_path=_schema_file("job.schema.json"),
+        data=job,
+        context=f"{step_name} job.schema.json",
+    )
+    return job
+
+
+def _step_requirements(command_name: str, args: argparse.Namespace) -> Dict[str, Any]:
+    req = dict(STEP_REQUIREMENTS.get(command_name, {}))
+    # Optional CLI/env override for distributed scheduling experiments.
+    raw = str(getattr(args, "requirements_json", "") or os.environ.get("PIPELINE_REQUIREMENTS_JSON", "")).strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                req.update(parsed)
+        except Exception:
+            pass
+    return req
+
+
+def _hash_step_inputs(
+    *,
+    job: Dict[str, Any],
+    tool_versions_hint: Optional[Dict[str, str]] = None,
+) -> str:
+    payload = {
+        "job": job,
+        "tool_versions_hint": tool_versions_hint or {"python": sys.version.split()[0]},
+    }
+    return sha1_json(payload)
+
+
+def _hash_step_outputs(run_dir: Path, output_files: List[str]) -> Tuple[str, Dict[str, str]]:
+    file_hashes, aggregate = collect_file_hashes(run_dir, output_files)
+    return aggregate, file_hashes
+
+
+def _receipt_is_reusable(
+    *,
+    run_dir: Path,
+    step_name: str,
+    inputs_hash: str,
+    output_files: List[str],
+) -> bool:
+    receipt_path = _receipt_path(run_dir, step_name)
+    if not receipt_path.exists():
+        return False
+    try:
+        receipt = _read_json(receipt_path)
+    except Exception:
+        return False
+    if receipt.get("status") != "OK":
+        return False
+    if receipt.get("inputs_hash") != inputs_hash:
+        return False
+    if any(not (run_dir / rel).exists() for rel in output_files):
+        return False
+    return True
+
+
+def _artifact_pointers(run_dir: Path, output_files: List[str]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for rel in output_files:
+        p = run_dir / rel
+        if p.exists() and p.is_file():
+            out.append(
+                {
+                    "path": rel,
+                    "sha1": hashlib.sha1(p.read_bytes()).hexdigest(),
+                    "size_bytes": p.stat().st_size,
+                }
+            )
+    return out
+
+
+def _write_receipt_and_validate(run_dir: Path, step_name: str, receipt: Dict[str, Any]) -> None:
+    validate_schema(
+        schema_path=_schema_file("receipt.schema.json"),
+        data=receipt,
+        context=f"{step_name} receipt.schema.json",
+    )
+    path = _receipt_path(run_dir, step_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, receipt)
+
+
+def _refresh_run_summary(run_dir: Path) -> None:
+    receipts_dir = run_dir / "receipts"
+    rows: List[Dict[str, Any]] = []
+    if receipts_dir.exists():
+        for p in sorted(receipts_dir.glob("*.json")):
+            try:
+                rows.append(_read_json(p))
+            except Exception:
+                continue
+    summary = {
+        "run_id": run_dir.name,
+        "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "steps": [
+            {
+                "step_name": r.get("step_name"),
+                "status": r.get("status"),
+                "ok": r.get("ok"),
+                "exit_code": r.get("exit_code"),
+                "duration_ms": ((r.get("timings") or {}).get("duration_ms")),
+            }
+            for r in rows
+        ],
+        "totals": {
+            "steps": len(rows),
+            "ok": sum(1 for r in rows if r.get("status") == "OK"),
+            "warn": sum(1 for r in rows if r.get("status") == "WARN"),
+            "fail": sum(1 for r in rows if r.get("status") == "FAIL"),
+        },
+    }
+    atomic_write_json(run_dir / "run_summary.json", summary)
+
+
+def _sb_request(
+    *,
+    method: str,
+    url: str,
+    key: str,
+    body: Optional[Dict[str, Any]] = None,
+    extra_headers: Optional[Dict[str, str]] = None,
+) -> Any:
+    payload = None
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+    }
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        payload = json.dumps(body).encode("utf-8")
+    if extra_headers:
+        headers.update({k: v for k, v in extra_headers.items() if v})
+    req = Request(url, method=method, data=payload, headers=headers)
+    with urlopen(req, timeout=10) as resp:
+        text = resp.read().decode("utf-8")
+        return json.loads(text) if text.strip() else None
+
+
+def _acquire_supabase_step_lock(run_id: str, step_name: str, ttl_sec: int = 1800) -> Optional[Dict[str, str]]:
+    sb_url, sb_key = supabase_env()
+    if not sb_url or not sb_key:
+        return None
+    base = sb_url.rstrip("/")
+    now = dt.datetime.now(dt.timezone.utc)
+    now_iso = now.isoformat()
+    expires_iso = (now + dt.timedelta(seconds=max(60, ttl_sec))).isoformat()
+    owner = f"{os.uname().nodename}:{os.getpid()}"
+    token = uuid.uuid4().hex
+    row = {
+        "run_id": run_id,
+        "step_name": step_name,
+        "owner": owner,
+        "lock_token": token,
+        "locked_at": now_iso,
+        "expires_at": expires_iso,
+        "heartbeat_at": now_iso,
+    }
+    run_q = quote(run_id, safe="")
+    step_q = quote(step_name, safe="")
+    insert_url = f"{base}/rest/v1/ops_step_locks?on_conflict=run_id,step_name"
+    try:
+        inserted = _sb_request(
+            method="POST",
+            url=insert_url,
+            key=sb_key,
+            body=row,
+            extra_headers={"Prefer": "resolution=ignore-duplicates,return=representation"},
+        ) or []
+        if isinstance(inserted, list) and inserted and inserted[0].get("lock_token") == token:
+            return {"run_id": run_id, "step_name": step_name, "token": token}
+        # Confirm ownership if row already existed but we inserted anyway.
+        check_url = (
+            f"{base}/rest/v1/ops_step_locks"
+            f"?select=run_id,step_name,owner,lock_token,expires_at"
+            f"&run_id=eq.{run_q}&step_name=eq.{step_q}&limit=1"
+        )
+        rows = _sb_request(method="GET", url=check_url, key=sb_key) or []
+        if rows and rows[0].get("lock_token") == token:
+            return {"run_id": run_id, "step_name": step_name, "token": token}
+    except Exception:
+        # handled below (stale recovery path)
+        rows = []
+
+    # Recovery path: take stale lock
+    try:
+        patch_url = (
+            f"{base}/rest/v1/ops_step_locks"
+            f"?run_id=eq.{run_q}&step_name=eq.{step_q}"
+            f"&or=(expires_at.lt.{quote(now_iso, safe='')},owner.eq.{quote(owner, safe='')})"
+        )
+        updated = _sb_request(
+            method="PATCH",
+            url=patch_url,
+            key=sb_key,
+            body=row,
+            extra_headers={"Prefer": "return=representation"},
+        ) or []
+        if isinstance(updated, list) and updated and updated[0].get("lock_token") == token:
+            return {"run_id": run_id, "step_name": step_name, "token": token}
+        check_url = (
+            f"{base}/rest/v1/ops_step_locks"
+            f"?select=lock_token"
+            f"&run_id=eq.{run_q}&step_name=eq.{step_q}&limit=1"
+        )
+        rows = _sb_request(method="GET", url=check_url, key=sb_key) or []
+        if rows and rows[0].get("lock_token") == token:
+            return {"run_id": run_id, "step_name": step_name, "token": token}
+    except Exception as exc:
+        strict = str(os.environ.get("PIPELINE_REQUIRE_DISTRIBUTED_LOCK", "0")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if strict:
+            raise RuntimeError(
+                "Unable to acquire distributed lock. Ensure Supabase table public.ops_step_locks exists "
+                f"(run_id={run_id}, step_name={step_name}): {exc}"
+            ) from exc
+        print(
+            f"[WARN] distributed lock unavailable for {run_id}:{step_name}; continuing without Supabase lock ({exc})",
+            file=sys.stderr,
+        )
+        return None
+    raise RuntimeError(
+        f"Unable to acquire distributed lock for {run_id}:{step_name} "
+        "(active lock held by another worker)"
+    )
+
+
+def _release_supabase_step_lock(lock_ctx: Optional[Dict[str, str]]) -> None:
+    if not lock_ctx:
+        return
+    sb_url, sb_key = supabase_env()
+    if not sb_url or not sb_key:
+        return
+    base = sb_url.rstrip("/")
+    run_id = lock_ctx.get("run_id", "")
+    step_name = lock_ctx.get("step_name", "")
+    token = lock_ctx.get("token", "")
+    if not run_id or not step_name or not token:
+        return
+    url = (
+        f"{base}/rest/v1/ops_step_locks"
+        f"?run_id=eq.{quote(run_id, safe='')}&step_name=eq.{quote(step_name, safe='')}&lock_token=eq.{quote(token, safe='')}"
+    )
+    try:
+        _sb_request(method="DELETE", url=url, key=sb_key)
+    except Exception:
+        pass
+
+
+def _heartbeat_supabase_step_lock(lock_ctx: Optional[Dict[str, str]], ttl_sec: int = 1800) -> None:
+    if not lock_ctx:
+        return
+    sb_url, sb_key = supabase_env()
+    if not sb_url or not sb_key:
+        return
+    run_id = lock_ctx.get("run_id", "")
+    step_name = lock_ctx.get("step_name", "")
+    token = lock_ctx.get("token", "")
+    if not run_id or not step_name or not token:
+        return
+    now = dt.datetime.now(dt.timezone.utc)
+    payload = {
+        "heartbeat_at": now.isoformat(),
+        "expires_at": (now + dt.timedelta(seconds=max(60, ttl_sec))).isoformat(),
+    }
+    base = sb_url.rstrip("/")
+    url = (
+        f"{base}/rest/v1/ops_step_locks"
+        f"?run_id=eq.{quote(run_id, safe='')}"
+        f"&step_name=eq.{quote(step_name, safe='')}"
+        f"&lock_token=eq.{quote(token, safe='')}"
+    )
+    try:
+        _sb_request(method="PATCH", url=url, key=sb_key, body=payload)
+    except Exception:
+        # Heartbeat failure should not crash the step; stale lock recovery handles this.
+        pass
+
+
+def _run_with_contract(command_name: str, args: argparse.Namespace, fn) -> None:
+    contract = STEP_CONTRACTS.get(command_name)
+    if not contract:
+        fn(args)
+        return
+
+    # Resolve run context.
+    if command_name == "init-run":
+        if not args.run_id:
+            args.run_id = generate_run_id(args.category)
+        run_id = args.run_id
+        run_dir = get_run_dir(run_id)
+    else:
+        run_dir, run_id, _ = load_run(args)
+        _validate_run_file(run_dir, f"{command_name}:pre")
+
+    required_files = list(contract.get("inputs", []))
+    output_files = list(contract.get("outputs", []))
+    if required_files:
+        _required_files_exist(run_dir, required_files)
+    input_file_hashes, _ = collect_file_hashes(run_dir, required_files)
+    job = _build_job_contract(
+        run_id=run_id,
+        step_name=command_name,
+        command_name=command_name,
+        args=args,
+        required_files=required_files,
+        file_hashes=input_file_hashes,
+        requirements=_step_requirements(command_name, args),
+    )
+    inputs_hash = _hash_step_inputs(job=job)
+
+    # Idempotent skip by receipt.
+    if not args.force and _receipt_is_reusable(
+        run_dir=run_dir,
+        step_name=command_name,
+        inputs_hash=inputs_hash,
+        output_files=output_files,
+    ):
+        now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+        now_mono = time.monotonic()
+        receipt = build_receipt(
+            schema_version=SCHEMA_VERSION,
+            run_id=run_id,
+            step_name=command_name,
+            ok=True,
+            status="OK",
+            exit_code=0,
+            inputs_hash=inputs_hash,
+            outputs_hash=sha1_json({"skipped": True}),
+            started_monotonic=now_mono,
+            finished_monotonic=now_mono,
+            started_at=now_iso,
+            finished_at=now_iso,
+            artifacts=_artifact_pointers(run_dir, output_files),
+            idempotent_skip=True,
+        )
+        _write_receipt_and_validate(run_dir, command_name, receipt)
+        write_jsonl(
+            _jsonl_log_path(run_dir, command_name),
+            {
+                "event": "step_skip_idempotent",
+                "run_id": run_id,
+                "step_name": command_name,
+                "inputs_hash": inputs_hash,
+            },
+        )
+        _refresh_run_summary(run_dir)
+        log_ops_event(run_id, "step_skip_idempotent", {"step_name": command_name, "inputs_hash": inputs_hash})
+        print(f"[SKIP] {command_name} idempotent (inputs_hash unchanged)")
+        return
+
+    try:
+        lock_ttl = int(os.environ.get("PIPELINE_STEP_LOCK_TTL_SEC", "1800") or 1800)
+    except (ValueError, TypeError):
+        lock_ttl = 1800
+    lock_ctx = _acquire_supabase_step_lock(run_id, command_name, ttl_sec=lock_ttl)
+    hb_stop = threading.Event()
+    hb_thread: Optional[threading.Thread] = None
+    if lock_ctx:
+        hb_interval = max(30, min(300, lock_ttl // 3))
+
+        def _heartbeat_loop():
+            while not hb_stop.wait(hb_interval):
+                _heartbeat_supabase_step_lock(lock_ctx, ttl_sec=lock_ttl)
+
+        hb_thread = threading.Thread(
+            target=_heartbeat_loop,
+            name=f"step-lock-heartbeat:{run_id}:{command_name}",
+            daemon=True,
+        )
+        hb_thread.start()
+
+    started_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    started_monotonic = time.monotonic()
+    log_ops_event(run_id, "step_start", {"step_name": command_name, "inputs_hash": inputs_hash})
+    write_jsonl(
+        _jsonl_log_path(run_dir, command_name),
+        {
+            "event": "step_start",
+            "run_id": run_id,
+            "step_name": command_name,
+            "inputs_hash": inputs_hash,
+            "required_files": required_files,
+        },
+    )
+    try:
+        fn(args)
+        if output_files:
+            _required_files_exist(run_dir, output_files)
+        outputs_hash, _ = _hash_step_outputs(run_dir, output_files)
+        if (run_dir / "run.json").exists():
+            _validate_run_file(run_dir, f"{command_name}:post")
+        finished_monotonic = time.monotonic()
+        finished_at = dt.datetime.now(dt.timezone.utc).isoformat()
+        receipt = build_receipt(
+            schema_version=SCHEMA_VERSION,
+            run_id=run_id,
+            step_name=command_name,
+            ok=True,
+            status="OK",
+            exit_code=0,
+            inputs_hash=inputs_hash,
+            outputs_hash=outputs_hash,
+            started_monotonic=started_monotonic,
+            finished_monotonic=finished_monotonic,
+            started_at=started_at,
+            finished_at=finished_at,
+            artifacts=_artifact_pointers(run_dir, output_files),
+            idempotent_skip=False,
+        )
+        _write_receipt_and_validate(run_dir, command_name, receipt)
+        write_jsonl(
+            _jsonl_log_path(run_dir, command_name),
+            {
+                "event": "step_ok",
+                "run_id": run_id,
+                "step_name": command_name,
+                "outputs_hash": outputs_hash,
+                "duration_ms": receipt["timings"]["duration_ms"],
+            },
+        )
+        log_ops_event(
+            run_id,
+            "step_ok",
+            {
+                "step_name": command_name,
+                "inputs_hash": inputs_hash,
+                "outputs_hash": outputs_hash,
+                "duration_ms": receipt["timings"]["duration_ms"],
+            },
+        )
+        _refresh_run_summary(run_dir)
+    except Exception as exc:
+        finished_monotonic = time.monotonic()
+        finished_at = dt.datetime.now(dt.timezone.utc).isoformat()
+        receipt = build_receipt(
+            schema_version=SCHEMA_VERSION,
+            run_id=run_id,
+            step_name=command_name,
+            ok=False,
+            status="FAIL",
+            exit_code=2,
+            inputs_hash=inputs_hash,
+            outputs_hash=sha1_json({"error": str(exc)}),
+            started_monotonic=started_monotonic,
+            finished_monotonic=finished_monotonic,
+            started_at=started_at,
+            finished_at=finished_at,
+            artifacts=_artifact_pointers(run_dir, output_files),
+            idempotent_skip=False,
+            error=exc,
+        )
+        _write_receipt_and_validate(run_dir, command_name, receipt)
+        write_jsonl(
+            _jsonl_log_path(run_dir, command_name),
+            {
+                "event": "step_fail",
+                "run_id": run_id,
+                "step_name": command_name,
+                "error": str(exc),
+                "duration_ms": receipt["timings"]["duration_ms"],
+            },
+        )
+        log_ops_event(
+            run_id,
+            "step_fail",
+            {
+                "step_name": command_name,
+                "inputs_hash": inputs_hash,
+                "error": str(exc),
+                "duration_ms": receipt["timings"]["duration_ms"],
+            },
+        )
+        _refresh_run_summary(run_dir)
+        raise
+    finally:
+        hb_stop.set()
+        if hb_thread:
+            hb_thread.join(timeout=2.0)
+        _release_supabase_step_lock(lock_ctx)
+
+
+# ---------------------------------------------------------------------------
+# MiniMax API (OpenAI-compatible)
+# ---------------------------------------------------------------------------
+
+def minimax_env() -> Dict[str, str]:
+    """Load MiniMax config from env file."""
+    cfg = {"api_key": "", "model": "MiniMax-M2.5", "base_url": "https://api.minimax.io/v1"}
+    for src in [MINIMAX_ENV]:
+        if src.exists():
+            for line in src.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if k == "MINIMAX_API_KEY":
+                    cfg["api_key"] = v
+                elif k == "MINIMAX_MODEL":
+                    cfg["model"] = v
+                elif k == "MINIMAX_BASE_URL":
+                    cfg["base_url"] = v
+    # Also check env vars (override file)
+    cfg["api_key"] = os.environ.get("MINIMAX_API_KEY", cfg["api_key"])
+    cfg["model"] = os.environ.get("MINIMAX_MODEL", cfg["model"])
+    cfg["base_url"] = os.environ.get("MINIMAX_BASE_URL", cfg["base_url"])
+    return cfg
+
+
+def minimax_chat(
+    messages: List[Dict[str, str]],
+    *,
+    model: str = "",
+    max_tokens: int = 4096,
+    temperature: float = 0.7,
+    timeout_sec: int = 120,
+    logger: Optional[logging.Logger] = None,
+) -> str:
+    """Call MiniMax chat completions (OpenAI-compatible). Returns assistant text."""
+    cfg = minimax_env()
+    if not cfg["api_key"]:
+        raise RuntimeError("MINIMAX_API_KEY not configured")
+    model = model or cfg["model"]
+    base = cfg["base_url"].rstrip("/")
+
+    payload = json.dumps({
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }).encode("utf-8")
+
+    req = Request(
+        f"{base}/chat/completions",
+        method="POST",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg['api_key']}",
+        },
+    )
+    try:
+        with urlopen(req, timeout=int(timeout_sec)) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        err_msg = str(e)
+        # Try to extract body from HTTPError
+        if hasattr(e, "read"):
+            err_msg = e.read().decode("utf-8", errors="replace")
+        if logger:
+            logger.error(f"MiniMax API error: {err_msg}")
+        raise RuntimeError(f"MiniMax API error: {err_msg}") from e
+
+    choices = data.get("choices", [])
+    if not choices:
+        raise RuntimeError(f"MiniMax returned no choices: {data}")
+    content = choices[0].get("message", {}).get("content", "")
+    # Strip <think>...</think> reasoning tags (always present in M2.5)
+    content = re.sub(r"<think>[\s\S]*?</think>\s*", "", content).strip()
+    usage = data.get("usage", {})
+    if logger:
+        logger.debug(
+            f"MiniMax usage: {usage.get('prompt_tokens', 0)} in / "
+            f"{usage.get('completion_tokens', 0)} out"
+        )
+    return content
+
+
+# ---------------------------------------------------------------------------
+# ElevenLabs TTS API
+# ---------------------------------------------------------------------------
+
+def elevenlabs_env() -> Dict[str, str]:
+    """Load ElevenLabs config from env file."""
+    cfg = {"api_key": "", "voice_id": "", "voice_name": "Thomas Louis"}
+    if ELEVENLABS_ENV.exists():
+        for line in ELEVENLABS_ENV.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k, v = k.strip(), v.strip()
+            if k == "ELEVENLABS_API_KEY":
+                cfg["api_key"] = v
+            elif k == "ELEVENLABS_VOICE_ID":
+                cfg["voice_id"] = v
+            elif k == "ELEVENLABS_VOICE_NAME":
+                cfg["voice_name"] = v
+    cfg["api_key"] = os.environ.get("ELEVENLABS_API_KEY", cfg["api_key"])
+    cfg["voice_id"] = os.environ.get("ELEVENLABS_VOICE_ID", cfg["voice_id"])
+    return cfg
+
+
+def elevenlabs_tts(
+    text: str,
+    output_path: Path,
+    *,
+    voice_id: str = "",
+    model_id: str = "eleven_multilingual_v2",
+    logger: Optional[logging.Logger] = None,
+) -> Path:
+    """Generate speech via ElevenLabs TTS API. Returns path to audio file."""
+    cfg = elevenlabs_env()
+    if not cfg["api_key"]:
+        raise RuntimeError("ELEVENLABS_API_KEY not configured")
+    voice_id = voice_id or cfg["voice_id"]
+    if not voice_id:
+        raise RuntimeError("ELEVENLABS_VOICE_ID not configured")
+
+    payload = json.dumps({
+        "text": text,
+        "model_id": model_id,
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.0,
+            "use_speaker_boost": True,
+        },
+    }).encode("utf-8")
+
+    req = Request(
+        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+        method="POST",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "xi-api-key": cfg["api_key"],
+            "Accept": "audio/mpeg",
+        },
+    )
+
+    tmp = output_path.with_suffix(".tmp.mp3")
+    try:
+        with urlopen(req, timeout=300) as resp:
+            with open(tmp, "wb") as f:
+                while True:
+                    chunk = resp.read(8192)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                f.flush()
+                os.fsync(f.fileno())
+        os.replace(tmp, output_path)
+        if logger:
+            size_kb = output_path.stat().st_size / 1024
+            logger.info(f"ElevenLabs TTS: {size_kb:.0f}KB → {output_path.name}")
+        return output_path
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        err_msg = str(e)
+        if hasattr(e, "read"):
+            err_msg = e.read().decode("utf-8", errors="replace")
+        if logger:
+            logger.error(f"ElevenLabs TTS error: {err_msg}")
+        raise RuntimeError(f"ElevenLabs TTS error: {err_msg}") from e
+
+
+# ---------------------------------------------------------------------------
+# Retry helper
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Run lock (prevent concurrent execution on same run_id)
+# ---------------------------------------------------------------------------
+
+class RunLock:
+    """Simple file-based lock to prevent concurrent pipeline execution."""
+
+    def __init__(self, run_dir: Path):
+        self.lock_path = run_dir / "run.lock"
+        self.held = False
+
+    def acquire(self) -> bool:
+        if self.lock_path.exists():
+            try:
+                lock_data = json.loads(self.lock_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                # Corrupt lock file, remove and fall through to create
+                self.lock_path.unlink(missing_ok=True)
+            else:
+                pid = lock_data.get("pid", 0)
+                # Check if the holding process is still alive
+                try:
+                    os.kill(pid, 0)
+                    return False  # Process still running
+                except OSError:
+                    pass  # Stale lock, safe to take over
+                self.lock_path.unlink(missing_ok=True)
+        # Use O_EXCL for atomic create — prevents TOCTOU race
+        lock_data = {
+            "pid": os.getpid(),
+            "acquired_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        payload = json.dumps(lock_data).encode("utf-8")
+        try:
+            fd = os.open(str(self.lock_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            os.write(fd, payload)
+            os.fsync(fd)
+            os.close(fd)
+        except FileExistsError:
+            return False  # Another process won the race
+        self.held = True
+        return True
+
+    def release(self):
+        if self.held and self.lock_path.exists():
+            self.lock_path.unlink(missing_ok=True)
+            self.held = False
+
+    def __enter__(self):
+        if not self.acquire():
+            raise RuntimeError(
+                f"Run is locked by another process. Remove {self.lock_path} if stale."
+            )
+        return self
+
+    def __exit__(self, *args):
+        self.release()
+
+
+# ---------------------------------------------------------------------------
+# Artifact checksums (for audit + replay)
+# ---------------------------------------------------------------------------
+
+def file_checksum(path: Path) -> str:
+    """SHA256 of a file for audit trail."""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compute_artifact_checksums(run_dir: Path) -> Dict[str, str]:
+    """Compute checksums for key pipeline artifacts."""
+    artifacts = [
+        "products.json", "variation_plan.json", "script.json",
+        "assets_manifest.json", "voice/timestamps.json", "voice/voiceover.mp3",
+        "davinci/project.json",
+    ]
+    checksums = {}
+    for a in artifacts:
+        p = run_dir / a
+        if p.exists():
+            checksums[a] = file_checksum(p)
+    return checksums
+
+
+# ---------------------------------------------------------------------------
+# Retry helper
+# ---------------------------------------------------------------------------
+
+def with_retries(fn, *, max_attempts: int = 3, backoff: Optional[list[float]] = None,
+                 label: str = "", logger: Optional[logging.Logger] = None):
+    if backoff is None:
+        backoff = [5, 15, 45]
+    last_err = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as e:
+            last_err = e
+            if logger:
+                logger.warning(f"{label} attempt {attempt+1}/{max_attempts} failed: {e}")
+            if attempt < max_attempts - 1:
+                wait = backoff[min(attempt, len(backoff)-1)]
+                time.sleep(wait)
+    raise RuntimeError(f"{label} failed after {max_attempts} attempts: {last_err}")
+
+
+# ---------------------------------------------------------------------------
+# Run ID + folder creation
+# ---------------------------------------------------------------------------
+
+def generate_run_id(category: str) -> str:
+    now = dt.datetime.now()
+    slug = re.sub(r"[^a-z0-9]+", "_", category.lower()).strip("_")[:30]
+    return f"{slug}_{now.strftime('%Y-%m-%d_%H%M')}"
+
+
+def get_run_dir(run_id: str) -> Path:
+    return RUNS_DIR / run_id
+
+
+# ---------------------------------------------------------------------------
+# Quality gates
+# ---------------------------------------------------------------------------
+
+GATE_STATUSES = {"pending", "approved", "rejected"}
+
+
+def _default_gate_state() -> Dict[str, str]:
+    return {
+        "status": "pending",
+        "reviewer": "",
+        "notes": "",
+        "decided_at": "",
+    }
+
+
+def ensure_quality_gates(run_config: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, str]], bool]:
+    """Ensure run.json contains normalized gate states. Returns (gates, changed)."""
+    changed = False
+    gates = run_config.get("quality_gates")
+    if not isinstance(gates, dict):
+        gates = {}
+        changed = True
+
+    normalized: Dict[str, Dict[str, str]] = {}
+    for gate in ("gate1", "gate2"):
+        raw = gates.get(gate) if isinstance(gates, dict) else None
+        state = _default_gate_state()
+        if isinstance(raw, dict):
+            status = str(raw.get("status", "pending")).strip().lower()
+            state["status"] = status if status in GATE_STATUSES else "pending"
+            state["reviewer"] = str(raw.get("reviewer", "")).strip()
+            state["notes"] = str(raw.get("notes", "")).strip()
+            state["decided_at"] = str(raw.get("decided_at", "")).strip()
+        normalized[gate] = state
+        if raw != state:
+            changed = True
+
+    run_config["quality_gates"] = normalized
+    return normalized, changed
+
+
+def save_run_config(run_dir: Path, run_config: Dict[str, Any]) -> None:
+    run_config["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    atomic_write_json(run_dir / "run.json", run_config)
+
+
+def gate_is_approved(run_config: Dict[str, Any], gate_name: str) -> bool:
+    gates, _ = ensure_quality_gates(run_config)
+    return gates.get(gate_name, {}).get("status") == "approved"
+
+
+def require_gate_approved(
+    run_dir: Path,
+    run_config: Dict[str, Any],
+    gate_name: str,
+    step_name: str,
+    log: logging.Logger,
+) -> None:
+    gates, changed = ensure_quality_gates(run_config)
+    if changed:
+        save_run_config(run_dir, run_config)
+
+    gate_state = gates.get(gate_name, _default_gate_state())
+    if gate_state["status"] != "approved":
+        msg = (
+            f"{step_name} blocked: {gate_name} is {gate_state['status']}. "
+            f"Approve with: python3 tools/pipeline.py approve-{gate_name} --run-id {run_config.get('run_id', '<run_id>')}"
+        )
+        log.error(msg)
+        raise RuntimeError(msg)
+
+
+def set_gate_decision(
+    run_dir: Path,
+    run_config: Dict[str, Any],
+    gate_name: str,
+    decision: str,
+    reviewer: str,
+    notes: str,
+) -> None:
+    gates, _ = ensure_quality_gates(run_config)
+    if gate_name not in gates:
+        raise RuntimeError(f"Unknown gate: {gate_name}")
+    if decision not in {"approved", "rejected"}:
+        raise RuntimeError(f"Invalid gate decision: {decision}")
+
+    gates[gate_name] = {
+        "status": decision,
+        "reviewer": reviewer.strip(),
+        "notes": notes.strip(),
+        "decided_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+
+    step_status = run_config.get("step_status", {})
+    step_status[f"approve-{gate_name}"] = "done" if decision == "approved" else "rejected"
+    run_config["step_status"] = step_status
+    run_config["quality_gates"] = gates
+    run_config["status"] = f"{gate_name}_{decision}"
+    save_run_config(run_dir, run_config)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _pre_run_learning_check(stage: str = "") -> None:
-    """Surface relevant learnings from the skill graph before running a stage.
 
-    Prints warnings and mandatory rules so agents see accumulated knowledge.
-    """
+def _hostname(url: str) -> str:
     try:
-        from tools.lib.skill_graph import pre_run_check
-        warnings = pre_run_check(tool=stage)
-        if warnings:
-            print(f"\n--- Skill Graph Pre-Run Check ({len(warnings)} items) ---")
-            for w in warnings:
-                print(f"  ! {w}")
-            print("---")
+        host = urlparse(str(url or "")).netloc.strip().lower()
     except Exception:
-        pass  # Non-blocking; graceful degradation
+        return ""
+    if host.startswith("www."):
+        host = host[4:]
+    return host
 
 
-def _run_learning_gate(video_id: str, stage: str) -> int | None:
-    """Run the learning gate. Returns EXIT_ACTION_REQUIRED if blocked, else None."""
+def _is_amzn_short_url(url: str) -> bool:
+    return _hostname(url) == "amzn.to"
+
+
+def append_affiliate_tag(url: str, tag: str) -> str:
+    if _is_amzn_short_url(url):
+        # SiteStripe short links already encapsulate tracking.
+        return url
+    if not tag:
+        return url
+    parsed = urlparse(url)
+    params = list(parse_qsl(parsed.query, keep_blank_values=True))
+    params = [(k, v) for (k, v) in params if k != "tag"]
+    params.append(("tag", tag))
+    query = urlencode(params)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, parsed.fragment))
+
+
+def validate_affiliate_url(url: str, tag: str) -> bool:
+    if _is_amzn_short_url(url):
+        # amzn.to is a first-party Amazon short domain accepted by Associates.
+        return True
+    if not tag:
+        return True
+    return f"tag={tag}" in url and url.count(f"tag=") == 1
+
+
+# ---------------------------------------------------------------------------
+# Schema validation
+# ---------------------------------------------------------------------------
+
+SEGMENT_TYPES = {
+    "NARRATION", "PRODUCT_BLOCK",
+}
+
+# Granular segment types used by LLM-generated scripts (via video_pipeline_lib)
+SEGMENT_TYPES_GRANULAR = {
+    "HOOK", "CREDIBILITY", "CRITERIA",
+    "PRODUCT_INTRO", "PRODUCT_DEMO", "PRODUCT_REVIEW", "PRODUCT_RANK",
+    "FORWARD_HOOK", "WINNER_REINFORCEMENT", "ENDING_DECISION",
+    "COMPARISON", "TIER_BREAK", "SURPRISE_PICK", "MYTH_BUST", "WINNER_TEASE",
+}
+
+# Types that count as "hook/narration" in either schema
+_HOOK_TYPES = {"NARRATION", "HOOK", "CREDIBILITY"}
+
+# Types that count as "product content" in either schema
+_PRODUCT_TYPES = {"PRODUCT_BLOCK", "PRODUCT_INTRO", "PRODUCT_DEMO", "PRODUCT_REVIEW", "PRODUCT_RANK"}
+
+SEGMENT_KINDS = {
+    "AVATAR_TALK", "PRODUCT_GLAM", "BROLL", "NARRATION",
+}
+
+
+def validate_products_json(data: Dict) -> List[str]:
+    errors = []
+    if "products" not in data:
+        errors.append("Missing 'products' array")
+        return errors
+    products = data["products"]
+    if not isinstance(products, list) or len(products) < 5:
+        errors.append(f"Need at least 5 products, got {len(products) if isinstance(products, list) else 0}")
+    for i, p in enumerate(products):
+        if not p.get("asin"):
+            errors.append(f"Product {i}: missing asin")
+        if not p.get("title"):
+            errors.append(f"Product {i}: missing title")
+        price = p.get("price", 0)
+        if price < 1:
+            errors.append(f"Product {i}: invalid price {price}")
+    return errors
+
+
+def validate_script_json(data: Dict) -> List[str]:
+    """Validate script JSON supporting both mock schema (NARRATION/PRODUCT_BLOCK)
+    and granular LLM schema (HOOK/CREDIBILITY/PRODUCT_INTRO/etc.)."""
+    errors = []
+    if "structure" not in data:
+        errors.append("Missing 'structure' array")
+        return errors
+
+    structure = data["structure"]
+    has_hook = False
+    product_segments = 0
+    total_words = 0
+
+    for seg in structure:
+        seg_type = seg.get("type", "")
+
+        # Count words from direct voice_text
+        voice = seg.get("voice_text", "")
+        total_words += len(voice.split())
+
+        # Count words from nested segments (PRODUCT_BLOCK schema)
+        for sub in seg.get("segments", []):
+            sub_voice = sub.get("voice_text", "")
+            total_words += len(sub_voice.split())
+
+        # Detect hook/opener in either schema
+        if seg_type in _HOOK_TYPES:
+            has_hook = True
+
+        # Count product content in either schema
+        if seg_type == "PRODUCT_BLOCK":
+            product_segments += 1
+        elif seg_type in _PRODUCT_TYPES:
+            product_segments += 1
+
+    # For granular schema, count unique products (by product_rank or segment grouping)
+    if product_segments > 5:
+        # Granular schema: multiple segments per product, count unique products
+        product_ranks = set()
+        for seg in structure:
+            rank = seg.get("product_rank")
+            if rank is not None:
+                product_ranks.add(rank)
+        if product_ranks:
+            product_count = len(product_ranks)
+        else:
+            # Fallback: estimate from PRODUCT_INTRO count
+            product_count = sum(1 for s in structure if s.get("type") == "PRODUCT_INTRO")
+    else:
+        product_count = product_segments
+
+    if not has_hook:
+        errors.append("Missing hook/opener segment (NARRATION or HOOK)")
+    if product_count < 5:
+        errors.append(f"Need 5 products represented, got {product_count}")
+    if total_words < 1100:
+        errors.append(f"Total words {total_words} below minimum 1100")
+    if total_words > 1900:
+        errors.append(f"Total words {total_words} above maximum 1900")
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# Discovery policy helpers
+# ---------------------------------------------------------------------------
+
+def _parse_iso(value: str) -> Optional[dt.datetime]:
+    value = str(value or "").strip()
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def recent_asins_from_history(current_run_id: str, lookback_days: int) -> set[str]:
+    """Collect ASINs from runs created in the last N days (local history)."""
+    if lookback_days <= 0:
+        return set()
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=lookback_days)
+    out: set[str] = set()
+    for run_path in RUNS_DIR.iterdir() if RUNS_DIR.exists() else []:
+        if not run_path.is_dir():
+            continue
+        if run_path.name == current_run_id:
+            continue
+        run_json = run_path / "run.json"
+        products_json = run_path / "products.json"
+        if not run_json.exists() or not products_json.exists():
+            continue
+        try:
+            run_data = json.loads(run_json.read_text(encoding="utf-8"))
+            created_at = _parse_iso(run_data.get("created_at", ""))
+            if not created_at or created_at < cutoff:
+                continue
+            pdata = json.loads(products_json.read_text(encoding="utf-8"))
+            for p in pdata.get("products", []):
+                asin = str(p.get("asin", "")).strip().upper()
+                if asin:
+                    out.add(asin)
+        except Exception:
+            continue
+    return out
+
+
+def enforce_product_policy(
+    products: List[Dict[str, Any]],
+    *,
+    min_rating: float,
+    min_reviews: int,
+    min_price: float,
+    max_price: float,
+    excluded_asins: set[str],
+    affiliate_tag: str,
+    logger: logging.Logger,
+) -> List[Dict[str, Any]]:
+    filtered: List[Dict[str, Any]] = []
+    for p in products:
+        asin = str(p.get("asin", "")).strip().upper()
+        if not asin:
+            continue
+        if asin in excluded_asins:
+            logger.info(f"Excluded by 15-day history: {asin}")
+            continue
+
+        try:
+            price = float(p.get("price", 0))
+            rating = float(p.get("rating", 0))
+            reviews = int(p.get("reviews", 0))
+        except Exception:
+            continue
+
+        if price < min_price or price > max_price:
+            continue
+        if rating < min_rating:
+            continue
+        if reviews < min_reviews:
+            continue
+
+        product_url = str(p.get("product_url", "")).strip() or f"https://www.amazon.com/dp/{asin}"
+        source_aff_url = str(p.get("affiliate_url", "")).strip()
+        aff_url = source_aff_url or append_affiliate_tag(product_url, affiliate_tag)
+        # Keep first-party amzn.to links intact; otherwise enforce configured tag.
+        if affiliate_tag and aff_url and not _is_amzn_short_url(aff_url):
+            aff_url = append_affiliate_tag(aff_url, affiliate_tag)
+        if not validate_affiliate_url(aff_url, affiliate_tag):
+            logger.warning(f"Invalid affiliate URL for {asin}; fixing")
+            aff_url = append_affiliate_tag(product_url.split("?")[0], affiliate_tag)
+
+        clean = dict(p)
+        clean["asin"] = asin
+        clean["price"] = round(price, 2)
+        clean["rating"] = round(rating, 2)
+        clean["reviews"] = reviews
+        clean["product_url"] = product_url
+        clean["affiliate_url"] = aff_url
+        filtered.append(clean)
+
+    filtered = filtered[:5]
+    for i, p in enumerate(filtered, 1):
+        p["rank"] = i
+    return filtered
+
+
+# ===================================================================
+# STEP 0: init-run
+# ===================================================================
+
+def cmd_init_run(args):
+    category = args.category
+    run_id = args.run_id or generate_run_id(category)
+    run_dir = get_run_dir(run_id)
+    run_json_path = run_dir / "run.json"
+
+    # _run_with_contract may create run_dir for logs/receipts before init executes.
+    # Skip only when a completed run.json already exists.
+    if run_json_path.exists() and not args.force:
+        print(f"[SKIP] Run already exists: {run_dir}")
+        return
+
+    # Create folder structure
+    for subdir in [
+        "assets/product_1", "assets/product_2", "assets/product_3",
+        "assets/product_4", "assets/product_5", "assets/thumbnail",
+        "voice", "davinci", "upload", "metrics", "logs", "receipts", "security", "ops",
+    ]:
+        (run_dir / subdir).mkdir(parents=True, exist_ok=True)
+
+    # Write run.json
+    run_config = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "category": category,
+        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "channel": CHANNEL_NAME,
+        "config": {
+            "target_duration_minutes": args.duration,
+            "voice": args.voice,
+            "affiliate_tag": args.affiliate_tag,
+            "tracking_id_override": getattr(args, "tracking_id_override", "") or "",
+            "min_rating": args.min_rating,
+            "min_reviews": args.min_reviews,
+            "min_price": args.min_price,
+            "max_price": args.max_price,
+            "exclude_last_days": args.exclude_last_days,
+            "resolution": args.resolution,
+            "fps": 30,
+            "daily_budget_usd": args.daily_budget_usd,
+            "spent_usd": args.spent_usd,
+            "critical_failures": args.critical_failures,
+        },
+        "status": "initialized",
+        "step_status": {
+            "init": "done",
+            "discover-products": "pending",
+            "plan-variations": "pending",
+            "generate-script": "pending",
+            "approve-gate1": "pending",
+            "generate-assets": "pending",
+            "generate-voice": "pending",
+            "build-davinci": "pending",
+            "convert-to-rayvault": "pending",
+            "validate-originality": "pending",
+            "validate-compliance": "pending",
+            "approve-gate2": "pending",
+            "render-and-upload": "pending",
+            "collect-metrics": "pending",
+        },
+        "quality_gates": {
+            "gate1": _default_gate_state(),
+            "gate2": _default_gate_state(),
+        },
+        "steps_completed": [],
+        "artifact_checksums": {},
+    }
+    atomic_write_json(run_dir / "run.json", run_config)
+
+    log = setup_logger(run_dir, "00_init")
+    log.info(f"Run initialized: {run_id}")
+    log.info(f"Category: {category}")
+    log.info(f"Duration target: {args.duration} min")
+    log.info(f"Folder: {run_dir}")
+
+    log_ops_event(run_id, "run_init", {"category": category})
+    print(f"[OK] Run initialized: {run_id}")
+    print(f"     Folder: {run_dir}")
+
+
+# ===================================================================
+# STEP 1: discover-products
+# ===================================================================
+
+def cmd_discover_products(args):
+    run_dir, run_id, run_config = load_run(args)
+    log = setup_logger(run_dir, "01_discovery")
+    products_json_path = run_dir / "products.json"
+    products_csv_path = run_dir / "products.csv"
+    discovery_receipt_path = run_dir / "discovery_receipt.json"
+
+    if products_json_path.exists() and not args.force:
+        log.info("products.json already exists, skipping")
+        print(f"[SKIP] products.json exists at {products_json_path}")
+        return
+
+    config = run_config.get("config", {})
+    category = run_config["category"]
+    tag = config.get("affiliate_tag", "")
+
+    log.info(f"Discovering products for: {category}")
+
+    discovery_receipt: Dict[str, Any] = {
+        "run_id": run_id,
+        "category": category,
+        "requested_source": args.source,
+        "strategy": "api_first_scraping_fallback",
+        "attempts": [],
+    }
+    if args.source == "mock":
+        products = generate_mock_products(category, tag)
+        discovery_receipt["selected_source"] = "mock"
+        discovery_receipt["status"] = "OK"
+        discovery_receipt["attempts"].append(
+            {
+                "source": "mock",
+                "status": "ok",
+                "count": len(products),
+                "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+            }
+        )
+        log.info(f"Mock mode: {len(products)} products generated")
+    else:
+        log.info("API-first discovery: scrape with retry, fallback to mock on ban/rate-limit")
+        scrape_attempt_counter = {"n": 0}
+
+        def _classify_discovery_error(err: Exception) -> str:
+            msg = str(err).lower()
+            if any(t in msg for t in ("429", "rate limit", "too many requests")):
+                return "RATE_LIMIT"
+            if any(t in msg for t in ("captcha", "robot", "bot detection", "forbidden", "403")):
+                return "BAN_OR_BOT_CHALLENGE"
+            return "SCRAPE_ERROR"
+
+        def _attempt_scrape():
+            scrape_attempt_counter["n"] += 1
+            attempt_id = scrape_attempt_counter["n"]
+            ts = dt.datetime.now(dt.timezone.utc).isoformat()
+            try:
+                out = scrape_amazon_products(
+                    category=category,
+                    affiliate_tag=tag,
+                    min_rating=config.get("min_rating", 4.2),
+                    min_reviews=config.get("min_reviews", 500),
+                    min_price=config.get("min_price", 100),
+                    max_price=config.get("max_price", 500),
+                    exclude_last_days=config.get("exclude_last_days", 15),
+                    logger=log,
+                )
+                discovery_receipt["attempts"].append(
+                    {
+                        "source": "scrape",
+                        "attempt": attempt_id,
+                        "status": "ok",
+                        "count": len(out),
+                        "ts": ts,
+                    }
+                )
+                return out
+            except Exception as exc:
+                discovery_receipt["attempts"].append(
+                    {
+                        "source": "scrape",
+                        "attempt": attempt_id,
+                        "status": "failed",
+                        "reason_code": _classify_discovery_error(exc),
+                        "error": str(exc),
+                        "ts": ts,
+                    }
+                )
+                raise
+
+        try:
+            products = with_retries(
+                _attempt_scrape,
+                max_attempts=3,
+                backoff=[5, 15, 45],
+                label="discover-products:scrape",
+                logger=log,
+            )
+            discovery_receipt["selected_source"] = "scrape"
+            discovery_receipt["status"] = "OK"
+        except Exception as exc:
+            log.warning(f"Scrape unavailable ({exc}); fallback to mock for this run")
+            products = generate_mock_products(category, tag)
+            discovery_receipt["selected_source"] = "mock_fallback"
+            discovery_receipt["status"] = "WARN"
+            discovery_receipt["fallback_reason"] = str(exc)
+
+    try:
+        _lookback = int(config.get("exclude_last_days", 15))
+    except (ValueError, TypeError):
+        _lookback = 15
+    excluded_asins = recent_asins_from_history(
+        current_run_id=run_id,
+        lookback_days=_lookback,
+    )
+    if excluded_asins:
+        log.info(f"Loaded {len(excluded_asins)} ASINs from local {config.get('exclude_last_days', 15)}-day history")
+
+    selected_source = str(discovery_receipt.get("selected_source", "")).lower()
+    if selected_source.startswith("mock"):
+        # If scraping is unavailable, fallback mock data must still survive 15-day ASIN exclusion.
+        needed_pool = max(25, len(excluded_asins) + 5)
+        batch_count = (needed_pool + 4) // 5
+        expanded: List[Dict[str, Any]] = []
+        for batch in range(batch_count):
+            start_index = batch * 5 + 1
+            expanded.extend(generate_mock_products(category, tag, start_index=start_index))
+        products = expanded
+        log.info(
+            f"Expanded mock candidate pool to {len(products)} products "
+            f"(history={len(excluded_asins)}, lookback={_lookback}d)"
+        )
+
+    try:
+        _min_rating = float(config.get("min_rating", 4.2))
+    except (ValueError, TypeError):
+        _min_rating = 4.2
+    try:
+        _min_reviews = int(config.get("min_reviews", 500))
+    except (ValueError, TypeError):
+        _min_reviews = 500
+    try:
+        _min_price = float(config.get("min_price", 100))
+    except (ValueError, TypeError):
+        _min_price = 100.0
+    try:
+        _max_price = float(config.get("max_price", 500))
+    except (ValueError, TypeError):
+        _max_price = 500.0
+    products = enforce_product_policy(
+        products,
+        min_rating=_min_rating,
+        min_reviews=_min_reviews,
+        min_price=_min_price,
+        max_price=_max_price,
+        excluded_asins=excluded_asins,
+        affiliate_tag=tag,
+        logger=log,
+    )
+
+    if len(products) < 5:
+        raise RuntimeError(
+            f"Policy filters left only {len(products)} products. "
+            "Broaden search/category or relax thresholds."
+        )
+
+    # Build products.json in user's exact schema
+    products_data = {
+        "category": category,
+        "currency": "USD",
+        "marketplace": "amazon.com",
+        "affiliate": {
+            "tag": tag,
+            "link_style": "asin_tag",
+        },
+        "products": products,
+    }
+
+    errors = validate_products_json(products_data)
+    if errors:
+        for e in errors:
+            log.error(f"Validation: {e}")
+        raise RuntimeError(f"products.json validation failed: {errors}")
+
+    atomic_write_json(products_json_path, products_data)
+    log.info(f"products.json written: {len(products)} products")
+    discovery_receipt["final_count"] = len(products)
+    atomic_write_json(discovery_receipt_path, discovery_receipt)
+    log.info("discovery_receipt.json written")
+
+    # Write CSV
+    write_products_csv(products, products_csv_path)
+    log.info(f"products.csv written")
+
+    mark_step_complete(run_dir, "discover-products")
+    log_ops_event(run_id, "products_discovered", {"count": len(products), "category": category})
+    print(f"[OK] {len(products)} products discovered → {products_json_path}")
+
+
+def generate_mock_products(category: str, tag: str, start_index: int = 1) -> List[Dict]:
+    if start_index < 1:
+        start_index = 1
+    cat_hash = re.sub(r"[^A-Z0-9]", "", category.upper())[:4].ljust(4, "X")
+    seed = [
+        ("Smart LED Desk Lamp with Wireless Charger", 109.99, 4.6, 12430),
+        ("Programmable Mini Macro Keypad", 119.99, 4.5, 6830),
+        ("USB-C Docking Station Triple Display", 129.99, 4.4, 2190),
+        ("Ergonomic Vertical Mouse Pro", 139.99, 4.4, 9320),
+        ("Noise-Cancelling Desktop Fan", 149.99, 4.3, 5010),
+    ]
+    products = []
+    for offset, (title, price, rating, reviews) in enumerate(seed):
+        rank = offset + 1
+        asin_serial = start_index + offset
+        asin = f"B0{cat_hash}{asin_serial:04d}"
+        base_url = f"https://www.amazon.com/dp/{asin}"
+        aff_url = append_affiliate_tag(base_url, tag)
+        products.append({
+            "rank": rank,
+            "asin": asin,
+            "title": f"{title} ({category.replace('_', ' ').title()})",
+            "price": price,
+            "rating": rating,
+            "reviews": reviews,
+            "image_url": f"https://m.media-amazon.com/images/I/{asin}.jpg",
+            "product_url": base_url,
+            "affiliate_url": aff_url,
+        })
+    return products
+
+
+def scrape_amazon_products(
+    category: str, affiliate_tag: str,
+    min_rating: float, min_reviews: int, min_price: float, max_price: float,
+    exclude_last_days: int, logger: logging.Logger,
+) -> List[Dict]:
+    """Scrape Amazon search results using shared scraper (strict mode: raises on failure)."""
+    sys.path.insert(0, str(BASE_DIR / "tools"))
+    from video_pipeline_lib import (
+        discover_products_scrape,
+        resolve_amazon_search_url_for_category,
+    )
+
+    search_url = resolve_amazon_search_url_for_category(category)
+    raw_products = discover_products_scrape(
+        theme=category,
+        affiliate_tag=affiliate_tag,
+        top_n=5,
+        min_rating=min_rating,
+        min_reviews=min_reviews,
+        min_price=min_price,
+        max_price=max_price,
+        max_pages=3,
+        excluded_asins=set(),
+        min_theme_match=0.3,
+        search_url=search_url,
+    )
+    products = []
+    for rank, p in enumerate(raw_products, 1):
+        products.append({
+            "rank": rank,
+            "asin": p.asin,
+            "title": p.product_title,
+            "price": p.current_price_usd,
+            "rating": p.rating,
+            "reviews": p.review_count,
+            "image_url": f"https://m.media-amazon.com/images/I/{p.asin}.jpg",
+            "product_url": p.amazon_url,
+            "affiliate_url": p.affiliate_url,
+        })
+    if not products:
+        raise RuntimeError("scrape returned zero products")
+    return products
+
+
+def write_products_csv(products: List[Dict], path: Path):
+    if not products:
+        return
+    fields = ["rank", "asin", "title", "price", "rating", "reviews", "product_url", "affiliate_url"]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(products)
+
+
+# ===================================================================
+# STEP 1.5: plan-variations
+# ===================================================================
+
+def cmd_plan_variations(args):
+    run_dir, run_id, run_config = load_run(args)
+    log = setup_logger(run_dir, "01b_variations")
+    vp_path = run_dir / "variation_plan.json"
+
+    if vp_path.exists() and not args.force:
+        log.info("variation_plan.json already exists, skipping")
+        print(f"[SKIP] variation_plan.json exists")
+        return
+
+    products_path = run_dir / "products.json"
+    if not products_path.exists():
+        log.error("products.json not found — run discover-products first")
+        raise RuntimeError("products.json not found")
+
+    products_data = json.loads(products_path.read_text(encoding="utf-8"))
+    products = products_data["products"]
+    category = products_data["category"]
+
+    log.info(f"Planning variations for: {category}, {len(products)} products")
+
+    from variation_planner import plan_variations
+    plan = plan_variations(run_id, category, products)
+
+    atomic_write_json(vp_path, plan)
+    score = plan.get("variation_score", 0)
+    template = plan.get("selections", {}).get("structure_template", "?")
+    log.info(f"variation_plan.json written: score={score:.2f}, template={template}")
+
+    mark_step_complete(run_dir, "plan-variations")
+    log_ops_event(run_id, "variation_planned", {
+        "score": score,
+        "selections": plan.get("selections", {}),
+    })
+    print(f"[OK] variation_plan.json: score={score:.2f}, template={template} → {vp_path}")
+
+
+# ===================================================================
+# STEP 2: generate-script
+# ===================================================================
+
+def cmd_generate_script(args):
+    run_dir, run_id, run_config = load_run(args)
+    log = setup_logger(run_dir, "02_script")
+    script_path = run_dir / "script.json"
+    security_dir = run_dir / "security"
+    security_dir.mkdir(parents=True, exist_ok=True)
+    guard_report_path = security_dir / "input_guard_report.json"
+
+    if script_path.exists() and not args.force:
+        if not guard_report_path.exists():
+            products_path = run_dir / "products.json"
+            if products_path.exists():
+                products_data = json.loads(products_path.read_text(encoding="utf-8"))
+                guard_report = scan_product_inputs(products_data.get("products", []))
+                atomic_write_json(guard_report_path, guard_report)
+                log.info("Backfilled missing security/input_guard_report.json for existing script")
+        log.info("script.json already exists, skipping")
+        print(f"[SKIP] script.json exists")
+        return
+
+    products_path = run_dir / "products.json"
+    if not products_path.exists():
+        log.error("products.json not found — run discover-products first")
+        raise RuntimeError("products.json not found")
+
+    products_data = json.loads(products_path.read_text(encoding="utf-8"))
+    products = products_data["products"]
+    category = products_data["category"]
+    config = run_config.get("config", {})
+    duration = config.get("target_duration_minutes", 8)
+
+    guard_report = scan_product_inputs(products)
+    atomic_write_json(guard_report_path, guard_report)
+    blocked, reason = should_block_generation(guard_report)
+    if blocked:
+        raise RuntimeError(
+            "generate-script blocked by input guard: "
+            f"{reason}. Review {guard_report_path} and clean product inputs."
+        )
+    if str(guard_report.get("status", "")).strip().upper() == "WARN":
+        warn_codes = guard_report.get("warn_reason_codes", []) if isinstance(guard_report, dict) else []
+        warn_s = ", ".join(str(x) for x in warn_codes if str(x).strip()) or "unspecified"
+        log.warning(
+            "Input guard returned WARN (telemetry-only; not blocking). "
+            f"warn_reason_codes=[{warn_s}]"
+        )
+
+    # Load variation_plan.json if it exists
+    variation_plan = None
+    vp_path = run_dir / "variation_plan.json"
+    if vp_path.exists():
+        variation_plan = json.loads(vp_path.read_text(encoding="utf-8"))
+        log.info(f"Loaded variation_plan: template={variation_plan.get('selections', {}).get('structure_template', '?')}")
+
+    log.info(f"Generating script: {category}, {duration} min, {len(products)} products")
+
+    if args.source == "mock":
+        script_data = generate_mock_script(run_id, category, products, duration, variation_plan)
+    elif args.source in {"openclaw", "chatgpt_ui"}:
+        # Policy: scripts must be generated via the user's ChatGPT UI session (no LLM API keys).
+        script_data = generate_script_chatgpt_ui(run_dir, run_id, category, products, duration, log, variation_plan)
+    elif args.source == "minimax":
+        raise RuntimeError(
+            "Script generation via MiniMax is disabled by policy. "
+            "Use --source openclaw (ChatGPT UI via OpenClaw browser)."
+        )
+    else:
+        script_data = generate_mock_script(run_id, category, products, duration, variation_plan)
+
+    _ensure_intro_disclosure(script_data, log)
+
+    # Validate
+    errors = validate_script_json(script_data)
+    if errors:
+        log.warning(f"Script validation issues: {errors}")
+        if args.source != "mock":
+            for e in errors:
+                log.error(f"  {e}")
+            raise RuntimeError(
+                "script.json validation failed in production mode. "
+                "Fix prompt/source and re-run generate-script."
+            )
+
+    atomic_write_json(script_path, script_data)
+    total_words = count_script_words(script_data)
+    log.info(f"script.json written: {total_words} words")
+
+    mark_step_complete(run_dir, "generate-script")
+    log_ops_event(
+        run_id,
+        "script_generated",
+        {
+            "words": total_words,
+            "source": args.source,
+            "input_guard_status": guard_report.get("status", "unknown"),
+            "input_guard_fail_codes": guard_report.get("fail_reason_codes", []),
+            "input_guard_warn_codes": guard_report.get("warn_reason_codes", []),
+        },
+    )
+    print(f"[OK] script.json: {total_words} words → {script_path}")
+
+
+def count_script_words(data: Dict) -> int:
+    total = 0
+    for seg in data.get("structure", []):
+        total += len(seg.get("voice_text", "").split())
+        for sub in seg.get("segments", []):
+            total += len(sub.get("voice_text", "").split())
+    return total
+
+
+def _sanitize_prompt_field(raw: str, source: str, log: logging.Logger) -> str:
+    raw_s = str(raw or "")
+    mode = "url" if raw_s.strip().lower().startswith(("http://", "https://")) else "generic"
+    scan = sanitize_external_text(raw_s, source=source, mode=mode)
+    status = str(scan.get("status", "OK")).strip().upper()
+    if status == "FAIL":
+        codes = scan.get("fail_reason_codes", []) if isinstance(scan, dict) else []
+        codes_s = ", ".join(str(x) for x in codes if str(x).strip()) or "UNKNOWN"
+        log.warning(f"Prompt field sanitized due to FAIL ({codes_s}) ({source})")
+        return "[sanitized_external_field]"
+    # WARN is telemetry-only; keep content to preserve product specificity.
+    return raw_s.replace("\x00", "").strip()
+
+
+def _ensure_intro_disclosure(script_data: Dict[str, Any], log: logging.Logger) -> None:
+    """Ensure required affiliate disclosure is present in intro segments."""
+    structure = script_data.get("structure", [])
+    if not isinstance(structure, list) or not structure:
+        return
+    intro_text = " ".join(
+        str(seg.get("voice_text", "")).strip()
+        for seg in structure[:2]
+        if isinstance(seg, dict)
+    ).lower()
+    if "as an amazon associate i earn from qualifying purchases" in intro_text:
+        return
+    first = structure[0]
+    if not isinstance(first, dict):
+        return
+    existing = str(first.get("voice_text", "")).strip()
+    if existing:
+        first["voice_text"] = f"{DISCLOSURE_INTRO_SHORT} {existing}"
+    else:
+        first["voice_text"] = DISCLOSURE_INTRO_SHORT
+    log.info("Injected affiliate disclosure into intro segment")
+
+
+def _normalize_script_payload(
+    *,
+    payload: Any,
+    run_id: str,
+    category: str,
+    products: List[Dict[str, Any]],
+    duration: int,
+) -> Dict[str, Any]:
+    """Normalize provider output into the pipeline script contract."""
+    # Already in canonical shape.
+    if isinstance(payload, dict) and isinstance(payload.get("structure"), list):
+        out = dict(payload)
+        out["run_id"] = run_id
+        out["category"] = category
+        out.setdefault("target_duration_minutes", duration)
+        out.setdefault(
+            "style",
+            {
+                "channel": CHANNEL_NAME,
+                "host": "Ray",
+                "tone": "fast, clear, credible, not salesy",
+                "language": "en-US",
+            },
+        )
+        out.setdefault("chapters", [])
+        return out
+
+    # Common nesting from some models: {"script": {...}}
+    if isinstance(payload, dict):
+        for k in ("script", "result", "data", "output"):
+            candidate = payload.get(k)
+            if isinstance(candidate, dict) and (
+                isinstance(candidate.get("structure"), list)
+                or isinstance(candidate.get("segments"), list)
+            ):
+                return _normalize_script_payload(
+                    payload=candidate,
+                    run_id=run_id,
+                    category=category,
+                    products=products,
+                    duration=duration,
+                )
+
+    # Legacy shape: {"segments":[{"type":"HOOK","narration":"..."}]}
+    if isinstance(payload, dict) and isinstance(payload.get("segments"), list):
+        raw_segments = payload.get("segments", [])
+        structure: List[Dict[str, Any]] = []
+        product_rank = 0
+        current_product_rank = 0
+
+        def _voice(seg: Dict[str, Any]) -> str:
+            for key in ("voice_text", "narration", "text", "script"):
+                value = str(seg.get(key, "") or "").strip()
+                if value:
+                    return value
+            return ""
+
+        for idx, raw in enumerate(raw_segments, 1):
+            if not isinstance(raw, dict):
+                continue
+            s_type = str(raw.get("type", "NARRATION") or "NARRATION").strip().upper()
+            voice = _voice(raw)
+            if not voice:
+                continue
+            allowed_types = SEGMENT_TYPES.union(SEGMENT_TYPES_GRANULAR)
+            if s_type not in allowed_types:
+                s_type = "NARRATION"
+            entry: Dict[str, Any] = {
+                "id": f"s{idx:02d}",
+                "type": s_type,
+                "voice_text": voice,
+                "visual_hint": str(raw.get("visual_hint", "") or "").strip(),
+                "on_screen": [],
+            }
+            if s_type.startswith("PRODUCT_"):
+                if s_type == "PRODUCT_INTRO":
+                    product_rank = min(len(products), product_rank + 1)
+                    current_product_rank = max(1, product_rank)
+                elif current_product_rank == 0:
+                    current_product_rank = 1
+                suffix = s_type.replace("PRODUCT_", "").lower()
+                entry["id"] = f"p{current_product_rank}_{suffix}"
+                entry["product_rank"] = current_product_rank
+                if s_type in {"PRODUCT_REVIEW", "PRODUCT_RANK"}:
+                    entry["role"] = "evidence"
+                    low = voice.lower()
+                    if "in my test" not in low and "in my opinion" not in low:
+                        voice = f"In my test, {voice[0].lower() + voice[1:] if len(voice) > 1 else voice}"
+                    contra_markers = (
+                        "not for",
+                        "skip if",
+                        "if you don't",
+                        "if you do not",
+                        "who should not buy",
+                        "avoid this if",
+                    )
+                    if not any(m in low for m in contra_markers):
+                        contra_templates = [
+                            "Skip if you don't need these extra features.",
+                            "Avoid this if portability is your top priority.",
+                            "Who should not buy this: anyone who wants a simple plug-and-play setup.",
+                            "Not for buyers on a strict budget looking only for basics.",
+                            "If you do not need premium build quality, this can be overkill.",
+                        ]
+                        pick = contra_templates[(current_product_rank - 1) % len(contra_templates)]
+                        voice = f"{voice} {pick}"
+                    entry["voice_text"] = voice
+            elif s_type in {"HOOK", "CREDIBILITY", "CRITERIA"}:
+                entry["id"] = s_type.lower()
+            structure.append(entry)
+
+        # Derive simple chapters by product intro points when present.
+        chapters: List[Dict[str, str]] = [{"timecode": "00:00", "title": "Intro"}]
+        ms = 0
+        for seg in structure:
+            words = len(str(seg.get("voice_text", "")).split())
+            dur_ms = int((words / 155.0) * 60 * 1000)
+            seg_id = str(seg.get("id", ""))
+            m = re.match(r"p(\d+)_intro$", seg_id)
+            if m:
+                rank = int(m.group(1))
+                title = ""
+                if 1 <= rank <= len(products):
+                    title = str(products[rank - 1].get("title", "") or "")
+                mm, ss = divmod(ms // 1000, 60)
+                chapters.append(
+                    {
+                        "timecode": f"{mm:02d}:{ss:02d}",
+                        "title": f"#{rank} {title[:40]}".strip(),
+                    }
+                )
+            ms += max(1000, dur_ms)
+
+        return {
+            "run_id": run_id,
+            "category": category,
+            "target_duration_minutes": int(payload.get("estimated_duration_minutes") or duration),
+            "style": {
+                "channel": CHANNEL_NAME,
+                "host": "Ray",
+                "tone": "fast, clear, credible, not salesy",
+                "language": "en-US",
+            },
+            "structure": structure,
+            "chapters": chapters,
+        }
+
+    raise RuntimeError("Unsupported script payload shape; missing 'structure' or convertible 'segments'")
+
+
+def generate_mock_script(run_id: str, category: str, products: List[Dict], duration: int,
+                         variation_plan: Optional[Dict] = None) -> Dict:
+    """Generate a deterministic structured script for testing."""
+    structure = []
+    cat_display = category.replace("_", " ")
+
+    # Use variation_plan for opener/CTA/disclosure if available
+    vp_pi = (variation_plan or {}).get("prompt_instructions", {})
+    vp_sel = (variation_plan or {}).get("selections", {})
+    opener_style = vp_sel.get("opener_style", "overwhelm")
+    editorial_format = vp_sel.get("editorial_format", "classic_top5")
+    cta_line = vp_pi.get("cta_line", "")
+    disclosure_text = vp_pi.get("disclosure_text", "")
+
+    # Hook — vary based on opener_style
+    hook_lines = {
+        "overwhelm": (
+            f"{cat_display.title()} in 2026 is more confusing than ever. "
+            f"Tons of options, tons of jargon. So which one is actually worth your money? "
+            f"I tested the top five and ranked them. Here's what I found."
+        ),
+        "mystery": (
+            f"One of these five {cat_display} destroyed the competition. "
+            f"The other four? Not even close. I tested all of them so you don't have to."
+        ),
+        "anti_shill": (
+            f"Most {cat_display} reviews are paid ads disguised as opinions. "
+            f"I bought these five with my own money and I'm going to tell you what they won't."
+        ),
+        "price_shock": (
+            f"The cheapest {cat_display.rstrip('s')} here costs way less than you'd think. "
+            f"The most expensive? Way more. But the best one isn't the most expensive."
+        ),
+        "personal_fail": (
+            f"I wasted money on a terrible {cat_display.rstrip('s')} last year. "
+            f"So this time I tested five of them properly. Here's what actually works."
+        ),
+    }
+    hook_text = hook_lines.get(opener_style, hook_lines["overwhelm"])
+    if editorial_format == "buy_skip_upgrade":
+        hook_text += " And I’ll give each product a straight verdict: buy, skip, or upgrade."
+    elif editorial_format == "persona_top3":
+        hook_text += " I’ll also map each pick to the person it fits best."
+    elif editorial_format == "one_winner_two_alts":
+        hook_text += " You’ll leave with one winner and two realistic alternatives."
+    elif editorial_format == "budget_vs_premium":
+        hook_text += " And we’ll separate budget-safe picks from premium picks."
+
+    structure.append({
+        "id": "hook",
+        "type": "NARRATION",
+        "voice_text": hook_text,
+        "on_screen": [f"Top 5 {cat_display.title()} 2026", "Which one wins?"],
+        "visual_hint": "abstract b-roll / channel identity with product montage",
+    })
+
+    # Credibility
+    structure.append({
+        "id": "credibility",
+        "type": "NARRATION",
+        "voice_text": (
+            f"I've been testing {cat_display} for the past two weeks. Real daily use, not just unboxing. "
+            "I ranked these based on three things: performance, build quality, and value for money."
+        ),
+        "on_screen": ["2 weeks testing", "3 ranking criteria"],
+        "visual_hint": "desk setup with multiple products being tested side by side",
+    })
+
+    # Product blocks
+    for p in products:
+        rank = p["rank"]
+        title = p["title"]
+        price = p["price"]
+        rating = p["rating"]
+        reviews = p["reviews"]
+
+        block = {
+            "id": f"p{rank}_intro",
+            "type": "PRODUCT_BLOCK",
+            "product_rank": rank,
+            "segments": [
+                {
+                    "kind": "AVATAR_TALK",
+                    "voice_text": (
+                        f"Number {6-rank}. The {title}. "
+                        f"At ${price:.2f} with a {rating} star rating from {reviews:,} reviews, "
+                        "this one caught my attention right away."
+                    ),
+                    "visual_hint": f"Ray holding {title}, clean studio, confident expression",
+                },
+                {
+                    "kind": "PRODUCT_GLAM",
+                    "voice_text": (
+                        f"The build quality is solid. It feels premium in hand. "
+                        f"But here's the thing — it's not perfect. "
+                        f"The setup took longer than I expected, and the instructions could be better."
+                    ),
+                    "visual_hint": f"product hero shot of {title}, clean 16:9, leave space for DaVinci price overlay",
+                },
+                {
+                    "kind": "BROLL",
+                    "voice_text": (
+                        f"If you work from home and want something reliable, this is a solid pick. "
+                        f"If you need something portable, skip this one."
+                    ),
+                    "visual_hint": f"use-case scene: person using {title} at a home office desk",
+                },
+            ],
+            "cta": {
+                "affiliate_disclaimer_short": "Links may earn a commission.",
+                "on_screen_price_note": "Price may change.",
+            },
+        }
+        verdict_map = {
+            1: "BUY",
+            2: "BUY",
+            3: "UPGRADE",
+            4: "SKIP",
+            5: "SKIP",
+        }
+        if editorial_format == "buy_skip_upgrade":
+            block["segments"].append(
+                {
+                    "kind": "NARRATION",
+                    "role": "evidence",
+                    "voice_text": (
+                        f"Verdict for {title}: {verdict_map.get(rank, 'SKIP')}. "
+                        f"I'm basing this on real-world trade-offs, not just specs."
+                    ),
+                    "visual_hint": "simple verdict card, large text BUY/SKIP/UPGRADE",
+                }
+            )
+        elif editorial_format == "persona_top3":
+            persona = ["remote worker", "student", "casual creator", "power user", "first-time buyer"][rank - 1]
+            block["segments"].append(
+                {
+                    "kind": "NARRATION",
+                    "role": "evidence",
+                    "voice_text": (
+                        f"Best persona fit: {persona}. "
+                        f"If you're not that user profile, this might not be your best choice."
+                    ),
+                    "visual_hint": "persona label card with icon and short rationale",
+                }
+            )
+        elif editorial_format == "one_winner_two_alts":
+            alt_note = "alternative" if rank in (2, 3) else "not an alternative pick"
+            block["segments"].append(
+                {
+                    "kind": "NARRATION",
+                    "role": "evidence",
+                    "voice_text": (
+                        f"In the final decision, this is {alt_note}. "
+                        f"The trade-off comes down to value versus convenience."
+                    ),
+                    "visual_hint": "winner-versus-alternatives comparison card",
+                }
+            )
+        elif editorial_format == "budget_vs_premium":
+            lane = "budget lane" if price < 150 else "premium lane"
+            block["segments"].append(
+                {
+                    "kind": "NARRATION",
+                    "role": "evidence",
+                    "voice_text": (
+                        f"This sits in the {lane}. "
+                        f"If you're price-sensitive, compare it directly against the best budget pick."
+                    ),
+                    "visual_hint": "budget vs premium lane split graphic",
+                }
+            )
+        structure.append(block)
+
+    # Winner reinforcement
+    winner = products[0]["title"]
+    structure.append({
+        "id": "winner",
+        "type": "NARRATION",
+        "voice_text": (
+            f"So who wins? If you only buy one thing from this list, get the {winner}. "
+            f"It's not the cheapest, but it's the best overall value. "
+            f"Check the links below for current pricing."
+        ),
+        "on_screen": [f"Winner: {winner}", "Links in description"],
+        "visual_hint": "side-by-side comparison of top 3 products, winner highlighted",
+    })
+
+    # Outro — use CTA and disclosure from variation_plan if available
+    outro_cta = cta_line or "If this helped, subscribe for more."
+    outro_disclosure = disclosure_text or "Disclosure: this video contains affiliate links and was produced with AI assistance."
+    structure.append({
+        "id": "outro",
+        "type": "NARRATION",
+        "voice_text": (
+            f"That's the top five {cat_display} for 2026. "
+            "There's no single perfect product for everyone — the right pick depends on your setup and budget. "
+            f"{outro_cta} "
+            f"{outro_disclosure}"
+        ),
+        "on_screen": ["Subscribe", "AI + affiliate disclosure"],
+        "visual_hint": "channel outro card with subscribe button",
+    })
+
+    # Build chapters
+    chapters = [{"timecode": "00:00", "title": "Intro"}]
+    est_sec = 25  # after hook
+    for p in products:
+        rank = p["rank"]
+        mm = est_sec // 60
+        ss = est_sec % 60
+        title_prefix = f"#{6-rank}"
+        if editorial_format == "buy_skip_upgrade":
+            title_prefix = f"{title_prefix} Buy/Skip"
+        elif editorial_format == "persona_top3":
+            title_prefix = f"{title_prefix} Persona Fit"
+        elif editorial_format == "one_winner_two_alts":
+            title_prefix = f"{title_prefix} Winner Lens"
+        elif editorial_format == "budget_vs_premium":
+            title_prefix = f"{title_prefix} Budget vs Premium"
+        chapters.append({"timecode": f"{mm:02d}:{ss:02d}", "title": f"{title_prefix} {p['title'][:34]}"})
+        est_sec += 90  # ~90s per product
+
+    mm = est_sec // 60
+    ss = est_sec % 60
+    chapters.append({"timecode": f"{mm:02d}:{ss:02d}", "title": "Final Verdict"})
+
+    return {
+        "run_id": run_id,
+        "category": category,
+        "target_duration_minutes": duration,
+        "style": {
+            "channel": CHANNEL_NAME,
+            "host": "Ray",
+            "tone": "fast, clear, credible, not salesy",
+            "language": "en-US",
+        },
+        "structure": structure,
+        "chapters": chapters,
+    }
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _count_openclaw_processes() -> int:
+    """Count running openclaw/openclaw-channels processes (best-effort)."""
+    try:
+        res = subprocess.run(
+            ["ps", "-axo", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001
+        return 0
+    if res.returncode != 0:
+        return 0
+    count = 0
+    for line in (res.stdout or "").splitlines():
+        text = line.strip()
+        if not text or "openclaw_recover.sh" in text:
+            continue
+        if re.search(r"(^|\s)openclaw(\s|$)", text) or re.search(r"(^|\s)openclaw-channels(\s|$)", text):
+            count += 1
+    return count
+
+
+def _guard_openclaw_process_pressure(log: logging.Logger) -> None:
+    """Warn/block if local OpenClaw process count indicates likely process storm."""
+    guard_raw = os.environ.get("RAYVIEWS_OPENCLAW_PROC_GUARD", "1").strip().lower()
+    if guard_raw in {"0", "false", "off", "no"}:
+        return
+
+    warn_threshold = _env_int("RAYVIEWS_OPENCLAW_PROC_WARN", 35)
+    block_threshold = _env_int("RAYVIEWS_OPENCLAW_PROC_BLOCK", 120)
+    if block_threshold < warn_threshold:
+        block_threshold = warn_threshold
+
+    count = _count_openclaw_processes()
+    if count >= block_threshold:
+        raise RuntimeError(
+            "OpenClaw process pressure too high "
+            f"({count} >= {block_threshold}). "
+            "Run: tools/openclaw_recover.sh --apply --restart-browser"
+        )
+    if count >= warn_threshold:
+        log.warning(
+            "OpenClaw process pressure elevated (%d >= %d). "
+            "If run gets slow, execute tools/openclaw_recover.sh",
+            count,
+            warn_threshold,
+        )
+
+
+def generate_script_chatgpt_ui(
+    run_dir: Path,
+    run_id: str,
+    category: str,
+    products: List[Dict],
+    duration: int,
+    log: logging.Logger,
+    variation_plan: Optional[Dict] = None,
+) -> Dict:
+    """Generate script via ChatGPT web UI, automated by OpenClaw browser.
+
+    This intentionally avoids any LLM API usage. It relies on the user being logged into
+    chatgpt.com inside the OpenClaw browser profile.
+    """
+    from video_pipeline_lib import build_structured_script_prompt, Product
+    from chatgpt_ui import ChatGPTUIError, extract_json_object, send_prompt_and_wait_for_assistant
+
+    _guard_openclaw_process_pressure(log)
+
+    product_objs = []
+    for p in products:
+        safe_title = _sanitize_prompt_field(
+            p.get("title", ""),
+            source=f"products.title:{p.get('asin', '')}",
+            log=log,
+        )
+        safe_product_url = _sanitize_prompt_field(
+            p.get("product_url", ""),
+            source=f"products.product_url:{p.get('asin', '')}",
+            log=log,
+        )
+        safe_affiliate_url = _sanitize_prompt_field(
+            p.get("affiliate_url", ""),
+            source=f"products.affiliate_url:{p.get('asin', '')}",
+            log=log,
+        )
+        product_objs.append(
+            Product(
+                product_title=safe_title,
+                asin=p["asin"],
+                current_price_usd=p["price"],
+                rating=p["rating"],
+                review_count=p["reviews"],
+                feature_bullets=[],
+                amazon_url=safe_product_url,
+                affiliate_url=safe_affiliate_url,
+                ranking_score=p["rank"],
+            )
+        )
+
+    prompt = build_structured_script_prompt(product_objs, category, CHANNEL_NAME, variation_plan)
+    src_dir = run_dir / "security"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    conv_path = src_dir / "chatgpt_conversation_url.txt"
+
+    def try_generate() -> Dict[str, Any]:
+        out = send_prompt_and_wait_for_assistant(
+            prompt,
+            timeout_sec=300,
+            poll_sec=2.5,
+            timeout_ms=30000,
+        )
+        conv_url = str(out.get("conversation_url", "") or "").strip()
+        if conv_url:
+            atomic_write_text(conv_path, conv_url + "\n")
+        raw_text = str(out.get("assistant_text", "") or "")
+        try:
+            payload = extract_json_object(raw_text)
+        except ChatGPTUIError as e:
+            raise RuntimeError(str(e)) from None
+
+        return _normalize_script_payload(
+            payload=payload,
+            run_id=run_id,
+            category=category,
+            products=products,
+            duration=duration,
+        )
+
+    return with_retries(try_generate, max_attempts=3, label="script_generation:chatgpt_ui", logger=log)
+
+
+def generate_script_minimax(run_id: str, category: str, products: List[Dict],
+                             duration: int, log: logging.Logger,
+                             variation_plan: Optional[Dict] = None) -> Dict:
+    """Generate script via MiniMax API (OpenAI-compatible chat completions)."""
+    from video_pipeline_lib import build_structured_script_prompt, Product
+
+    product_objs = []
+    for p in products:
+        safe_title = _sanitize_prompt_field(
+            p.get("title", ""),
+            source=f"products.title:{p.get('asin', '')}",
+            log=log,
+        )
+        safe_product_url = _sanitize_prompt_field(
+            p.get("product_url", ""),
+            source=f"products.product_url:{p.get('asin', '')}",
+            log=log,
+        )
+        safe_affiliate_url = _sanitize_prompt_field(
+            p.get("affiliate_url", ""),
+            source=f"products.affiliate_url:{p.get('asin', '')}",
+            log=log,
+        )
+        product_objs.append(Product(
+            product_title=safe_title,
+            asin=p["asin"],
+            current_price_usd=p["price"],
+            rating=p["rating"],
+            review_count=p["reviews"],
+            feature_bullets=[],
+            amazon_url=safe_product_url,
+            affiliate_url=safe_affiliate_url,
+            ranking_score=p["rank"],
+        ))
+
+    prompt = build_structured_script_prompt(product_objs, category, CHANNEL_NAME, variation_plan)
+    messages = [
+        {"role": "system", "content": "You are a YouTube script generator. Return ONLY valid JSON, no markdown fences."},
+        {"role": "user", "content": prompt},
+    ]
+
+    def _call_minimax(messages_in: List[Dict[str, str]], *, label: str, timeout_sec: int) -> str:
+        def _do():
+            return minimax_chat(
+                messages_in,
+                max_tokens=8192,
+                temperature=0.7,
+                timeout_sec=timeout_sec,
+                logger=log,
+            )
+        return with_retries(_do, max_attempts=3, backoff=[10, 30, 60], label=label, logger=log)
+
+    def try_generate():
+        raw = _call_minimax(messages, label="minimax_chat", timeout_sec=180)
+        # Strip markdown fences if present
+        text = raw.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        return _normalize_script_payload(
+            payload=json.loads(text),
+            run_id=run_id,
+            category=category,
+            products=products,
+            duration=duration,
+        )
+
+    script_data = with_retries(try_generate, max_attempts=3, label="minimax_script", logger=log)
+
+    # Length hardening: if model returns short script, request an expansion pass.
+    min_words = 1100
+    current_words = count_script_words(script_data)
+    if current_words < min_words:
+        log.warning(
+            f"MiniMax script below target words ({current_words} < {min_words}); requesting expansion pass"
+        )
+        for attempt in range(2):
+            expansion_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a YouTube script editor. Expand the provided JSON script to 1200-1600 words. "
+                        "Keep JSON schema unchanged, maintain product order and ids, keep tone human and credible. "
+                        "Return ONLY valid JSON."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Category: {category}\n"
+                        f"Target duration: {duration} minutes\n"
+                        f"Current word count: {current_words}\n\n"
+                        f"CURRENT_SCRIPT_JSON:\n{json.dumps(script_data, ensure_ascii=False)}"
+                    ),
+                },
+            ]
+            try:
+                raw = _call_minimax(expansion_messages, label=f"minimax_expand_{attempt+1}", timeout_sec=240)
+                text = raw.strip()
+                if text.startswith("```"):
+                    text = re.sub(r"^```(?:json)?\s*", "", text)
+                    text = re.sub(r"\s*```$", "", text)
+                expanded = _normalize_script_payload(
+                    payload=json.loads(text),
+                    run_id=run_id,
+                    category=category,
+                    products=products,
+                    duration=duration,
+                )
+                expanded_words = count_script_words(expanded)
+                if expanded_words >= min_words:
+                    script_data = expanded
+                    current_words = expanded_words
+                    log.info(f"Expansion pass succeeded: {expanded_words} words")
+                    break
+                script_data = expanded
+                current_words = expanded_words
+                log.warning(
+                    f"Expansion pass {attempt + 1} still short ({expanded_words} words)"
+                )
+            except Exception as exc:
+                log.warning(f"Expansion pass {attempt + 1} failed: {exc}")
+
+    # Repair pass: if script still violates hard schema requirements, ask MiniMax to fix specific issues.
+    hard_errors = validate_script_json(script_data)
+    if hard_errors:
+        log.warning(f"MiniMax script still failing validation; attempting repair: {hard_errors}")
+        for attempt in range(2):
+            repair_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a structured script fixer. Fix the provided JSON so it passes these checks:\n"
+                        "- Must represent exactly 5 products (include PRODUCT_INTRO/DEMO/REVIEW/RANK for each)\n"
+                        "- Must be 1100-1900 words total\n"
+                        "- Must remain valid JSON with the SAME schema as the input (do not change keys)\n"
+                        "Return ONLY valid JSON."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Category: {category}\n"
+                        f"Target duration: {duration} minutes\n"
+                        f"VALIDATION_ERRORS:\n- " + "\n- ".join(hard_errors) + "\n\n"
+                        f"INPUT_PRODUCTS:\n{json.dumps([{'rank': p['rank'], 'asin': p['asin'], 'title': p['title'], 'price': p['price'], 'rating': p['rating'], 'reviews': p['reviews']} for p in products], ensure_ascii=False)}\n\n"
+                        f"CURRENT_SCRIPT_JSON:\n{json.dumps(script_data, ensure_ascii=False)}"
+                    ),
+                },
+            ]
+            try:
+                raw = _call_minimax(repair_messages, label=f"minimax_repair_{attempt+1}", timeout_sec=240)
+                text = raw.strip()
+                if text.startswith("```"):
+                    text = re.sub(r"^```(?:json)?\s*", "", text)
+                    text = re.sub(r"\s*```$", "", text)
+                repaired = _normalize_script_payload(
+                    payload=json.loads(text),
+                    run_id=run_id,
+                    category=category,
+                    products=products,
+                    duration=duration,
+                )
+                errs = validate_script_json(repaired)
+                if not errs:
+                    script_data = repaired
+                    log.info("Repair pass succeeded")
+                    break
+                hard_errors = errs
+                log.warning(f"Repair pass {attempt + 1} still failing: {errs}")
+            except Exception as exc:
+                log.warning(f"Repair pass {attempt + 1} failed: {exc}")
+
+    return script_data
+
+
+# ===================================================================
+# STEP 3: generate-assets
+# ===================================================================
+
+def cmd_generate_assets(args):
+    run_dir, run_id, run_config = load_run(args)
+    log = setup_logger(run_dir, "03_assets")
+    manifest_path = run_dir / "assets_manifest.json"
+
+    require_gate_approved(run_dir, run_config, "gate1", "generate-assets", log)
+    _require_expensive_steps_allowed(run_dir, run_config, "generate-assets", log)
+
+    if manifest_path.exists() and not args.force:
+        log.info("assets_manifest.json already exists, skipping")
+        print(f"[SKIP] assets_manifest.json exists")
+        return
+
+    script_path = run_dir / "script.json"
+    products_path = run_dir / "products.json"
+    if not script_path.exists():
+        raise RuntimeError("script.json not found — run generate-script first")
+    if not products_path.exists():
+        raise RuntimeError("products.json not found — run discover-products first")
+
+    products_data = json.loads(products_path.read_text(encoding="utf-8"))
+    products = products_data["products"]
+
+    log.info(f"Generating asset prompts for {len(products)} products")
+
+    assets = []
+    for p in products:
+        rank = p["rank"]
+        asin = p["asin"]
+        title = p["title"]
+        product_dir = run_dir / "assets" / f"product_{rank}"
+        product_dir.mkdir(parents=True, exist_ok=True)
+
+        # Best-effort: download an Amazon reference image for Dzine anchoring.
+        # This is not a hard requirement (manual fallback is allowed).
+        ref_path = product_dir / "ref_amazon.jpg"
+        if not ref_path.exists() or args.force:
+            img_url = str(p.get("image_url", "") or "").strip()
+            if img_url:
+                try:
+                    req = Request(img_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urlopen(req, timeout=25) as resp:
+                        blob = resp.read()
+                    if len(blob) < 30_000:
+                        raise RuntimeError(f"download too small ({len(blob)} bytes)")
+                    tmp = ref_path.with_suffix(ref_path.suffix + ".tmp")
+                    with open(tmp, "wb") as f:
+                        f.write(blob)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp, ref_path)
+                    log.info(f"Downloaded ref image: {ref_path.name} ({len(blob)} bytes) for {asin}")
+                except Exception as exc:
+                    log.warning(f"Ref image download failed for {asin}: {exc}")
+            else:
+                log.warning(f"No image_url for {asin}; cannot download ref image")
+
+        asset_entry = {
+            "product_rank": rank,
+            "asin": asin,
+            "title": title,
+            "required": {
+                "dzine_variants": 3,
+                "thumbnail_variants": 2,
+            },
+            "files": {
+                "product_ref_image": f"assets/product_{rank}/ref_amazon.jpg",
+                "dzine_images": [
+                    f"assets/product_{rank}/variant_01.png",
+                    f"assets/product_{rank}/variant_02.png",
+                    f"assets/product_{rank}/variant_03.png",
+                ],
+                "avatar_lipsync_stills": [
+                    f"assets/product_{rank}/ray_talk_01.png",
+                ],
+                "thumbnail_candidates": [
+                    "assets/thumbnail/option_01.png",
+                    "assets/thumbnail/option_02.png",
+                ],
+            },
+            "dzine_prompts": {
+                "hero_shot": (
+                    f"Model: NanoBanana Pro. Character: Ray, confident reviewer. "
+                    f"Hero clean shot: Ray presenting {title} in a clean modern set, "
+                    f"medium shot, realistic lighting, 16:9. "
+                    f"No text in image, no price in image, leave negative space for DaVinci price overlay. "
+                    f"RayViewsLab brand style."
+                ),
+                "use_case": (
+                    f"Model: NanoBanana Pro. In-use scene: person using {title} "
+                    f"naturally in a home office/lifestyle setup, high detail, 16:9."
+                ),
+                "close_up": (
+                    f"Model: NanoBanana Pro. Close-up feature shot of {title}: "
+                    f"emphasize one practical benefit visually, product clearly visible, 16:9."
+                ),
+            },
+            "status": "pending",
+        }
+
+        # Check which files already exist — all categories must be complete
+        all_ready = True
+        for key in ["dzine_images", "thumbnail_candidates", "avatar_lipsync_stills"]:
+            files = asset_entry["files"][key]
+            existing = [f for f in files if (run_dir / f).exists()]
+            if len(existing) < len(files):
+                all_ready = False
+                break
+        if all_ready:
+            asset_entry["status"] = "ready"
+
+        assets.append(asset_entry)
+
+    manifest = {
+        "run_id": run_id,
+        "assets": assets,
+    }
+
+    atomic_write_json(manifest_path, manifest)
+    ready = sum(1 for a in assets if a["status"] == "ready")
+    log.info(f"Assets manifest: {ready}/{len(assets)} products ready")
+
+    mark_step_complete(run_dir, "generate-assets")
+    log_ops_event(run_id, "assets_manifest_created", {"products": len(assets), "ready": ready})
+    print(f"[OK] assets_manifest.json: {ready}/{len(assets)} ready → {manifest_path}")
+
+    if ready < len(assets):
+        print(f"[ACTION] Generate images in Dzine using prompts in assets_manifest.json")
+
+
+# ===================================================================
+# STEP 4: generate-voice
+# ===================================================================
+
+def cmd_generate_voice(args):
+    run_dir, run_id, run_config = load_run(args)
+    log = setup_logger(run_dir, "04_voice")
+    voice_dir = run_dir / "voice"
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    timestamps_path = voice_dir / "timestamps.json"
+
+    require_gate_approved(run_dir, run_config, "gate1", "generate-voice", log)
+    _require_expensive_steps_allowed(run_dir, run_config, "generate-voice", log)
+
+    if timestamps_path.exists() and not args.force:
+        log.info("timestamps.json already exists, skipping")
+        print(f"[SKIP] voice/timestamps.json exists")
+        return
+
+    script_path = run_dir / "script.json"
+    if not script_path.exists():
+        raise RuntimeError("script.json not found — run generate-script first")
+
+    script_data = json.loads(script_path.read_text(encoding="utf-8"))
+    config = run_config.get("config", {})
+    voice = config.get("voice", DEFAULT_VOICE)
+
+    log.info(f"Processing voice segments for: {voice}")
+
+    # Extract all narration in order
+    segments = []
+    total_chars = 0
+    cumulative_ms = 0
+
+    for seg in script_data.get("structure", []):
+        seg_id = seg.get("id", "unknown")
+        voice_text = seg.get("voice_text", "")
+
+        if voice_text:
+            words = len(voice_text.split())
+            est_ms = int(words / 155 * 60 * 1000)  # ~155 wpm
+            segments.append({
+                "script_id": seg_id,
+                "start_ms": cumulative_ms,
+                "end_ms": cumulative_ms + est_ms,
+            })
+            cumulative_ms += est_ms
+            total_chars += len(voice_text)
+
+        # Sub-segments in PRODUCT_BLOCK
+        for sub in seg.get("segments", []):
+            sub_voice = sub.get("voice_text", "")
+            if sub_voice:
+                words = len(sub_voice.split())
+                est_ms = int(words / 155 * 60 * 1000)
+                segments.append({
+                    "script_id": f"{seg_id}_{sub.get('kind', 'seg')}",
+                    "start_ms": cumulative_ms,
+                    "end_ms": cumulative_ms + est_ms,
+                })
+                cumulative_ms += est_ms
+                total_chars += len(sub_voice)
+
+    timestamps = {
+        "run_id": run_id,
+        "voice_model": f"elevenlabs:{voice}",
+        "segments": segments,
+        "total_chars": total_chars,
+        "estimated_duration_ms": cumulative_ms,
+    }
+
+    # Write full narration text for ElevenLabs
+    all_text = extract_full_narration(script_data)
+    atomic_write_text(voice_dir / "full_narration.txt", all_text)
+
+    atomic_write_json(timestamps_path, timestamps)
+
+    est_min = round(cumulative_ms / 60000, 1)
+    log.info(f"Voice plan: {len(segments)} segments, {total_chars} chars, ~{est_min} min")
+
+    mark_step_complete(run_dir, "generate-voice")
+    log_ops_event(run_id, "voice_planned", {"segments": len(segments), "chars": total_chars})
+    print(f"[OK] voice/timestamps.json: {len(segments)} segments, ~{est_min} min")
+
+    wav_path = voice_dir / "voiceover.mp3"
+    if not wav_path.exists():
+        if _voice_source_requests_tts(getattr(args, "source", "mock")):
+            log.info("Calling ElevenLabs TTS API...")
+            narration = extract_full_narration(script_data)
+            def do_tts():
+                return elevenlabs_tts(narration, wav_path, logger=log)
+            with_retries(do_tts, max_attempts=2, backoff=[10, 30], label="elevenlabs_tts", logger=log)
+            print(f"[OK] voiceover.mp3 generated ({wav_path.stat().st_size / 1024:.0f}KB)")
+        else:
+            print(f"[ACTION] Generate voiceover using ElevenLabs ({voice})")
+            print(f"         Full narration text: {voice_dir / 'full_narration.txt'}")
+            print(f"         Or run: python3 tools/pipeline.py generate-voice --run-id {run_id} --source elevenlabs")
+
+
+def extract_full_narration(script_data: Dict) -> str:
+    parts = []
+    for seg in script_data.get("structure", []):
+        voice = seg.get("voice_text", "")
+        if voice:
+            parts.append(voice)
+        for sub in seg.get("segments", []):
+            sv = sub.get("voice_text", "")
+            if sv:
+                parts.append(sv)
+    return "\n\n".join(parts)
+
+
+def _voice_source_requests_tts(source: str) -> bool:
+    mode = str(source or "").strip().lower()
+    return mode in {"elevenlabs", "minimax", "openclaw"}
+
+
+# ===================================================================
+# STEP 5: build-davinci
+# ===================================================================
+
+def cmd_build_davinci(args):
+    run_dir, run_id, run_config = load_run(args)
+    log = setup_logger(run_dir, "05_davinci")
+    davinci_dir = run_dir / "davinci"
+    davinci_dir.mkdir(parents=True, exist_ok=True)
+    project_path = davinci_dir / "project.json"
+
+    require_gate_approved(run_dir, run_config, "gate1", "build-davinci", log)
+    _require_expensive_steps_allowed(run_dir, run_config, "build-davinci", log)
+
+    if project_path.exists() and not args.force:
+        log.info("davinci/project.json already exists, skipping")
+        print(f"[SKIP] davinci/project.json exists")
+        return
+
+    # Check prerequisites (gate2)
+    missing = []
+    script_path = run_dir / "script.json"
+    manifest_path = run_dir / "assets_manifest.json"
+    timestamps_path = run_dir / "voice" / "timestamps.json"
+    wav_path = run_dir / "voice" / "voiceover.mp3"
+
+    if not script_path.exists(): missing.append("script.json")
+    if not manifest_path.exists(): missing.append("assets_manifest.json")
+    if not timestamps_path.exists(): missing.append("voice/timestamps.json")
+
+    if missing:
+        log.error(f"build-davinci prerequisites missing: {missing}")
+        raise RuntimeError(f"build-davinci failed — missing prerequisites: {', '.join(missing)}")
+
+    # Load data
+    script_data = json.loads(script_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    timestamps = json.loads(timestamps_path.read_text(encoding="utf-8"))
+
+    log.info("Building DaVinci edit plan")
+
+    # Build edit plan from timestamps + assets
+    edit_plan = []
+    asset_map = {}
+    for a in manifest.get("assets", []):
+        rank = a["product_rank"]
+        images = a.get("files", {}).get("dzine_images", [])
+        asset_map[rank] = images
+
+    for seg in timestamps.get("segments", []):
+        script_id = seg["script_id"]
+        start = seg["start_ms"]
+        end = seg["end_ms"]
+
+        # Match product rank from script_id
+        rank_match = re.search(r"p(\d+)", script_id)
+        if rank_match:
+            rank = int(rank_match.group(1))
+            images = asset_map.get(rank, [])
+            if images:
+                duration_per = (end - start) // max(len(images), 1)
+                for i, img in enumerate(images):
+                    edit_plan.append({
+                        "type": "IMAGE",
+                        "path": img,
+                        "start_ms": start + i * duration_per,
+                        "end_ms": start + (i + 1) * duration_per,
+                    })
+                continue
+
+        # Non-product segments get a placeholder
+        edit_plan.append({
+            "type": "PLACEHOLDER",
+            "label": script_id,
+            "start_ms": start,
+            "end_ms": end,
+        })
+
+    config = run_config.get("config", {})
+    resolution = config.get("resolution", "1920x1080")
+
+    project = {
+        "run_id": run_id,
+        "timeline": {
+            "resolution": resolution,
+            "fps": config.get("fps", 30),
+        },
+        "audio": "voice/voiceover.mp3",
+        "edit_plan": edit_plan,
+        "captions": {"enabled": True, "style_preset": "clean"},
+        "music": {"enabled": True, "duck_db": -12},
+    }
+
+    atomic_write_json(project_path, project)
+    log.info(f"DaVinci project: {len(edit_plan)} edit items")
+
+    # Check if we can set render_ready
+    has_audio = wav_path.exists()
+    has_all_images = all(
+        (run_dir / img).exists()
+        for a in manifest.get("assets", [])
+        for img in a.get("files", {}).get("dzine_images", [])
+    )
+
+    if has_audio and has_all_images:
+        flag = davinci_dir / "render_ready.flag"
+        flag.write_text("ready", encoding="utf-8")
+        log.info("render_ready.flag set")
+        print(f"[OK] Gate2 PASS — render ready")
+    else:
+        blockers = []
+        if not has_audio:
+            blockers.append("voice/voiceover.mp3 missing")
+        if not has_all_images:
+            blockers.append("some dzine images missing")
+        log.warning(f"Gate2 partial: {blockers}")
+        print(f"[WARN] Gate2 not ready: {', '.join(blockers)}")
+
+    mark_step_complete(run_dir, "build-davinci")
+    log_ops_event(run_id, "davinci_built", {"edit_items": len(edit_plan), "render_ready": has_audio and has_all_images})
+    print(f"[OK] davinci/project.json: {len(edit_plan)} items → {project_path}")
+
+
+# ===================================================================
+# STEP 5.5: convert-to-rayvault
+# ===================================================================
+
+def _notify_rayvault_conversion(
+    run_id: str,
+    run_config: Dict,
+    result: Dict,
+    log: logging.Logger,
+) -> None:
+    """Send Telegram notification with conversion results."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from lib.control_plane import send_telegram
+    except ImportError:
+        log.debug("control_plane not available, skipping Telegram")
+        return
+
+    status = result["status"]
+    segments = result["segments"]
+    fidelity = result["fidelity_score"]
+    duration = result.get("audio_duration_sec", 0)
+    category = run_config.get("category", "?").replace("_", " ").title()
+    warnings = result.get("warnings", [])
+
+    icon = "OK" if status == "READY_FOR_RENDER" else "AGUARDANDO"
+    lines = [
+        f"[{icon}] convert-to-rayvault",
+        f"Run: {run_id}",
+        f"Categoria: {category}",
+        f"Status: {status}",
+        f"Segments: {segments} | Fidelity: {fidelity}/100 | Duration: {duration:.0f}s",
+    ]
+
+    if warnings:
+        lines.append("")
+        for w in warnings[:5]:
+            lines.append(f"  WARN: {w}")
+
+    if status == "READY_FOR_RENDER":
+        lines.append("")
+        lines.append("Proximo: render no DaVinci ou shadow render.")
+    elif status == "WAITING_ASSETS":
+        lines.append("")
+        lines.append("Acao necessaria: gerar voiceover + imagens Dzine.")
+
+    msg = "\n".join(lines)
+    ok = send_telegram(msg)
+    if ok:
+        log.info("Telegram notification sent")
+    else:
+        log.warning("Telegram notification failed (check TELEGRAM_CHAT_ID)")
+
+
+def cmd_convert_to_rayvault(args):
+    run_dir, run_id, run_config = load_run(args)
+    log = setup_logger(run_dir, "05b_rayvault")
+    rayvault_dir = run_dir / "rayvault"
+    config_path = rayvault_dir / "05_render_config.json"
+
+    require_gate_approved(run_dir, run_config, "gate1", "convert-to-rayvault", log)
+
+    if config_path.exists() and not args.force:
+        log.info("rayvault/05_render_config.json already exists, skipping")
+        print(f"[SKIP] rayvault/05_render_config.json exists")
+        return
+
+    from markdown_to_render_config import convert
+
+    log.info("Converting Rayviews run → RayVault format")
+    result = convert(
+        run_id=run_id,
+        frame_path=getattr(args, "frame_path", None),
+        force=args.force,
+        dry_run=getattr(args, "dry_run", False),
+        no_overlays=getattr(args, "no_overlays", False),
+    )
+
+    if result.get("status") == "DRY_RUN":
+        log.info(f"Dry run: {result['segments_planned']} segments planned")
+        print(f"[DRY RUN] {result['segments_planned']} segments")
+        return
+
+    log.info(f"RayVault conversion: {result['status']} | "
+             f"segments={result['segments']} | fidelity={result['fidelity_score']}/100")
+
+    for w in result.get("warnings", []):
+        log.warning(w)
+
+    mark_step_complete(run_dir, "convert-to-rayvault")
+    log_ops_event(run_id, "rayvault_converted", {
+        "status": result["status"],
+        "segments": result["segments"],
+        "fidelity_score": result["fidelity_score"],
+    })
+    print(f"[OK] convert-to-rayvault: {result['status']} | "
+          f"segments={result['segments']} | fidelity={result['fidelity_score']}/100")
+    print(f"     output: {result['rayvault_dir']}")
+
+    # Telegram notification
+    _notify_rayvault_conversion(run_id, run_config, result, log)
+
+
+# ===================================================================
+# STEP 5.6: validate-originality
+# ===================================================================
+
+def cmd_validate_originality(args):
+    run_dir, run_id, _ = load_run(args)
+    log = setup_logger(run_dir, "05c_originality")
+    report_path = run_dir / "originality_report.json"
+
+    if report_path.exists() and not args.force:
+        log.info("originality_report.json already exists, skipping")
+        print(f"[SKIP] originality_report.json exists")
+        return
+
+    from rayvault.originality_validator import run_validation, write_report
+
+    policy_json = str(getattr(args, "policy_json", "") or "").strip()
+    policy = {}
+    if policy_json:
+        try:
+            parsed = json.loads(policy_json)
+            if isinstance(parsed, dict):
+                policy = parsed
+        except Exception as exc:
+            raise RuntimeError(f"Invalid --policy-json: {exc}") from exc
+
+    report = run_validation(run_dir, policy or None)
+    write_report(run_dir, report)
+
+    status = str(report.get("status", "FAIL")).upper()
+    exit_code = int(report.get("exit_code", 2))
+    reasons = report.get("reasons", [])
+    log.info(f"Originality report: status={status} exit_code={exit_code}")
+    for r in reasons:
+        log.warning(f"Originality: {r}")
+
+    mark_step_complete(run_dir, "validate-originality")
+    log_ops_event(
+        run_id,
+        "originality_validated",
+        {
+            "status": status,
+            "exit_code": exit_code,
+            "reasons": reasons[:10],
+        },
+    )
+    print(f"[OK] originality_report.json: {status} → {report_path}")
+
+
+# ===================================================================
+# STEP 5.7: validate-compliance
+# ===================================================================
+
+def cmd_validate_compliance(args):
+    run_dir, run_id, _ = load_run(args)
+    log = setup_logger(run_dir, "05d_compliance")
+    report_path = run_dir / "compliance_report.json"
+
+    if report_path.exists() and not args.force:
+        log.info("compliance_report.json already exists, skipping")
+        print(f"[SKIP] compliance_report.json exists")
+        return
+
+    from rayvault.compliance_contract import run_contract
+
+    report = run_contract(run_dir)
+    status = str(report.get("status", "FAIL")).upper()
+    exit_code = int(report.get("exit_code", 2))
+    reasons = report.get("reasons", [])
+    log.info(f"Compliance report: status={status} exit_code={exit_code}")
+    for r in reasons:
+        log.warning(f"Compliance: {r}")
+
+    mark_step_complete(run_dir, "validate-compliance")
+    log_ops_event(
+        run_id,
+        "compliance_validated",
+        {
+            "status": status,
+            "exit_code": exit_code,
+            "reasons": reasons[:10],
+        },
+    )
+    print(f"[OK] compliance_report.json: {status} → {report_path}")
+
+
+# ===================================================================
+# STEP 6: render-and-upload
+# ===================================================================
+
+def _retry_backoff(base_sec: int, attempts: int) -> List[float]:
+    out = []
+    for i in range(max(0, attempts - 1)):
+        out.append(float(base_sec * (3 ** i)))
+    return out or [5.0]
+
+
+def _run_cmd_checked(cmd: List[str], *, cwd: Optional[Path], label: str) -> subprocess.CompletedProcess:
+    proc = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        stderr = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(f"{label} failed ({proc.returncode}): {stderr[:500]}")
+    return proc
+
+
+def cmd_render_and_upload(args):
+    run_dir, run_id, run_config = load_run(args)
+    log = setup_logger(run_dir, "06_upload")
+    upload_dir = run_dir / "upload"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    url_path = upload_dir / "youtube_url.txt"
+    video_id_path = upload_dir / "youtube_video_id.txt"
+
+    if url_path.exists() and not args.force:
+        log.info("youtube_url.txt already exists, skipping")
+        print(f"[SKIP] Already uploaded: {url_path.read_text(encoding='utf-8').strip()}")
+        return
+
+    require_gate_approved(run_dir, run_config, "gate2", "render-and-upload", log)
+    _require_expensive_steps_allowed(run_dir, run_config, "render-and-upload", log)
+    auto_checks = _pre_gate2_auto_checks(run_dir)
+    if not auto_checks.get("ok_for_gate2", False):
+        raise RuntimeError(
+            "render-and-upload blocked: automatic pre-Gate2 contracts failed/missing "
+            f"({', '.join(auto_checks.get('fail_items', []))})"
+        )
+
+    flag = run_dir / "davinci" / "render_ready.flag"
+    if not flag.exists():
+        log.error("render_ready.flag not found — build-davinci not complete or gate2 blocked")
+        raise RuntimeError("render_ready.flag not found")
+
+    retries = max(1, int(getattr(args, "step_retries", 3)))
+    backoff = _retry_backoff(int(getattr(args, "step_backoff_sec", 8)), retries)
+    log.info(f"Render + upload step (retries={retries}, backoff={backoff})")
+
+    # Ensure upload payload exists
+    script_path = run_dir / "script.json"
+    upload_payload_path = upload_dir / "upload_payload.json"
+    if script_path.exists():
+        script = json.loads(script_path.read_text(encoding="utf-8"))
+        if not upload_payload_path.exists() or args.force:
+            tracking_override = str(
+                getattr(args, "tracking_id_override", "")
+                or run_config.get("config", {}).get("tracking_id_override", "")
+                or ""
+            ).strip()
+            payload = {
+                "run_id": run_id,
+                "video_file": "davinci/render.mp4",
+                "title": f"Top 5 Best {run_config['category'].replace('_', ' ').title()} 2026",
+                "description": build_youtube_description(
+                    script,
+                    run_config,
+                    tracking_id_override=tracking_override,
+                ),
+                "tags": [run_config["category"].replace("_", " "), "top 5", "best 2026", "review"],
+                "category_id": "28",
+                "privacy_status": getattr(args, "privacy_status", "private"),
+                "chapters": script.get("chapters", []),
+            }
+            if tracking_override:
+                payload["tracking_id_override"] = tracking_override
+            atomic_write_json(upload_payload_path, payload)
+            log.info("Upload payload written")
+    if not upload_payload_path.exists():
+        raise RuntimeError("upload/upload_payload.json not found and script.json missing")
+
+    # Render (RayVault ffmpeg engine)
+    rayvault_run_dir = run_dir / "rayvault"
+    render_cfg = rayvault_run_dir / "05_render_config.json"
+    if not render_cfg.exists():
+        raise RuntimeError(
+            "rayvault/05_render_config.json not found. Run convert-to-rayvault first."
+        )
+
+    final_render = rayvault_run_dir / "publish" / "video_final.mp4"
+    davinci_render = run_dir / "davinci" / "render.mp4"
+
+    if not final_render.exists() or args.force:
+        def do_render() -> Path:
+            cmd = [
+                sys.executable,
+                "-m",
+                "rayvault.ffmpeg_render",
+                "--run-dir",
+                str(rayvault_run_dir),
+                "--apply",
+            ]
+            _run_cmd_checked(cmd, cwd=BASE_DIR, label="rayvault_render")
+            if not final_render.exists():
+                raise RuntimeError("rayvault_render completed without publish/video_final.mp4")
+            return final_render
+
+        with_retries(
+            do_render,
+            max_attempts=retries,
+            backoff=backoff,
+            label="rayvault_render",
+            logger=log,
+        )
+        log.info(f"Render created: {final_render}")
+    else:
+        log.info(f"Render already exists, reusing: {final_render}")
+
+    # Keep a canonical path in run_dir/davinci/render.mp4 for downstream tooling.
+    if final_render.exists():
+        davinci_render.parent.mkdir(parents=True, exist_ok=True)
+        if args.force or not davinci_render.exists():
+            tmp = davinci_render.with_suffix(".tmp")
+            with open(final_render, "rb") as src, open(tmp, "wb") as dst:
+                while True:
+                    chunk = src.read(8 * 1024 * 1024)  # 8MB chunks
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+                dst.flush()
+                os.fsync(dst.fileno())
+            os.replace(tmp, davinci_render)
+
+    # Save artifact checksums for audit trail
+    checksums = compute_artifact_checksums(run_dir)
+    atomic_write_json(upload_dir / "artifact_checksums.json", checksums)
+    log.info(f"Artifact checksums saved: {len(checksums)} files")
+
+    client_secrets = str(getattr(args, "youtube_client_secrets", "") or "").strip()
+    if not client_secrets:
+        raise RuntimeError(
+            "Missing --youtube-client-secrets. Render completed; upload blocked by policy."
+        )
+
+    input_video = str(getattr(args, "video_file", "") or "").strip()
+    video_file = Path(input_video).expanduser() if input_video else davinci_render
+    if not video_file.exists():
+        raise RuntimeError(f"Video file for upload not found: {video_file}")
+
+    upload_report = upload_payload_path.with_name("youtube_upload_report.json")
+
+    def do_upload() -> Dict[str, Any]:
+        if upload_report.exists() and not args.force:
+            cached = json.loads(upload_report.read_text(encoding="utf-8"))
+            if cached.get("ok") and cached.get("video_id"):
+                return cached
+
+        cmd = [
+            sys.executable,
+            str(BASE_DIR / "tools" / "youtube_upload_api.py"),
+            "--client-secrets",
+            client_secrets,
+            "--video-file",
+            str(video_file),
+            "--metadata-json",
+            str(upload_payload_path),
+            "--privacy-status",
+            getattr(args, "privacy_status", "private"),
+        ]
+
+        token_file = str(getattr(args, "youtube_token_file", "") or "").strip()
+        if token_file:
+            cmd.extend(["--token-file", token_file])
+
+        thumb = str(getattr(args, "thumbnail", "") or "").strip()
+        if thumb:
+            cmd.extend(["--thumbnail", thumb])
+        else:
+            auto_thumb = run_dir / "assets" / "thumbnail" / "option_01.png"
+            if auto_thumb.exists():
+                cmd.extend(["--thumbnail", str(auto_thumb)])
+
+        _run_cmd_checked(cmd, cwd=BASE_DIR, label="youtube_upload")
+        if not upload_report.exists():
+            raise RuntimeError("youtube_upload_report.json missing after upload")
+        report = json.loads(upload_report.read_text(encoding="utf-8"))
+        if not report.get("ok"):
+            raise RuntimeError(f"YouTube upload failed: {report}")
+        return report
+
+    report = with_retries(
+        do_upload,
+        max_attempts=retries,
+        backoff=backoff,
+        label="youtube_upload",
+        logger=log,
+    )
+
+    youtube_url = str(report.get("url", "")).strip()
+    video_id = str(report.get("video_id", "")).strip()
+    if not youtube_url or not video_id:
+        raise RuntimeError(f"Upload report missing url/video_id: {report}")
+
+    atomic_write_text(url_path, youtube_url + "\n")
+    atomic_write_text(video_id_path, video_id + "\n")
+
+    mark_step_complete(run_dir, "render-and-upload")
+    log_ops_event(run_id, "upload_done", {"video_id": video_id, "url": youtube_url})
+    print(f"[OK] Uploaded: {youtube_url}")
+
+
+def _description_product_link(product: Dict[str, Any], tracking_id_override: str = "") -> str:
+    aff = str(product.get("affiliate_url", "")).strip()
+    prod = str(product.get("product_url", "")).strip()
+    if tracking_id_override:
+        # Per-video tracking: force direct Amazon URL with override when possible.
+        if prod:
+            return append_affiliate_tag(prod, tracking_id_override)
+        if aff and not _is_amzn_short_url(aff):
+            return append_affiliate_tag(aff, tracking_id_override)
+    return aff or prod
+
+
+def build_youtube_description(
+    script: Dict,
+    run_config: Dict,
+    tracking_id_override: str = "",
+) -> str:
+    disclosure_en = "As an Amazon Associate I earn from qualifying purchases."
+    disclosure_pt = "Como Associado da Amazon, eu ganho com compras qualificadas."
+
+    lines: List[str] = []
+    category = run_config.get("category", "").replace("_", " ").title()
+    lines.append(f"Top 5 Best {category} in 2026 — tested and ranked.")
+    lines.append(disclosure_en)
+    lines.append(disclosure_pt)
+    lines.append("")
+
+    # Chapters
+    for ch in script.get("chapters", []):
+        lines.append(f"{ch['timecode']} {ch['title']}")
+    lines.append("")
+
+    # Products with affiliate links
+    lines.append("Affiliate Links (Amazon):")
+    products_path = get_run_dir(run_config.get("run_id", script.get("run_id", ""))) / "products.json"
+    if products_path.exists():
+        pd = json.loads(products_path.read_text(encoding="utf-8"))
+        for p in pd.get("products", []):
+            rank = p.get("rank", "?")
+            title = p.get("title", "?")
+            price = p.get("price")
+            link = _description_product_link(p, tracking_id_override=tracking_id_override)
+            price_label = f"${float(price):.2f}" if isinstance(price, (int, float)) else ""
+            lines.append(f"Product {rank} — {title} {price_label}".strip())
+            lines.append(link)
+            lines.append("")
+
+    lines.append(disclosure_en)
+    lines.append("Prices may change. Check the links for current price and availability.")
+    lines.append("This video was produced with AI assistance.")
+    return "\n".join(lines).strip()
+
+
+# ===================================================================
+# STEP 7: collect-metrics
+# ===================================================================
+
+def cmd_collect_metrics(args):
+    run_dir, run_id, run_config = load_run(args)
+    log = setup_logger(run_dir, "07_metrics")
+    metrics_dir = run_dir / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = metrics_dir / "metrics.json"
+
+    if metrics_path.exists() and not args.force:
+        log.info("metrics.json already exists, skipping")
+        print(f"[SKIP] metrics.json exists")
+        return
+
+    url_path = run_dir / "upload" / "youtube_url.txt"
+    vid_path = run_dir / "upload" / "youtube_video_id.txt"
+
+    video_id = ""
+    if vid_path.exists():
+        video_id = vid_path.read_text(encoding="utf-8").strip()
+    elif url_path.exists():
+        url = url_path.read_text(encoding="utf-8").strip()
+        parsed = urlparse(url)
+        video_id = parse_qs(parsed.query).get("v", [""])[0]
+
+    if not video_id:
+        log.error("No video ID found — upload step not complete")
+        raise RuntimeError("No youtube_video_id.txt or youtube_url.txt")
+
+    log.info(f"Collecting metrics for video: {video_id}")
+
+    # Fetch from YouTube API
+    yt_env = CONFIG_DIR / "youtube.env"
+    api_key = ""
+    if yt_env.exists():
+        for line in yt_env.read_text(encoding="utf-8").splitlines():
+            if line.startswith("YOUTUBE_API_KEY="):
+                api_key = line.split("=", 1)[1].strip()
+
+    if not api_key:
+        log.error("YouTube API key not configured")
+        raise RuntimeError("YouTube API key not found")
+
+    def fetch_stats():
+        url = (
+            f"https://www.googleapis.com/youtube/v3/videos"
+            f"?part=statistics,contentDetails"
+            f"&id={video_id}&key={api_key}"
+        )
+        req = Request(url, headers={"Accept": "application/json"})
+        try:
+            with urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            # Redact API key from error messages to prevent leaking in tracebacks
+            sanitized = str(exc).replace(api_key, "***")
+            raise RuntimeError(f"YouTube API call failed: {sanitized}") from None
+        items = data.get("items", [])
+        if not items:
+            raise RuntimeError(f"No video found for ID {video_id}")
+        return items[0]
+
+    item = with_retries(fetch_stats, max_attempts=3, label="youtube_stats", logger=log)
+    stats = item.get("statistics", {})
+
+    metrics = {
+        "run_id": run_id,
+        "video_id": video_id,
+        "collected_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "view_count": int(stats.get("viewCount", 0)),
+        "like_count": int(stats.get("likeCount", 0)),
+        "comment_count": int(stats.get("commentCount", 0)),
+        "duration": item.get("contentDetails", {}).get("duration", ""),
+    }
+
+    atomic_write_json(metrics_path, metrics)
+    log.info(f"Metrics: {metrics['view_count']:,} views, {metrics['like_count']:,} likes")
+
+    mark_step_complete(run_dir, "collect-metrics")
+    log_ops_event(run_id, "metrics_collected", metrics)
+    print(f"[OK] metrics.json: {metrics['view_count']:,} views → {metrics_path}")
+
+
+# ===================================================================
+# STATUS
+# ===================================================================
+
+def cmd_status(args):
+    run_dir, run_id, run_config = load_run(args)
+    gates, changed = ensure_quality_gates(run_config)
+    if changed:
+        save_run_config(run_dir, run_config)
+    steps = [
+        ("init", "run.json"),
+        ("discover-products", "products.json"),
+        ("generate-script", "script.json"),
+        ("approve-gate1", "quality_gates.gate1"),
+        ("generate-assets", "assets_manifest.json"),
+        ("generate-voice", "voice/timestamps.json"),
+        ("build-davinci", "davinci/project.json"),
+        ("convert-to-rayvault", "rayvault/05_render_config.json"),
+        ("validate-originality", "originality_report.json"),
+        ("validate-compliance", "compliance_report.json"),
+        ("approve-gate2", "quality_gates.gate2"),
+        ("render-and-upload", "upload/youtube_url.txt"),
+        ("collect-metrics", "metrics/metrics.json"),
+    ]
+
+    print(f"\nPipeline Status: {run_id}")
+    print(f"Category: {run_config.get('category', '?')}")
+    print(f"Channel: {run_config.get('channel', CHANNEL_NAME)}")
+    print("=" * 60)
+
+    for i, (name, output_file) in enumerate(steps):
+        if output_file.startswith("quality_gates."):
+            gate_name = output_file.split(".")[-1]
+            exists = gates.get(gate_name, {}).get("status") == "approved"
+        else:
+            exists = (run_dir / output_file).exists()
+        icon = "OK" if exists else "--"
+        print(f"  [{icon}] Step {i}: {name}")
+
+    print("\nQuality Gates:")
+    for gate_name in ("gate1", "gate2"):
+        gate = gates.get(gate_name, _default_gate_state())
+        reviewer = gate.get("reviewer", "") or "-"
+        decided = gate.get("decided_at", "") or "-"
+        print(f"  - {gate_name}: {gate.get('status', 'pending')} (reviewer: {reviewer}, decided_at: {decided})")
+
+    tier_report = (
+        _read_json_if_exists(_ops_tier_report_path(run_dir))
+        or _read_json_if_exists(run_dir / "ops_tier_report.json")
+        or _ops_tier_report(
+        run_dir,
+        run_config,
+        persist=False,
+        )
+    )
+    print(
+        f"\nOperational Tier: {tier_report.get('tier', 'unknown')} "
+        f"({tier_report.get('reason', 'n/a')})"
+    )
+
+    # Show files
+    print(f"\nFiles:")
+    for f in sorted(run_dir.rglob("*")):
+        if f.is_file() and "logs" not in f.parts:
+            rel = f.relative_to(run_dir)
+            size = f.stat().st_size
+            print(f"  {rel} ({size:,}b)")
+
+
+def _read_json_if_exists(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _ops_tier_report_path(run_dir: Path) -> Path:
+    return run_dir / "ops" / "ops_tier_report.json"
+
+
+def _ops_tier_report(run_dir: Path, run_config: Dict[str, Any], persist: bool = True) -> Dict[str, Any]:
+    cfg = run_config.get("config", {})
+    try:
+        daily_budget = float(cfg.get("daily_budget_usd", 30) or 30)
+    except (TypeError, ValueError):
+        daily_budget = 30.0
+    try:
+        spent_usd = float(cfg.get("spent_usd", 0) or 0)
+    except (TypeError, ValueError):
+        spent_usd = 0.0
+    try:
+        critical_failures = int(cfg.get("critical_failures", 0) or 0)
+    except (TypeError, ValueError):
+        critical_failures = 0
+
+    # ------------------------------------------------------------------
+    # Objective signals (cheap first; avoid expensive checks unless needed)
+    # ------------------------------------------------------------------
+    paused, paused_reasons = detect_ops_paused(project_root=BASE_DIR)
+
+    # Disk health (GB free)
+    disk_free_gb: Optional[float] = None
+    try:
+        du = shutil.disk_usage(str(BASE_DIR))
+        disk_free_gb = du.free / (1024**3)
+    except Exception:
+        disk_free_gb = None
+
+    # Consecutive failures (most recent receipts)
+    consecutive_failures = 0
+    try:
+        receipts: List[Dict[str, Any]] = []
+        for p in (run_dir / "receipts").glob("*.json"):
+            try:
+                r = _read_json(p)
+            except Exception:
+                continue
+            finished_at = str(r.get("finished_at", "") or "")
+            receipts.append({"status": r.get("status"), "finished_at": finished_at})
+        receipts.sort(key=lambda x: x.get("finished_at") or "")
+        for r in reversed(receipts):
+            if str(r.get("status", "")).upper() == "FAIL":
+                consecutive_failures += 1
+            else:
+                break
+    except Exception:
+        consecutive_failures = 0
+
+    # External credit signals (optional; set by ops when providers report low balance)
+    low_credit_reasons: List[str] = []
+    for env_name, code in (
+        ("ELEVENLABS_LOW_CREDIT", "ELEVENLABS_LOW_CREDIT"),
+        ("DZINE_LOW_CREDIT", "DZINE_LOW_CREDIT"),
+        ("OPS_LOW_CREDIT", "OPS_LOW_CREDIT"),
+    ):
+        if str(os.environ.get(env_name, "") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            low_credit_reasons.append(code)
+
+    # Economy window (optional; opt-in via OPS_LOW_COMPUTE_HOURS="0-6" etc.)
+    economy_window = False
+    hours = str(os.environ.get("OPS_LOW_COMPUTE_HOURS", "") or "").strip()
+    if hours:
+        m = re.match(r"^\\s*(\\d{1,2})\\s*[-:]\\s*(\\d{1,2})\\s*$", hours)
+        if m:
+            start_h = int(m.group(1))
+            end_h = int(m.group(2))
+            now_h = dt.datetime.now().hour
+            if start_h <= end_h:
+                economy_window = start_h <= now_h < end_h
+            else:
+                economy_window = now_h >= start_h or now_h < end_h
+
+    # Worker health (optional; only if cluster nodes.json exists and has enabled workers)
+    worker_healthy: Optional[bool] = None
+    try:
+        nodes_file = BASE_DIR / "state" / "cluster" / "nodes.json"
+        if nodes_file.exists():
+            cfg_nodes = _read_json(nodes_file)
+            nodes = cfg_nodes.get("nodes", []) if isinstance(cfg_nodes, dict) else []
+            enabled_workers = [
+                n
+                for n in nodes
+                if isinstance(n, dict)
+                and bool(n.get("enabled", True))
+                and str(n.get("role", "worker") or "worker").strip().lower() == "worker"
+            ]
+            if enabled_workers:
+                ok_any = False
+                for n in enabled_workers:
+                    host = str(n.get("host", "") or "").strip()
+                    port = int(n.get("port", 0) or 0)
+                    if not host or port <= 0:
+                        continue
+                    url = f"http://{host}:{port}/health"
+                    try:
+                        req = Request(url, method="GET", headers={"Accept": "application/json"})
+                        with urlopen(req, timeout=3) as resp:
+                            raw = resp.read().decode("utf-8", errors="replace")
+                        payload = json.loads(raw) if raw.strip() else {}
+                        ok = bool(payload.get("ok", False))
+                        if ok:
+                            ok_any = True
+                            break
+                    except Exception:
+                        continue
+                worker_healthy = ok_any
+            else:
+                worker_healthy = None
+    except Exception:
+        worker_healthy = None
+
+    summary = _read_json_if_exists(run_dir / "run_summary.json")
+    totals = summary.get("totals", {}) if isinstance(summary, dict) else {}
+    fail_count = int(totals.get("fail", 0) or 0)
+    step_count = int(totals.get("steps", 0) or 0)
+    runs = max(1, step_count)
+
+    decision = decide_ops_tier(
+        daily_budget_usd=daily_budget,
+        spent_usd=spent_usd,
+        failures=fail_count,
+        runs=runs,
+        critical_failures=critical_failures,
+        paused=paused,
+        paused_reasons=paused_reasons,
+        worker_healthy=worker_healthy,
+        disk_free_gb=disk_free_gb,
+        consecutive_failures=consecutive_failures,
+        consecutive_failure_threshold=int(cfg.get("consecutive_failure_threshold", 3) or 3),
+        low_credit_reasons=low_credit_reasons,
+        economy_window=economy_window,
+        budget_near_limit_ratio=float(cfg.get("budget_near_limit_ratio", 0.85) or 0.85),
+    )
+    report = {
+        "run_id": run_config.get("run_id", run_dir.name),
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        **decision_to_dict(decision),
+    }
+    if persist:
+        p = _ops_tier_report_path(run_dir)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(p, report)
+    return report
+
+
+def _require_expensive_steps_allowed(run_dir: Path, run_config: Dict[str, Any], step_name: str, log: logging.Logger) -> Dict[str, Any]:
+    report = _ops_tier_report(run_dir, run_config, persist=True)
+    allowed = bool((report.get("directives") or {}).get("allow_expensive_steps", False))
+    if allowed:
+        return report
+    tier = report.get("tier", "unknown")
+    reason = report.get("reason", "no reason")
+    reasons = report.get("reasons", []) if isinstance(report, dict) else []
+    reasons_s = ", ".join(str(x) for x in reasons if str(x).strip()) or ""
+    report_path = _ops_tier_report_path(run_dir)
+    msg = (
+        f"{step_name} blocked by operational tier '{tier}': {reason}"
+        + (f" (reasons=[{reasons_s}])" if reasons_s else "")
+        + f". See {report_path}."
+    )
+    log.error(msg)
+    raise RuntimeError(msg)
+
+
+def _pre_gate1_auto_checks(run_dir: Path) -> Dict[str, Any]:
+    guard = _read_json_if_exists(run_dir / "security" / "input_guard_report.json")
+    checks = {
+        "input_guard": {
+            "exists": bool(guard),
+            "status": "MISSING",
+            "fail_reason_codes": [],
+            "warn_reason_codes": [],
+            "blocked_count": 0,
+        }
+    }
+    if guard:
+        status = str(guard.get("status", "") or "").strip().upper()
+        if status not in {"OK", "WARN", "FAIL"}:
+            # Back-compat
+            highest = str(guard.get("highest_threat_level", "low")).lower()
+            blocked_count = int(guard.get("blocked_count", 0) or 0)
+            if highest == "critical" or blocked_count > 0:
+                status = "FAIL"
+            elif highest == "high":
+                status = "WARN"
+            else:
+                status = "OK"
+        blocked_count = int(guard.get("blocked_count", 0) or 0)
+        checks["input_guard"] = {
+            "exists": True,
+            "status": status,
+            "fail_reason_codes": guard.get("fail_reason_codes", []) if isinstance(guard, dict) else [],
+            "warn_reason_codes": guard.get("warn_reason_codes", []) if isinstance(guard, dict) else [],
+            "blocked_count": blocked_count,
+        }
+    fail_items = [k for k, v in checks.items() if v["status"] == "FAIL" or not v["exists"]]
+    warn_items = [k for k, v in checks.items() if v["status"] == "WARN"]
+    checks["ok_for_gate1"] = len(fail_items) == 0
+    checks["has_warn"] = len(warn_items) > 0
+    checks["fail_items"] = fail_items
+    checks["warn_items"] = warn_items
+    return checks
+
+
+def _pre_gate2_auto_checks(run_dir: Path) -> Dict[str, Any]:
+    originality = _read_json_if_exists(run_dir / "originality_report.json")
+    compliance = _read_json_if_exists(run_dir / "compliance_report.json")
+    ops_tier = _read_json_if_exists(_ops_tier_report_path(run_dir)) or _read_json_if_exists(run_dir / "ops_tier_report.json")
+    assets_manifest = _read_json_if_exists(run_dir / "assets_manifest.json")
+    voice_file = run_dir / "voice" / "voiceover.mp3"
+    render_ready_flag = run_dir / "davinci" / "render_ready.flag"
+    tier_status = "MISSING"
+    if ops_tier:
+        tier = str(ops_tier.get("tier", "")).lower()
+        if tier in {"critical", "paused"}:
+            tier_status = "FAIL"
+        elif tier == "low_compute":
+            tier_status = "WARN"
+        elif tier == "normal":
+            tier_status = "OK"
+        else:
+            tier_status = "WARN"
+    checks = {
+        "originality": {
+            "exists": bool(originality),
+            "status": str(originality.get("status", "MISSING")).upper() if originality else "MISSING",
+            "exit_code": int(originality.get("exit_code", 2)) if originality else 2,
+            "reasons": originality.get("reasons", []) if isinstance(originality, dict) else [],
+        },
+        "compliance": {
+            "exists": bool(compliance),
+            "status": str(compliance.get("status", "MISSING")).upper() if compliance else "MISSING",
+            "exit_code": int(compliance.get("exit_code", 2)) if compliance else 2,
+            "reasons": compliance.get("reasons", []) if isinstance(compliance, dict) else [],
+        },
+        "ops_tier": {
+            "exists": bool(ops_tier),
+            "status": tier_status,
+            "tier": str(ops_tier.get("tier", "unknown")) if isinstance(ops_tier, dict) else "unknown",
+            "reason": str(ops_tier.get("reason", "")) if isinstance(ops_tier, dict) else "",
+        },
+        "render_inputs": {
+            "exists": True,
+            "status": "OK",
+            "voiceover_exists": voice_file.exists(),
+            "render_ready_flag_exists": render_ready_flag.exists(),
+            "assets_complete": False,
+            "ready_products": 0,
+            "total_products": 0,
+        },
+    }
+
+    assets = assets_manifest.get("assets", []) if isinstance(assets_manifest, dict) else []
+    total_products = len(assets)
+    ready_products = 0
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        files = asset.get("files", {}) if isinstance(asset.get("files"), dict) else {}
+        dzine_images = files.get("dzine_images", [])
+        if not isinstance(dzine_images, list):
+            dzine_images = []
+        existing = sum(1 for rel in dzine_images if (run_dir / str(rel)).exists())
+        required = max(1, len(dzine_images))
+        if existing >= required:
+            ready_products += 1
+    assets_complete = total_products > 0 and ready_products >= total_products
+    checks["render_inputs"]["assets_complete"] = assets_complete
+    checks["render_inputs"]["ready_products"] = ready_products
+    checks["render_inputs"]["total_products"] = total_products
+
+    if not voice_file.exists() or not render_ready_flag.exists() or not assets_complete:
+        checks["render_inputs"]["status"] = "FAIL"
+
+    fail_items = [k for k, v in checks.items() if v["status"] == "FAIL" or not v["exists"]]
+    warn_items = [k for k, v in checks.items() if v["status"] == "WARN"]
+    checks["ok_for_gate2"] = len(fail_items) == 0
+    checks["has_warn"] = len(warn_items) > 0
+    checks["fail_items"] = fail_items
+    checks["warn_items"] = warn_items
+    return checks
+
+
+def _cmd_gate_decision(args, gate_name: str, approved: bool):
+    run_dir, run_id, run_config = load_run(args)
+    reviewer = str(getattr(args, "reviewer", "") or "Ray").strip() or "Ray"
+    notes = str(getattr(args, "notes", "") or "").strip()
+    decision = "approved" if approved else "rejected"
+    log = setup_logger(run_dir, f"{gate_name}_decision")
+
+    if gate_name == "gate1" and approved:
+        checks = _pre_gate1_auto_checks(run_dir)
+        if not checks["ok_for_gate1"]:
+            details = ", ".join(
+                f"{k}:{checks[k]['status']}" for k in checks["fail_items"]
+            ) or "missing pre-gate1 reports"
+            raise RuntimeError(
+                "Cannot approve gate1: automatic input contracts failed/missing "
+                f"({details}). Run generate-script to produce input guard report."
+            )
+
+    if gate_name == "gate2" and approved:
+        _ops_tier_report(run_dir, run_config, persist=True)
+        checks = _pre_gate2_auto_checks(run_dir)
+        if not checks["ok_for_gate2"]:
+            details = ", ".join(
+                f"{k}:{checks[k]['status']}" for k in checks["fail_items"]
+            ) or "missing pre-gate2 reports"
+            guidance = "Run validate-originality and validate-compliance first."
+            if "render_inputs" in checks["fail_items"]:
+                ri = checks.get("render_inputs", {})
+                guidance = (
+                    "Complete render inputs first (voice/voiceover.mp3, all Dzine images, "
+                    "and davinci/render_ready.flag)."
+                )
+            raise RuntimeError(
+                "Cannot approve gate2: automatic quality contracts failed/missing "
+                f"({details}). {guidance}"
+            )
+
+    set_gate_decision(
+        run_dir=run_dir,
+        run_config=run_config,
+        gate_name=gate_name,
+        decision=decision,
+        reviewer=reviewer,
+        notes=notes,
+    )
+
+    log_ops_event(
+        run_id,
+        "quality_gate_decision",
+        {
+            "gate": gate_name,
+            "decision": decision,
+            "reviewer": reviewer,
+            "notes": notes,
+            "pre_gate1_checks": _pre_gate1_auto_checks(run_dir) if gate_name == "gate1" else {},
+            "pre_gate2_checks": _pre_gate2_auto_checks(run_dir) if gate_name == "gate2" else {},
+        },
+    )
+    log.info(f"{gate_name} {decision} by {reviewer}")
+    print(f"[OK] {gate_name} set to {decision} by {reviewer}")
+
+
+def cmd_approve_gate1(args):
+    _cmd_gate_decision(args, "gate1", True)
+
+
+def cmd_reject_gate1(args):
+    _cmd_gate_decision(args, "gate1", False)
+
+
+def cmd_approve_gate2(args):
+    _cmd_gate_decision(args, "gate2", True)
+
+
+def cmd_reject_gate2(args):
+    _cmd_gate_decision(args, "gate2", False)
+
+
+# ===================================================================
+# LEARNING GATE
+# ===================================================================
+
+
+def _run_learning_gate(video_id: str, stage: str) -> None:
+    """Run the learning gate check. Raises RuntimeError if blocked."""
     try:
         from tools.learning_gate import learning_gate
         result = learning_gate(video_id, stage)
         if result.blocked:
-            print(f"\n--- Learning Gate BLOCKED ---")
-            print(f"  {result.reason}")
-            for c in result.checks:
-                status = "PASS" if c.passed else "FAIL"
-                print(f"  [{status}] {c.name}: {c.reason}")
-            print("---")
-            return EXIT_ACTION_REQUIRED
-    except Exception:
-        pass  # Non-blocking; graceful degradation
-    return None
+            raise RuntimeError(f"Learning gate blocked: {result.reason}")
+    except ImportError:
+        pass  # Learning system not installed yet
 
 
-def _print_header(title: str) -> None:
-    print(f"\n{'=' * 50}")
-    print(f"  {title}")
-    print(f"{'=' * 50}\n")
+# ===================================================================
+# RUNS
+# ===================================================================
 
 
-def _load_products(paths: VideoPaths):
-    """Load and return products list from products.json, or None if missing."""
-    if not paths.products_json.is_file():
-        return None
-    from tools.lib.amazon_research import load_products_json
-    return load_products_json(paths.products_json)
-
-
-def _load_niche(paths: VideoPaths) -> str:
-    """Load niche string from niche.txt."""
-    if paths.niche_txt.is_file():
-        return paths.niche_txt.read_text(encoding="utf-8").strip()
-    return ""
-
-
-def _products_to_entries(products, raw_data: dict | None = None):
-    """Convert AmazonProduct list to ProductEntry list for script_schema.
-
-    If raw_data is provided (the full products.json dict), extract
-    source_evidence per product so review data flows into script prompts.
-    """
-    from tools.lib.script_schema import ProductEntry
-
-    # Build a rank → raw product dict lookup for evidence
-    raw_by_rank: dict[int, dict] = {}
-    if raw_data:
-        for rp in raw_data.get("products", []):
-            raw_by_rank[rp.get("rank", 0)] = rp
-
-    entries = []
-    for p in products:
-        raw = raw_by_rank.get(p.rank, {})
-        evidence = raw.get("evidence", [])
-
-        entries.append(ProductEntry(
-            rank=p.rank,
-            name=p.name,
-            positioning=p.positioning,
-            benefits=p.benefits,
-            target_audience=p.target_audience,
-            downside=p.downside,
-            amazon_url=p.affiliate_url or p.amazon_url,
-            source_evidence=evidence,
-        ))
-    return entries
-
-
-# ---------------------------------------------------------------------------
-# Subcommands
-# ---------------------------------------------------------------------------
-
-
-def cmd_init(args) -> int:
-    """Initialize a new video project."""
-    from tools.lib.pipeline_status import start_pipeline, update_milestone
-    from tools.lib.notify import notify_start
-
-    _print_header(f"Init: {args.video_id}")
-
-    paths = VideoPaths(args.video_id)
-
-    if paths.root.exists() and not args.force:
-        print(f"Video folder already exists: {paths.root}")
-        print("Use --force to reinitialize")
-        return EXIT_ERROR
-
-    # Create directory structure
-    paths.ensure_dirs()
-    print(f"Created directory structure at {paths.root}")
-
-    # Write niche.txt
-    paths.niche_txt.write_text(args.niche + "\n", encoding="utf-8")
-    print(f"Niche: {args.niche}")
-
-    # Generate subcategory contract
-    from tools.lib.subcategory_contract import generate_contract, write_contract
-    from tools.lib.dzine_schema import detect_category
-    contract = generate_contract(args.niche, detect_category(args.niche))
-    write_contract(contract, paths.subcategory_contract)
-    print(f"Wrote subcategory contract ({contract.category}): {len(contract.allowed_keywords)} allowed, {len(contract.disallowed_keywords)} disallowed keywords")
-
-    # Write empty products.json template
-    if not paths.products_json.is_file() or args.force:
-        template = {
-            "keyword": args.niche,
-            "generated_at": now_iso(),
-            "products": [
-                {
-                    "rank": rank,
-                    "name": "",
-                    "positioning": "",
-                    "benefits": [],
-                    "target_audience": "",
-                    "downside": "",
-                    "amazon_url": "",
-                    "price": "",
-                    "rating": "",
-                    "reviews_count": "",
-                    "image_url": "",
-                    "asin": "",
-                }
-                for rank in [5, 4, 3, 2, 1]
-            ],
-        }
-        paths.products_json.write_text(
-            json.dumps(template, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        print(f"Created products.json template (fill in product data)")
-
-    # Initialize status
-    start_pipeline(args.video_id)
-    update_milestone(args.video_id, "research", "")
-
-    # Notify
-    notify_start(args.video_id, details=[
-        f"Niche: {args.niche}",
-        f"Folder: {paths.root}",
-    ])
-
-    print(f"\nNext: Fill in {paths.products_json}")
-    print(f"      Then run: python3 tools/pipeline.py research --video-id {args.video_id}")
-    return EXIT_OK
-
-
-def cmd_research(args) -> int:
-    """Run the full research pipeline (RUN mode) or validate existing (BUILD mode).
-
-    Default is RUN mode: executes the full chain end-to-end:
-      niche_picker -> research_agent (browse pages) -> amazon_verify -> top5_ranker
-
-    BUILD mode: only validate existing products.json for pipeline readiness.
-    """
-    import datetime
-    from tools.lib.pipeline_status import update_milestone, record_error
-    from tools.lib.notify import (
-        notify_progress, notify_start, notify_action_required, notify_summary,
-    )
-
-    mode = getattr(args, "mode", "run")
-    dry_run = getattr(args, "dry_run", False)
-    force = getattr(args, "force", False)
-
-    _print_header(f"Research: {args.video_id} [{mode.upper()} mode]")
-    _pre_run_learning_check("research")
-    gate = _run_learning_gate(args.video_id, "research")
-    if gate is not None:
-        return gate
-
-    paths = VideoPaths(args.video_id)
-    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-
-    # BUILD mode: just validate existing products.json
-    if mode == "build":
-        return _validate_existing_products(args.video_id, paths)
-
-    # ---------------------------------------------------------------
-    # RUN mode: execute the full research pipeline
-    # ---------------------------------------------------------------
-
-    # --- Step 1: Niche ---
-    niche = _load_niche(paths)
-    if not niche:
-        print("Step 1: Picking niche...")
-        from tools.niche_picker import pick_niche, update_history
-        candidate = pick_niche(today)
-        niche = candidate.keyword
-        paths.ensure_dirs()
-        paths.niche_txt.write_text(niche + "\n", encoding="utf-8")
-        update_history(
-            niche, today, video_id=args.video_id,
-            category=candidate.category, subcategory=candidate.subcategory,
-            intent=candidate.intent,
-        )
-        print(f"  Niche: {niche}")
-        print(f"  Score: {candidate.static_score:.0f} (static) + rotation bonus")
-        print(f"  Intent: {candidate.intent} | Band: {candidate.price_band}")
-    else:
-        print(f"Step 1: Niche: {niche}")
-
-    # Generate subcategory contract if not already present
-    if not paths.subcategory_contract.is_file():
-        from tools.lib.subcategory_contract import generate_contract, write_contract
-        from tools.lib.dzine_schema import detect_category
-        contract = generate_contract(niche, detect_category(niche))
-        write_contract(contract, paths.subcategory_contract)
-        print(f"  Wrote subcategory contract ({contract.category})")
-
-    update_milestone(args.video_id, "research", "search_started")
-    notify_start(args.video_id, details=[f"Niche: {niche}", "Research started"])
-
-    # --- Step 2: Research agent (browse real pages) ---
-    # Preflight check (research uses browser for page fetching)
-    from tools.lib.preflight import preflight_check as _pf_check
-    pf = _pf_check("research")
-    if not pf.passed:
-        for f in pf.failures:
-            print(f"  Preflight: {f}", file=sys.stderr)
-
-    shortlist_path = paths.root / "inputs" / "shortlist.json"
-    report_path = paths.root / "inputs" / "research_report.md"
-
-    if shortlist_path.is_file() and not force:
-        print(f"\nStep 2: Shortlist exists ({shortlist_path.name}), skipping research")
-        print(f"  Use --force to re-run research")
-        shortlist_data = json.loads(shortlist_path.read_text(encoding="utf-8"))
-        shortlist = shortlist_data.get("shortlist", [])
-    else:
-        print(f"\nStep 2: Running research agent for '{niche}'...")
-        from tools.research_agent import run_reviews_research
-
-        report = run_reviews_research(
-            args.video_id, niche,
-            output_dir=paths.root / "inputs",
-            force=force,
-            dry_run=dry_run,
-            contract_path=paths.subcategory_contract,
-        )
-
-        if dry_run:
-            print("\n[DRY RUN] Would continue with Amazon verify + Top 5 ranking")
-            return EXIT_OK
-
-        shortlist_data = json.loads(shortlist_path.read_text(encoding="utf-8"))
-        shortlist = shortlist_data.get("shortlist", [])
-
-        # Check DONE criteria
-        if report.validation_errors:
-            print(f"\n  Research DONE criteria NOT met:")
-            for err in report.validation_errors:
-                print(f"    - {err}")
-            _log_error(args.video_id, "research", report.validation_errors[0],
-                       exit_code=2, context={"command": "research"})
-            notify_action_required(
-                args.video_id, "research",
-                f"Research incomplete: {report.validation_errors[0]}",
-                next_action="Review research_report.md and re-run or add sources manually",
-            )
-            return EXIT_ACTION_REQUIRED
-
-    if not shortlist:
-        print("\n  No candidates found.")
-        _log_error(args.video_id, "research", "Empty shortlist",
-                   exit_code=2, context={"command": "research"})
-        notify_action_required(
-            args.video_id, "research", "No candidates from trusted sources",
-            next_action="Try a different niche or add products manually",
-        )
-        return EXIT_ACTION_REQUIRED
-
-    update_milestone(args.video_id, "research", "shortlist_built")
-    notify_progress(
-        args.video_id, "research", "shortlist_built",
-        progress_done=len(shortlist), progress_total=len(shortlist),
-        next_action="Verifying on Amazon US",
-        details=[f"Shortlist: {len(shortlist)} products from reviewed articles"],
-    )
-
-    # --- Step 3: Amazon verification ---
-    verified_path = paths.root / "inputs" / "verified.json"
-
-    if verified_path.is_file() and not force:
-        print(f"\nStep 3: Verified products exist ({verified_path.name}), skipping")
-        verified_data = json.loads(verified_path.read_text(encoding="utf-8"))
-        verified = verified_data.get("products", [])
-    else:
-        print(f"\nStep 3: Verifying {len(shortlist)} products on Amazon US...")
-        import time as _time
-        from tools.amazon_verify import verify_products, write_verified
-
-        verified_objs = verify_products(shortlist, video_id=args.video_id)
-
-        # Retry once if <5 products verified and shortlist had enough candidates
-        if len(verified_objs) < 5 and len(shortlist) >= 5:
-            verified_names = {v.product_name.lower() for v in verified_objs}
-            failed = [s for s in shortlist if s.get("product_name", "").lower() not in verified_names]
-            if failed:
-                print(f"  Retrying {len(failed)} failed verifications...")
-                _time.sleep(5)
-                retry_objs = verify_products(failed, video_id=args.video_id)
-                verified_objs.extend(retry_objs)
-
-        # Build shortlist lookup to enrich verified products with research data
-        _sl_lookup = {s.get("product_name", "").lower(): s for s in shortlist}
-
-        verified = []
-        for v in verified_objs:
-            sl = _sl_lookup.get(v.product_name.lower(), {})
-
-            # Build evidence with reasons from shortlist research
-            evidence_enriched = []
-            ebs = sl.get("evidence_by_source", {})
-            for src in v.evidence or sl.get("sources", []):
-                src_copy = dict(src)
-                src_name = src.get("name", "").lower()
-                # Merge reasons from evidence_by_source
-                if not src_copy.get("reasons") and src_name in ebs:
-                    src_copy["reasons"] = ebs[src_name].get("key_claims", [])
-                if not src_copy.get("reasons"):
-                    src_copy["reasons"] = sl.get("reasons", [])
-                evidence_enriched.append(src_copy)
-
-            # Build key_claims from evidence_by_source
-            key_claims = v.key_claims or []
-            if not key_claims:
-                for src_data in ebs.values():
-                    key_claims.extend(src_data.get("key_claims", []))
-
-            verified.append({
-                "product_name": v.product_name,
-                "brand": v.brand,
-                "asin": v.asin,
-                "amazon_url": v.amazon_url,
-                "affiliate_url": v.affiliate_url,
-                "affiliate_short_url": v.affiliate_short_url,
-                "amazon_title": v.amazon_title,
-                "amazon_price": v.amazon_price,
-                "amazon_rating": v.amazon_rating,
-                "amazon_reviews": v.amazon_reviews,
-                "amazon_image_url": v.amazon_image_url,
-                "match_confidence": v.match_confidence,
-                "verification_method": v.verification_method,
-                "evidence": evidence_enriched,
-                "key_claims": key_claims,
-                "downside": sl.get("downside", ""),
-            })
-        write_verified(verified_objs, verified_path)
-        print(f"  Verified: {len(verified)}/{len(shortlist)}")
-
-    if not verified:
-        print("\n  No products verified on Amazon US.")
-        _log_error(args.video_id, "research", "No verified products",
-                   exit_code=2, context={"command": "research"})
-        notify_action_required(
-            args.video_id, "research", "No products found on Amazon",
-            next_action="Check shortlist and verify manually",
-        )
-        return EXIT_ACTION_REQUIRED
-
-    # --- Step 4: Top 5 ranking ---
-    print(f"\nStep 4: Selecting Top 5...")
-    from tools.top5_ranker import select_top5, write_products_json
-
-    top5 = select_top5(verified)
-
-    write_products_json(
-        top5, niche, paths.products_json,
-        video_id=args.video_id, date=today,
-    )
-
-    update_milestone(args.video_id, "research", "affiliate_links_ready")
-
-    # Supabase: save top 5 products
-    try:
-        from tools.lib.supabase_pipeline import ensure_run_id, save_top5_product
-        rid = ensure_run_id(args.video_id, "research")
-        if rid:
-            for p in top5:
-                save_top5_product(rid,
-                                  rank=p.get("rank", 0),
-                                  asin=p.get("asin", ""),
-                                  role_label=p.get("category_label", ""),
-                                  benefits=p.get("benefits", []),
-                                  downside=p.get("downside", ""),
-                                  affiliate_short_url=p.get("affiliate_short_url", ""))
-    except Exception:
-        pass
-
-    print(f"\n  Top 5 ({niche}):")
-    for p in top5:
-        conf = p.get("match_confidence", "?")
-        print(f"    #{p['rank']} {p.get('product_name', '?'):<45s} [{p.get('category_label', '?')}] ({conf})")
-
-    notify_progress(
-        args.video_id, "research", "affiliate_links_ready",
-        next_action=f"python3 tools/pipeline.py script --video-id {args.video_id}",
-        details=[
-            f"Top 5 locked for '{niche}'",
-            f"Verified {len(verified)} products, ranked {len(top5)}",
-        ],
-    )
-
-    # --- Approval gate: Top 5 products ---
-    from tools.lib.pipeline_approval import request_approval
-
-    no_approval = getattr(args, "no_approval", False)
-    detail_lines = [f"Niche: {niche}"]
-    for p in top5:
-        detail_lines.append(
-            f"  #{p['rank']} {p.get('product_name', '?')}"
-            f" - {p.get('amazon_price', '?')}"
-            f" ({p.get('amazon_rating', '?')}*)"
-            f" [{p.get('category_label', '?')}]"
-        )
-    detail_lines.append("")
-    detail_lines.append("Products saved. Reject to edit products.json.")
-
-    approved = request_approval(
-        "products", f"Top 5 for '{niche}'", detail_lines,
-        video_id=args.video_id, skip=no_approval,
-    )
-    if not approved:
-        print("\nProducts rejected/timed out. Edit products.json and re-run.")
-        return EXIT_ACTION_REQUIRED
-
-    print(f"\nWrote {paths.products_json}")
-    print(f"\nNext: python3 tools/pipeline.py script --video-id {args.video_id}")
-    return EXIT_OK
-
-
-def _validate_existing_products(video_id: str, paths: VideoPaths) -> int:
-    """BUILD mode: validate existing products.json."""
-    from tools.lib.amazon_research import validate_products
-    from tools.lib.pipeline_status import update_milestone, record_error
-
-    if not paths.products_json.is_file():
-        print(f"products.json not found: {paths.products_json}")
-        print(f"\nRun in RUN mode (default) to generate it:")
-        print(f"  python3 tools/pipeline.py research --video-id {video_id}")
-        return EXIT_ACTION_REQUIRED
-
-    products = _load_products(paths)
-    if products is None:
-        print("Failed to load products.json")
-        return EXIT_ERROR
-
-    errors = validate_products(products)
-    if errors:
-        print(f"Validation failed ({len(errors)} issues):")
-        for e in errors:
-            print(f"  - {e}")
-        _log_error(video_id, "research", errors[0],
-                   context={"command": "research", "mode": "build"})
-        record_error(video_id, "research", "validation", "; ".join(errors))
-        return EXIT_ERROR
-
-    missing_links = [p for p in products if not p.affiliate_url and not p.amazon_url]
-    if missing_links:
-        print("Products missing URLs:")
-        for p in missing_links:
-            print(f"  - Rank {p.rank}: {p.name}")
-        return EXIT_ACTION_REQUIRED
-
-    update_milestone(video_id, "research", "affiliate_links_ready")
-    print(f"Products validated: {len(products)} products ready")
-    for p in sorted(products, key=lambda x: -x.rank):
-        url = p.affiliate_url or p.amazon_url
-        print(f"  #{p.rank} {p.name} — {url[:50]}...")
-
-    print(f"\nNext: python3 tools/pipeline.py script --video-id {video_id}")
-    return EXIT_OK
-
-
-def cmd_script(args) -> int:
-    """Generate script prompts, optionally auto-generate script via LLM APIs."""
-    from tools.lib.script_schema import (
-        ScriptRequest,
-        build_extraction_prompt,
-        build_draft_prompt,
-        build_refinement_prompt,
-        validate_request,
-    )
-    from tools.lib.pipeline_status import update_milestone
-    from tools.lib.notify import notify_progress, notify_action_required, notify_error
-
-    _print_header(f"Script: {args.video_id}")
-    _pre_run_learning_check("script")
-    gate = _run_learning_gate(args.video_id, "script")
-    if gate is not None:
-        return gate
-
-    paths = VideoPaths(args.video_id)
-    generate = getattr(args, "generate", True)
-    force = getattr(args, "force", False)
-
-    # Load products
-    products = _load_products(paths)
-    if products is None:
-        print(f"products.json not found: {paths.products_json}")
-        print(f"\nNext: python3 tools/pipeline.py research --video-id {args.video_id}")
-        return EXIT_ACTION_REQUIRED
-
-    # Validate product data quality before script generation
-    from tools.lib.amazon_research import validate_products
-    product_errors = validate_products(products)
-    if product_errors:
-        print("Products not ready for script generation:")
-        for e in product_errors:
-            print(f"  - {e}")
-        print(f"\nFix products first: python3 tools/pipeline.py research --video-id {args.video_id}")
-        return EXIT_ACTION_REQUIRED
-
-    niche = _load_niche(paths)
-    if not niche:
-        print(f"niche.txt not found: {paths.niche_txt}")
-        return EXIT_ERROR
-
-    # Load raw JSON to pass evidence through to script prompts
-    raw_data = json.loads(paths.products_json.read_text(encoding="utf-8"))
-    entries = _products_to_entries(products, raw_data)
-    req = ScriptRequest(
-        niche=niche,
-        products=entries,
-        charismatic_type=args.charismatic,
-    )
-
-    errors = validate_request(req)
-    if errors:
-        print(f"Request validation failed:")
-        for e in errors:
-            print(f"  - {e}")
-        return EXIT_ERROR
-
-    # Generate prompts
-    paths.prompts_dir.mkdir(parents=True, exist_ok=True)
-
-    extraction = build_extraction_prompt([], niche)
-    prompt_path = paths.prompts_dir / "extraction_prompt.txt"
-    prompt_path.write_text(extraction, encoding="utf-8")
-    print(f"Wrote {prompt_path}")
-
-    draft = build_draft_prompt(req, "(paste extraction notes here)")
-    prompt_path = paths.prompts_dir / "draft_prompt.txt"
-    prompt_path.write_text(draft, encoding="utf-8")
-    print(f"Wrote {prompt_path}")
-
-    refine = build_refinement_prompt("(paste draft here)", args.charismatic)
-    prompt_path = paths.prompts_dir / "refine_prompt.txt"
-    prompt_path.write_text(refine, encoding="utf-8")
-    print(f"Wrote {prompt_path}")
-
-    # Write script template
-    template_path = paths.root / "script" / "script_template.txt"
-    template_lines = [
-        f"# Script Template: {niche}",
-        f"# Target: 1300-1800 words (8-12 min at 150 WPM)",
-        f"# Charismatic type: {args.charismatic}",
-        "",
-        "[HOOK]",
-        "# 100-150 words. Open with problem/tension.",
-        "",
-        "[AVATAR_INTRO]",
-        "# 3-6 seconds. Brief channel intro.",
-        "",
-    ]
-    for rank in [5, 4, 3, 2, 1]:
-        p = next((e for e in entries if e.rank == rank), None)
-        name = p.name if p else f"Product {rank}"
-        template_lines.extend([
-            f"[PRODUCT_{rank}]",
-            f"# 200-300 words. {name}",
-            f"# Include: positioning, 2-3 benefits, target audience, honest downside, transition",
-            "",
-        ])
-        if rank == 3:
-            template_lines.extend([
-                "[RETENTION_RESET]",
-                "# 50-80 words. Pattern interrupt / audience question.",
-                "",
-            ])
-    template_lines.extend([
-        "[CONCLUSION]",
-        "# CTA + affiliate disclosure.",
-        '# Must include: "affiliate", "commission", "no extra cost"',
-        "",
-    ])
-    template_path.write_text("\n".join(template_lines), encoding="utf-8")
-    print(f"Wrote {template_path}")
-
-    update_milestone(args.video_id, "script", "outline_generated")
-
-    # --generate: auto-generate script via LLM APIs
-    if generate:
-        if paths.script_txt.is_file() and not force:
-            print(f"\nScript already exists: {paths.script_txt}")
-            print("Use --force to regenerate")
-            _validate_existing_script(paths, args.video_id)
-            return EXIT_OK
-
-        return _auto_generate_script(
-            args.video_id, paths, draft, args.charismatic,
-            no_approval=getattr(args, "no_approval", False),
-        )
-
-    # Manual mode: check if script.txt already exists
-    if paths.script_txt.is_file():
-        print(f"\nFound existing script: {paths.script_txt}")
-        _validate_existing_script(paths, args.video_id)
-    else:
-        print(f"\nNext: Write {paths.script_txt} using the template and prompts")
-        print(f"      Or run with --generate to auto-generate via GPT-4o + Claude:")
-        print(f"      python3 tools/pipeline.py script --video-id {args.video_id} --generate")
-        return EXIT_ACTION_REQUIRED
-
-    return EXIT_OK
-
-
-def _auto_generate_script(
-    video_id: str,
-    paths: VideoPaths,
-    draft_prompt: str,
-    charismatic: str,
-    *,
-    no_approval: bool = False,
-) -> int:
-    """Auto-generate script via OpenAI (draft) + Anthropic (refinement)."""
-    import os
-    from tools.lib.script_generate import run_script_pipeline
-    from tools.lib.script_schema import build_refinement_prompt
-    from tools.lib.pipeline_status import update_milestone
-    from tools.lib.notify import notify_progress, notify_error
-
-    # Check API keys and browser mode
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    use_browser = os.environ.get("OPENCLAW_BROWSER_LLM", "") == "1" or (
-        not openai_key and not anthropic_key
-    )
-
-    if use_browser:
-        print("Browser LLM mode: will use logged-in Brave sessions")
-        if openai_key or anthropic_key:
-            print("  (API keys available as fallback)")
-    elif not openai_key:
-        print("OPENAI_API_KEY not set — will try browser for draft")
-        use_browser = True
-
-    skip_refine = not anthropic_key and not use_browser
-    if skip_refine:
-        print("ANTHROPIC_API_KEY not set — skipping refinement (using raw draft)")
-
-    refine_template = build_refinement_prompt("(paste draft here)", charismatic)
-
-    print(f"\nAuto-generating script for '{_load_niche(paths)}'...")
-    result = run_script_pipeline(
-        draft_prompt,
-        refine_template,
-        paths.root / "script",
-        openai_key=openai_key,
-        anthropic_key=anthropic_key,
-        skip_refinement=skip_refine,
-        use_browser=use_browser,
-    )
-
-    if not result.success:
-        for err in result.errors:
-            print(f"  Error: {err}")
-        _log_error(video_id, "script",
-                   result.errors[0] if result.errors else "Script generation failed",
-                   context={"command": "script", "mode": "generate"})
-        notify_error(
-            video_id, "script", "generation_failed",
-            result.errors[0] if result.errors else "Unknown error",
-        )
-        return EXIT_ERROR
-
-    # Validate the generated script
-    print(f"\nValidating generated script...")
-    _validate_existing_script(paths, video_id)
-
-    update_milestone(video_id, "script", "script_generated")
-
-    notify_progress(
-        video_id, "script", "script_generated",
-        details=[
-            f"Words: {result.word_count}",
-            f"Draft: {result.draft.model if result.draft else '?'} ({result.draft.duration_s:.0f}s)" if result.draft else "",
-            f"Refined: {result.refinement.model if result.refinement else 'skipped'}" if result.refinement else "",
-        ],
-        next_action=f"python3 tools/pipeline.py assets --video-id {video_id}",
-    )
-
-    # --- Approval gate: Script ---
-    from tools.lib.pipeline_approval import request_approval
-
-    wc = result.word_count
-    dur = f"{wc / 150:.1f}"
-    script_detail_lines = [
-        f"Words: {wc}",
-        f"Duration: ~{dur} min",
-        f"Charismatic: {charismatic}",
-        f"Path: {result.script_txt_path}",
-        "",
-        "Script saved. Reject to edit script.txt.",
-    ]
-    approved = request_approval(
-        "script", f"Script ({wc} words)", script_detail_lines,
-        video_id=video_id, skip=no_approval,
-    )
-    if not approved:
-        print("\nScript rejected/timed out. Edit script.txt and re-run.")
-        return EXIT_ACTION_REQUIRED
-
-    if result.errors:
-        print(f"\nWarnings:")
-        for err in result.errors:
-            print(f"  - {err}")
-
-    print(f"\nScript files:")
-    if result.script_raw_path:
-        print(f"  Raw draft:  {result.script_raw_path}")
-    if result.script_final_path:
-        print(f"  Refined:    {result.script_final_path}")
-    print(f"  Final:      {result.script_txt_path}")
-    print(f"\nNext: python3 tools/pipeline.py assets --video-id {video_id}")
-    return EXIT_OK
-
-
-def _validate_existing_script(paths: VideoPaths, video_id: str) -> None:
-    """Validate an existing script.txt and write metadata."""
-    from tools.lib.pipeline_status import update_milestone
-    from tools.lib.script_generate import (
-        _match_marker,
-        extract_metadata,
-        extract_script_body,
-        split_script_outputs,
-    )
-    from tools.lib.script_schema import (
-        SECTION_ORDER,
-        SPEAKING_WPM,
-        ScriptOutput,
-        ScriptSection,
-        validate_script,
-    )
-
-    raw_text = paths.script_txt.read_text(encoding="utf-8")
-    # Extract clean script body (normalizes markers + strips metadata)
-    text = extract_script_body(raw_text)
-    # Extract metadata — try script_final.txt first (has full LLM output),
-    # then fall back to script.txt (metadata may have been stripped)
-    meta_source = raw_text
-    if paths.script_final.is_file():
-        meta_source = paths.script_final.read_text(encoding="utf-8")
-    meta = extract_metadata(meta_source)
-
-    # Parse sections
-    marker_map = {
-        "[HOOK]": "hook",
-        "[AVATAR_INTRO]": "avatar_intro",
-        "[PRODUCT_5]": "product_5",
-        "[PRODUCT_4]": "product_4",
-        "[PRODUCT_3]": "product_3",
-        "[RETENTION_RESET]": "retention_reset",
-        "[PRODUCT_2]": "product_2",
-        "[PRODUCT_1]": "product_1",
-        "[CONCLUSION]": "conclusion",
-    }
-
-    sections: list[ScriptSection] = []
-    current_key: str | None = None
-    current_lines: list[str] = []
-
-    for line in text.splitlines():
-        matched = _match_marker(line)
-        if matched and matched in marker_map:
-            if current_key:
-                sections.append(ScriptSection(
-                    section_type=current_key,
-                    content="\n".join(current_lines).strip(),
-                ))
-            current_key = marker_map[matched]
-            current_lines = []
-        elif current_key:
-            current_lines.append(line)
-
-    if current_key:
-        sections.append(ScriptSection(
-            section_type=current_key,
-            content="\n".join(current_lines).strip(),
-        ))
-
-    # If avatar_intro is in metadata but missing from body sections,
-    # insert a placeholder section after hook (browser LLMs put it as metadata)
-    section_types = [s.section_type for s in sections]
-    if "avatar_intro" not in section_types and meta.get("avatar_intro"):
-        hook_idx = section_types.index("hook") + 1 if "hook" in section_types else 0
-        sections.insert(hook_idx, ScriptSection(
-            section_type="avatar_intro",
-            content="(avatar intro — see metadata)",
-        ))
-
-    output = ScriptOutput(
-        sections=sections,
-        avatar_intro=meta.get("avatar_intro", ""),
-        youtube_description=meta.get("youtube_description", ""),
-        thumbnail_headlines=meta.get("thumbnail_headlines", []),
-    )
-    errors = validate_script(output)
-
-    # Write script_meta.json
-    meta = {
-        "total_word_count": output.total_word_count,
-        "estimated_duration_min": output.estimated_duration_min,
-        "section_count": len(output.sections),
-        "validation_errors": errors,
-        "validated_at": now_iso(),
-    }
-    paths.script_meta.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-
-    print(f"  Word count: {output.total_word_count}")
-    print(f"  Duration:   {output.estimated_duration_min} min")
-    print(f"  Sections:   {len(output.sections)}")
-
-    if errors:
-        print(f"\n  Warnings ({len(errors)}):")
-        for e in errors:
-            print(f"    - {e}")
-    else:
-        print("  Validation: PASSED")
-
-    # Write split outputs: narration.txt, avatar.txt, youtube_desc.txt
-    outputs = split_script_outputs(text, {
-        "avatar_intro": output.avatar_intro,
-        "youtube_description": output.youtube_description,
-    })
-    paths.narration_txt.write_text(outputs["narration"], encoding="utf-8")
-    paths.avatar_txt.write_text(outputs["avatar"], encoding="utf-8")
-    paths.youtube_desc_txt.write_text(outputs["youtube_description"], encoding="utf-8")
-    print(f"  Split outputs: narration.txt, avatar.txt, youtube_desc.txt")
-
-    update_milestone(video_id, "script", "script_approved")
-
-
-def cmd_script_brief(args) -> int:
-    """Generate a structured manual brief from products.json + seo.json."""
-    from tools.lib.script_brief import generate_brief
-    from tools.lib.pipeline_status import update_milestone
-    from tools.lib.notify import notify_progress
-
-    _print_header(f"Script Brief: {args.video_id}")
-
-    paths = VideoPaths(args.video_id)
-
-    # Check prereqs
-    if not paths.products_json.is_file():
-        print(f"products.json not found: {paths.products_json}")
-        print(f"\nNext: python3 tools/pipeline.py research --video-id {args.video_id}")
-        return EXIT_ACTION_REQUIRED
-
-    niche = _load_niche(paths)
-    if not niche:
-        print(f"niche.txt not found: {paths.niche_txt}")
-        return EXIT_ERROR
-
-    # Load data
-    products_data = json.loads(paths.products_json.read_text(encoding="utf-8"))
-    seo_data = {}
-    if paths.seo_json.is_file():
-        seo_data = json.loads(paths.seo_json.read_text(encoding="utf-8"))
-
-    # Load channel style (optional)
-    style_path = project_root() / "channel" / "channel_style.md"
-    channel_style = style_path.read_text(encoding="utf-8") if style_path.is_file() else ""
-
-    # Generate brief
-    brief_text = generate_brief(niche, products_data, seo_data, channel_style=channel_style)
-    paths.manual_brief.parent.mkdir(parents=True, exist_ok=True)
-    paths.manual_brief.write_text(brief_text, encoding="utf-8")
-
-    product_count = len(products_data.get("products", []))
-    sources = products_data.get("sources_used", [])
-
-    update_milestone(args.video_id, "script", "brief_generated")
-
-    # Supabase: save brief
-    try:
-        from tools.lib.supabase_pipeline import ensure_run_id, save_script
-        rid = ensure_run_id(args.video_id, "script-brief")
-        if rid:
-            wc = len(brief_text.split())
-            save_script(rid, "brief", text=brief_text, word_count=wc)
-    except Exception:
-        pass
-
-    notify_progress(
-        args.video_id, "script", "brief_generated",
-        details=[
-            f"Niche: {niche}",
-            f"Products: {product_count}",
-            f"Sources: {', '.join(sources) if sources else 'derived'}",
-        ],
-    )
-
-    print(f"Wrote {paths.manual_brief}")
-    print(f"  Products: {product_count}")
-    print(f"  Sources:  {', '.join(sources) if sources else '(derived from niche)'}")
-    print(f"\nNext: Write your script in {paths.script_raw}")
-    print(f"      Then run: python3 tools/pipeline.py script-review --video-id {args.video_id}")
-    return EXIT_OK
-
-
-def cmd_script_review(args) -> int:
-    """Review script_raw.txt: validate claims, check structure, apply light fixes."""
-    from tools.lib.script_brief import review_script, format_review_notes, apply_light_fixes
-    from tools.lib.pipeline_status import update_milestone
-    from tools.lib.notify import notify_progress, notify_action_required
-
-    _print_header(f"Script Review: {args.video_id}")
-
-    paths = VideoPaths(args.video_id)
-
-    # Check prereqs
-    if not paths.script_raw.is_file():
-        print(f"script_raw.txt not found: {paths.script_raw}")
-        print(f"\nWrite your script there first, then re-run this command.")
-        return EXIT_ACTION_REQUIRED
-
-    if not paths.products_json.is_file():
-        print(f"products.json not found: {paths.products_json}")
-        return EXIT_ERROR
-
-    script_text = paths.script_raw.read_text(encoding="utf-8")
-    products_data = json.loads(paths.products_json.read_text(encoding="utf-8"))
-
-    # Run review
-    result = review_script(script_text, products_data)
-
-    # Write review notes
-    notes = format_review_notes(result, args.video_id)
-    paths.script_review_notes.parent.mkdir(parents=True, exist_ok=True)
-    paths.script_review_notes.write_text(notes, encoding="utf-8")
-    print(f"Wrote {paths.script_review_notes}")
-
-    # Print summary
-    print(f"\n  Word count: {result.word_count} (target: 1300-1800)")
-    print(f"  Duration:   {result.estimated_duration_min} min")
-
-    if result.section_word_counts:
-        print(f"\n  Sections:")
-        for sec, wc in result.section_word_counts.items():
-            print(f"    {sec}: {wc} words")
-
-    if result.errors:
-        print(f"\n  Errors ({len(result.errors)}):")
-        for issue in result.errors:
-            print(f"    [{issue.section}] {issue.message}")
-
-    if result.warnings:
-        print(f"\n  Warnings ({len(result.warnings)}):")
-        for issue in result.warnings:
-            print(f"    [{issue.section}] {issue.message}")
-
-    # Apply light fixes and write script_final.txt
-    fixed_text, changes = apply_light_fixes(script_text)
-    paths.script_final.parent.mkdir(parents=True, exist_ok=True)
-    paths.script_final.write_text(fixed_text, encoding="utf-8")
-    print(f"\nWrote {paths.script_final}")
-    if changes:
-        print(f"  Light fixes applied:")
-        for c in changes:
-            print(f"    - {c}")
-    else:
-        print(f"  No automatic fixes needed (clean copy)")
-
-    # Supabase: save review + final
-    try:
-        from tools.lib.supabase_pipeline import ensure_run_id as _ensure_rid, save_script as _save_scr
-        _rid = _ensure_rid(args.video_id, "script-review")
-        if _rid:
-            _save_scr(_rid, "review", text=notes, word_count=result.word_count)
-            _save_scr(_rid, "final", text=fixed_text, word_count=result.word_count,
-                       has_disclosure=result.has_disclosure if hasattr(result, "has_disclosure") else False)
-    except Exception:
-        pass
-
-    if result.passed:
-        update_milestone(args.video_id, "script", "script_approved")
-        notify_progress(
-            args.video_id, "script", "script_approved",
-            details=[f"Words: {result.word_count}", f"Errors: 0"],
-        )
-        print(f"\n  Verdict: PASS")
-        print(f"\nNext: Copy to script.txt and proceed:")
-        print(f"  cp {paths.script_final} {paths.script_txt}")
-        print(f"  python3 tools/pipeline.py tts --video-id {args.video_id}")
-        return EXIT_OK
-    else:
-        notify_action_required(
-            args.video_id, "script",
-            f"Script review: {len(result.errors)} error(s)",
-            next_action="Fix errors in script_raw.txt, re-run script-review",
-        )
-        print(f"\n  Verdict: NEEDS REVISION ({len(result.errors)} error(s))")
-        print(f"\nNext: Fix errors in {paths.script_raw}, then re-run:")
-        print(f"  python3 tools/pipeline.py script-review --video-id {args.video_id}")
-        return EXIT_ACTION_REQUIRED
-
-
-def _download_amazon_images(products, paths: VideoPaths) -> dict[int, Path]:
-    """Download Amazon product reference images for Dzine generation.
-
-    Returns {rank: local_path} for successfully downloaded images.
-    Skips if file already exists and is >10KB.
-    Retries up to 3 times with backoff. Validates content-type and body.
-    """
-    import time as _time
-    import urllib.request
-
-    MAX_RETRIES = 3
-    MIN_VALID_SIZE = 2 * 1024  # 2KB minimum for a real JPEG
-    KNOWN_ERROR_BODIES = {b"Not Found", b"AccessDenied", b"Forbidden"}
-
-    ref_images: dict[int, Path] = {}
-    paths.assets_amazon.mkdir(parents=True, exist_ok=True)
-
-    for p in products:
-        image_url = getattr(p, "image_url", "")
-        if not image_url:
-            continue
-        dest = paths.amazon_ref_image(p.rank)
-
-        # Check existing file validity (not just size, also content)
-        if dest.is_file() and dest.stat().st_size > 10 * 1024:
-            # Quick check: is it actually an image, not a text error?
-            try:
-                with open(dest, "rb") as f:
-                    head = f.read(16)
-                if head[:2] in (b"\xff\xd8", b"\x89P"):  # JPEG or PNG magic
-                    ref_images[p.rank] = dest
-                    continue
-            except OSError:
-                pass
-            # If not a valid image, re-download
-
-        downloaded = False
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                req = urllib.request.Request(image_url, headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-                })
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    content_type = resp.headers.get("Content-Type", "")
-                    if "image" not in content_type:
-                        print(f"  Warning: rank {p.rank} got content-type '{content_type}', not image (attempt {attempt})")
-                        if attempt < MAX_RETRIES:
-                            _time.sleep(2 ** attempt)
-                            continue
-                        break
-
-                    data = resp.read()
-
-                # Check for text error bodies
-                if len(data) < 256 and data.strip() in KNOWN_ERROR_BODIES:
-                    print(f"  Warning: rank {p.rank} returned '{data.decode(errors='replace').strip()}' (attempt {attempt})")
-                    if attempt < MAX_RETRIES:
-                        _time.sleep(2 ** attempt)
-                        continue
-                    break
-
-                # Check minimum size
-                if len(data) < MIN_VALID_SIZE:
-                    print(f"  Warning: rank {p.rank} image too small ({len(data)} bytes, attempt {attempt})")
-                    if attempt < MAX_RETRIES:
-                        _time.sleep(2 ** attempt)
-                        continue
-                    break
-
-                # Verify magic bytes (JPEG: FF D8, PNG: 89 50)
-                if data[:2] not in (b"\xff\xd8", b"\x89P"):
-                    print(f"  Warning: rank {p.rank} not a valid JPEG/PNG (attempt {attempt})")
-                    if attempt < MAX_RETRIES:
-                        _time.sleep(2 ** attempt)
-                        continue
-                    break
-
-                # Write atomically
-                tmp = dest.with_suffix(".tmp")
-                with open(tmp, "wb") as f:
-                    f.write(data)
-                tmp.replace(dest)
-                ref_images[p.rank] = dest
-                downloaded = True
-                print(f"  Downloaded ref image: {dest.name} ({len(data) // 1024}KB)")
-                break
-
-            except Exception as exc:
-                print(f"  Warning: rank {p.rank} download failed (attempt {attempt}): {exc}")
-                if attempt < MAX_RETRIES:
-                    _time.sleep(2 ** attempt)
-
-        if not downloaded:
-            print(f"  ERROR: could not download valid ref image for rank {p.rank} after {MAX_RETRIES} attempts")
-            # Clean up any bad file
-            if dest.is_file() and dest.stat().st_size < MIN_VALID_SIZE:
-                dest.unlink()
-
-    return ref_images
-
-
-def cmd_assets(args) -> int:
-    """Check/generate Dzine assets (thumbnail + variant product images)."""
-    from tools.lib.pipeline_status import update_milestone
-    from tools.lib.notify import notify_progress, notify_action_required
-    from tools.lib.preflight_gate import can_run_assets
-    from tools.lib.dzine_schema import (
-        DzineRequest, build_prompts, detect_category, variants_for_rank,
-    )
-
-    MIN_ASSET_SIZE = 80 * 1024  # 80 KB minimum for valid images
-
-    _print_header(f"Assets: {args.video_id}")
-    _pre_run_learning_check("dzine")
-    gate = _run_learning_gate(args.video_id, "assets")
-    if gate is not None:
-        return gate
-
-    # Preflight safety gate (skip on --dry-run so status check still works)
-    if not args.dry_run:
-        ok, reason = can_run_assets(args.video_id)
-        if not ok:
-            print(f"Blocked: {reason}")
-            notify_action_required(args.video_id, "assets", reason,
-                                   next_action="Fix the issue above, then re-run assets")
-            return EXIT_ACTION_REQUIRED
-
-        # Preflight session check: Brave + Dzine login
-        from tools.lib.preflight import preflight_check as _pf_check_assets
-        pf = _pf_check_assets("assets")
-        if not pf.passed:
-            for f in pf.failures:
-                print(f"Preflight: {f}")
-            notify_action_required(args.video_id, "assets", pf.failures[0],
-                                   next_action="Fix the issue above, then re-run assets")
-            return EXIT_ACTION_REQUIRED
-
-    paths = VideoPaths(args.video_id)
-
-    products = _load_products(paths)
-    if products is None:
-        print(f"products.json not found: {paths.products_json}")
-        return EXIT_ACTION_REQUIRED
-
-    niche = _load_niche(paths)
-    category = detect_category(niche) if niche else "default"
-
-    # Build needed list: 1 thumbnail + variant images per product
-    needed: list[tuple[str, Path, dict]] = []  # (label, path, params)
-    needed.append(("thumbnail", paths.thumbnail_path(), {
-        "asset_type": "thumbnail",
-        "product_name": niche or "Top 5 Products",
-        "key_message": "Top 5",
-    }))
-
-    for rank in [5, 4, 3, 2, 1]:
-        p = next((pr for pr in products if pr.rank == rank), None)
-        name = p.name if p else f"Product {rank}"
-        for variant in variants_for_rank(rank):
-            needed.append((
-                f"{rank:02d}_{variant}",
-                paths.product_image_path(rank, variant),
-                {
-                    "asset_type": "product",
-                    "product_name": name,
-                    "image_variant": variant,
-                    "niche_category": category,
-                },
-            ))
-
-    # Check existing
-    existing = []
-    missing = []
-    for label, path, params in needed:
-        if path.is_file() and path.stat().st_size >= MIN_ASSET_SIZE:
-            existing.append((label, path, params))
-        else:
-            missing.append((label, path, params))
-
-    print(f"Assets: {len(existing)} present, {len(missing)} missing (total: {len(needed)})")
-    for label, path, _ in existing:
-        size_kb = path.stat().st_size // 1024
-        print(f"  [x] {label} ({size_kb} KB)")
-    for label, path, _ in missing:
-        print(f"  [ ] {label}")
-
-    if args.dry_run:
-        if not missing:
-            print("\nAll assets present.")
-        return EXIT_OK
-
-    if not missing and not args.force:
-        print("\nAll assets present. Use --force to regenerate.")
-        update_milestone(args.video_id, "assets", "product_images_done")
-        return EXIT_OK
-
-    # Download Amazon reference images
-    print(f"\nDownloading Amazon reference images...")
-    ref_images = _download_amazon_images(products, paths)
-    print(f"  {len(ref_images)} reference images available")
-
-    # Import Dzine browser
-    try:
-        from tools.lib.dzine_browser import generate_image
-    except ImportError as exc:
-        print(f"Cannot import Dzine modules: {exc}")
-        print("Install playwright: pip install playwright && playwright install")
-        return EXIT_ERROR
-
-    paths.assets_dzine.mkdir(parents=True, exist_ok=True)
-    (paths.assets_dzine / "products").mkdir(parents=True, exist_ok=True)
-    (paths.assets_dzine / "prompts").mkdir(parents=True, exist_ok=True)
-
-    targets = missing if not args.force else needed
-    generated = 0
-    failed = 0
-
-    notify_progress(
-        args.video_id, "assets", "generation_started",
-        progress_done=0, progress_total=len(targets),
-        details=[f"Starting Dzine generation: {len(targets)} images"],
-    )
-
-    # Load variant-specific prompts from skill graph (detailed, scene-specific).
-    # Falls back to inline defaults if skill graph is unavailable.
-    _BACKDROP_PROMPTS_FALLBACK = {
-        "hero": "Premium dark matte surface with subtle reflections. Professional studio environment with three-point lighting: soft key light from 45-degree upper left, subtle fill from right, rim light highlighting product edges. Dark gradient background transitioning from charcoal to deep navy. Clean minimalist composition with dramatic cast shadow underneath. High-end e-commerce aesthetic.",
-        "usage1": "Modern living room with warm oak hardwood flooring. Beige fabric sofa in soft-focus background, indoor potted plants in terracotta pots. Natural afternoon sunlight streaming through large floor-to-ceiling windows from the left, creating warm golden tones and soft natural shadows. Scandinavian minimalist interior, clean and inviting atmosphere. Low-angle perspective at 15 degrees above floor level. Shallow depth of field with softly blurred background.",
-        "usage2": "Bright contemporary kitchen with white subway tile backsplash and marble countertops visible in soft-focus background. Polished medium-brown hardwood floor with warm tones. Morning sunlight from side window creating soft diffused illumination and gentle shadows. Clean modern aesthetic with stainless steel appliances blurred in background. 45-degree diagonal angle showing product in kitchen context.",
-        "detail": "Pure white seamless studio surface. Soft even diffused lighting from two large softboxes positioned above and to the sides. Minimal shadows, bright and clean high-key environment. Professional e-commerce product photography setup. Neutral, clinical, technical aesthetic. Top-down 90-degree overhead perspective for maximum detail visibility.",
-        "mood": "Dramatic industrial environment with polished concrete floor showing visible texture. Exposed brick wall with dark teal color grading in background. Single spotlight from upper left creating strong directional light and deep shadows. Atmospheric haze or light fog adding depth layers. Volumetric light rays visible in the air. Low-key cinematic lighting with warm amber key light and cool blue fill. Film noir aesthetic.",
-    }
-
-    def _get_backdrop_prompt(variant: str) -> str:
-        """Load prompt from skill graph, fall back to inline defaults."""
-        try:
-            from tools.lib.skill_graph import get_variant_prompt
-            prompt = get_variant_prompt(variant, "product-background")
-            if prompt:
-                return prompt
-        except Exception:
-            pass
-        return _BACKDROP_PROMPTS_FALLBACK.get(variant, _BACKDROP_PROMPTS_FALLBACK["hero"])
-
-    # Pre-run check: warn about known issues with current tool
-    try:
-        from tools.lib.skill_graph import pre_run_check
-        warnings = pre_run_check("product-background")
-        for w in warnings:
-            print(f"  [skill-graph] {w}")
-    except Exception:
-        pass
-
-    import random as _rng
-    import time as _time
-
-    for i, (label, dest_path, params) in enumerate(targets):
-        # Anti-bot: random delay between generations (skip first)
-        if i > 0:
-            delay = _rng.uniform(3.0, 8.0)
-            print(f"  (waiting {delay:.1f}s between generations)")
-            _time.sleep(delay)
-
-        print(f"\nGenerating {label} ({i+1}/{len(targets)})...")
-
-        # Add reference image if available for product variants
-        is_thumbnail = label == "thumbnail"
-        if not is_thumbnail:
-            rank = int(label.split("_")[0])
-            variant = label.split("_", 1)[1]
-            if rank in ref_images:
-                params["reference_image"] = str(ref_images[rank])
-
-        # Product variants with reference images → use product_faithful
-        # (Product Background preferred, fallback to BG Remove + Expand)
-        use_faithful = (not is_thumbnail
-                        and params.get("reference_image")
-                        and Path(params["reference_image"]).is_file())
-
-        if use_faithful:
-            from tools.lib.dzine_browser import generate_product_faithful
-            ref_path = params["reference_image"]
-            backdrop = _get_backdrop_prompt(variant)
-            aspect = "1:1" if variant == "detail" else "16:9"
-
-            # Save backdrop prompt
-            prompt_path = paths.product_prompt_path(rank, variant)
-            prompt_path.parent.mkdir(parents=True, exist_ok=True)
-            prompt_path.write_text(f"[product_faithful] backdrop: {backdrop}", encoding="utf-8")
-
-            result = generate_product_faithful(
-                ref_path,
-                output_path=dest_path,
-                backdrop_prompt=backdrop,
-                aspect=aspect,
-            )
-
-            if not result.success:
-                print(f"  Retry {label} (faithful)...")
-                result = generate_product_faithful(
-                    ref_path,
-                    output_path=dest_path,
-                    backdrop_prompt=backdrop,
-                    aspect=aspect,
-                )
-        else:
-            req = DzineRequest(**params)
-            req = build_prompts(req)
-
-            # Save prompt to prompts dir
-            if is_thumbnail:
-                prompt_path = paths.thumbnail_prompt_path()
-            else:
-                prompt_path = paths.product_prompt_path(rank, variant)
-            prompt_path.parent.mkdir(parents=True, exist_ok=True)
-            prompt_path.write_text(req.prompt, encoding="utf-8")
-
-            result = generate_image(req, output_path=dest_path)
-
-            if not result.success:
-                # Single retry
-                print(f"  Retry {label}...")
-                result = generate_image(req, output_path=dest_path)
-
-        if result.success and dest_path.is_file() and dest_path.stat().st_size >= MIN_ASSET_SIZE:
-            size_kb = dest_path.stat().st_size // 1024
-            print(f"  OK: {dest_path.name} ({size_kb} KB, {result.duration_s:.0f}s)")
-            generated += 1
-            # Supabase: upload + save asset
-            try:
-                from tools.lib.supabase_pipeline import (
-                    ensure_run_id as _erid, upload_video_file as _uvf, save_asset as _sa,
-                )
-                _asset_rid = _erid(args.video_id, "assets")
-                if _asset_rid:
-                    s_url = _uvf(args.video_id, "rayviewslab-assets", str(dest_path), f"assets/{label}.png")
-                    _sa(_asset_rid, asset_type=label, storage_url=s_url, ok=True)
-            except Exception:
-                pass
-        elif result.success and dest_path.is_file():
-            size_kb = dest_path.stat().st_size // 1024
-            print(f"  Warning: {dest_path.name} too small ({size_kb} KB)")
-            failed += 1
-        else:
-            print(f"  FAILED: {result.error}")
-            failed += 1
-            if "login" in (result.error or "").lower():
-                _log_error(args.video_id, "assets", "Dzine login required",
-                           exit_code=2, context={"command": "assets"})
-                notify_action_required(
-                    args.video_id, "assets", "Dzine login required",
-                    next_action="Log in to Dzine in the Brave browser",
-                )
-                return EXIT_ACTION_REQUIRED
-
-        # Telegram progress every 5 images
-        if (i + 1) % 5 == 0 or i + 1 == len(targets):
-            notify_progress(
-                args.video_id, "assets", f"generating",
-                progress_done=i + 1, progress_total=len(targets),
-            )
-
-    # --- Image approval gate ---
-    from tools.lib.telegram_image_approval import request_image_approval, ImageEntry
-    image_entries = []
-    for label, dest_path, params in needed:
-        if dest_path.is_file() and dest_path.stat().st_size >= MIN_ASSET_SIZE:
-            image_entries.append(ImageEntry(
-                label=label,
-                path=dest_path,
-                product_name=params.get("product_name", label),
-                variant=params.get("image_variant", "thumbnail"),
-            ))
-
-    if image_entries:
-        approval = request_image_approval(image_entries, video_id=args.video_id)
-        if approval.rejected:
-            print(f"\nRejected: {', '.join(approval.rejected)}")
-            notify_action_required(args.video_id, "assets",
-                f"{len(approval.rejected)} image(s) rejected",
-                next_action="Analyze failures and regenerate")
-            return EXIT_ACTION_REQUIRED
-
-    update_milestone(args.video_id, "assets", "product_images_done")
-
-    if failed == 0:
-        notify_progress(
-            args.video_id, "assets", "product_images_done",
-            progress_done=len(targets), progress_total=len(targets),
-            next_action=f"python3 tools/pipeline.py tts --video-id {args.video_id}",
-            details=[f"Generated {generated} images, 0 failed"],
-        )
-    else:
-        _log_error(args.video_id, "assets", f"{failed} image(s) failed generation",
-                   context={"command": "assets", "generated": generated, "failed": failed})
-        notify_action_required(
-            args.video_id, "assets",
-            f"{failed} image(s) failed generation",
-            next_action=f"Re-run: python3 tools/pipeline.py assets --video-id {args.video_id}",
-        )
-
-    print(f"\nGenerated: {generated}, Failed: {failed}")
-    print(f"\nNext: python3 tools/pipeline.py tts --video-id {args.video_id}")
-    return EXIT_OK if failed == 0 else EXIT_ERROR
-
-
-def cmd_discover_products(args) -> int:
-    """Discover Amazon products via browser or scrape."""
-    from tools.lib.amazon_research import save_products_json, validate_products
-    from tools.lib.notify import notify_progress
-
-    _print_header(f"Discover Products: {args.video_id}")
-
-    paths = VideoPaths(args.video_id)
-    paths.ensure_dirs()
-
-    # Determine search keyword
-    keyword = args.keyword or _load_niche(paths)
-    if not keyword:
-        print("No keyword provided and niche.txt not found.")
-        print("Use --keyword or run init first.")
-        return EXIT_ACTION_REQUIRED
-
-    # Check if products.json already exists
-    if paths.products_json.is_file() and not args.force:
-        products = _load_products(paths)
-        if products:
-            print(f"products.json already exists with {len(products)} products.")
-            print("Use --force to re-discover.")
-            return EXIT_OK
-
-    source = args.source
-    top_n = args.top_n
-    tag = args.tag
-
-    if source == "browser":
-        try:
-            from tools.amazon_browser import discover_products_browser, AmazonBrowserError
-        except ImportError as exc:
-            print(f"Cannot import amazon_browser: {exc}")
-            print("Install playwright: pip install playwright && playwright install")
-            return EXIT_ERROR
-
-        try:
-            products = discover_products_browser(
-                keyword=keyword,
-                affiliate_tag=tag,
-                top_n=top_n,
-                min_rating=args.min_rating,
-                min_reviews=args.min_reviews,
-            )
-        except AmazonBrowserError as exc:
-            print(f"Browser discovery failed: {exc}")
-            _log_error(args.video_id, "discover-products", str(exc),
-                       context={"source": source, "keyword": keyword})
-            return EXIT_ACTION_REQUIRED
-        finally:
-            try:
-                from tools.amazon_browser import close_session
-                close_session()
-            except Exception:
-                pass
-
-    else:
-        # Scrape path: raw HTTP (existing behavior, may hit 403)
-        print(f"Source '{source}' not yet implemented. Use --source browser.")
-        return EXIT_ERROR
-
-    if not products:
-        print(f"No products found for: {keyword}")
-        return EXIT_ACTION_REQUIRED
-
-    # Validate
-    errors = validate_products(products)
-    if errors:
-        print(f"Validation warnings:")
-        for e in errors:
-            print(f"  - {e}")
-
-    # Save
-    save_products_json(products, paths.products_json, keyword=keyword)
-    print(f"\nSaved {len(products)} products to {paths.products_json}")
-    for p in products:
-        print(f"  #{p.rank}: {p.name} ({p.price}, {p.rating}* {p.reviews_count} reviews)")
-
-    notify_progress(
-        args.video_id, "discover-products", "products_saved",
-        details=[f"Discovered {len(products)} products for '{keyword}'"],
-    )
-
-    print(f"\nNext: python3 tools/pipeline.py script-brief --video-id {args.video_id}")
-    return EXIT_OK
-
-
-def cmd_generate_images(args) -> int:
-    """Generate Dzine images for a video's product set via assets_manifest."""
-    from tools.lib.pipeline_status import update_milestone
-    from tools.lib.notify import notify_progress, notify_action_required
-    from tools.lib.preflight_gate import can_run_assets
-
-    _print_header(f"Generate Images: {args.video_id}")
-
-    # Preflight safety gate
-    ok, reason = can_run_assets(args.video_id)
-    if not ok:
-        print(f"Blocked: {reason}")
-        return EXIT_ACTION_REQUIRED
-
-    # Preflight session check: Brave + Dzine login
-    from tools.lib.preflight import preflight_check as _pf_check
-    pf = _pf_check("assets")
-    if not pf.passed:
-        for f in pf.failures:
-            print(f"Preflight: {f}")
-        return EXIT_ACTION_REQUIRED
-
-    paths = VideoPaths(args.video_id)
-    products = _load_products(paths)
-    if products is None:
-        print(f"products.json not found: {paths.products_json}")
-        print(f"Run discover-products first.")
-        return EXIT_ACTION_REQUIRED
-
-    # Download Amazon reference images (needed for manifest building)
-    print("Downloading Amazon reference images...")
-    ref_images = _download_amazon_images(products, paths)
-    print(f"  {len(ref_images)} reference images available")
-
-    # Generate via manifest-based orchestrator
-    try:
-        from tools.dzine_browser import generate_all_assets
-    except ImportError as exc:
-        print(f"Cannot import dzine_browser: {exc}")
-        print("Install playwright: pip install playwright && playwright install")
-        return EXIT_ERROR
-
-    result = generate_all_assets(
-        video_id=args.video_id,
-        rebuild=args.rebuild,
-        dry_run=args.dry_run,
-    )
-
-    generated = result.get("generated", 0)
-    failed = result.get("failed", 0)
-
-    if not args.dry_run:
-        # --- Image approval gate ---
-        from tools.lib.telegram_image_approval import request_image_approval, ImageEntry
-        from tools.lib.dzine_schema import variants_for_rank
-
-        MIN_ASSET_SIZE_GEN = 80 * 1024
-        image_entries = []
-        for rank in [5, 4, 3, 2, 1]:
-            p = next((pr for pr in products if pr.rank == rank), None)
-            name = p.name if p else f"Product {rank}"
-            for variant in variants_for_rank(rank):
-                img_path = paths.product_image_path(rank, variant)
-                if img_path.is_file() and img_path.stat().st_size >= MIN_ASSET_SIZE_GEN:
-                    image_entries.append(ImageEntry(
-                        label=f"{rank:02d}_{variant}",
-                        path=img_path,
-                        product_name=name,
-                        variant=variant,
-                    ))
-
-        if image_entries:
-            approval = request_image_approval(image_entries, video_id=args.video_id)
-            if approval.rejected:
-                print(f"\nRejected: {', '.join(approval.rejected)}")
-                notify_action_required(args.video_id, "generate-images",
-                    f"{len(approval.rejected)} image(s) rejected",
-                    next_action="Analyze failures and regenerate")
-                return EXIT_ACTION_REQUIRED
-
-        update_milestone(args.video_id, "assets", "product_images_done")
-
-        if failed == 0:
-            notify_progress(
-                args.video_id, "generate-images", "complete",
-                details=[f"Generated {generated} images, 0 failed"],
-                next_action=f"python3 tools/pipeline.py tts --video-id {args.video_id}",
-            )
-        else:
-            _log_error(args.video_id, "generate-images",
-                       f"{failed} image(s) failed generation",
-                       context={"generated": generated, "failed": failed})
-
-    print(f"\nGenerated: {generated}, Failed: {failed}")
-    print(f"\nNext: python3 tools/pipeline.py tts --video-id {args.video_id}")
-    return EXIT_OK if failed == 0 else EXIT_ERROR
-
-
-def cmd_tts(args) -> int:
-    """Generate TTS voiceover chunks."""
-    from tools.lib.pipeline_status import update_milestone
-    from tools.lib.tts_generate import generate_full, generate_patch
-    from tools.lib.preflight_gate import can_run_tts
-    from tools.lib.notify import notify_action_required, notify_progress, notify_error
-
-    _print_header(f"TTS: {args.video_id}")
-    _pre_run_learning_check("tts")
-    gate = _run_learning_gate(args.video_id, "tts")
-    if gate is not None:
-        return gate
-
-    paths = VideoPaths(args.video_id)
-
-    # Preflight safety gate — requires reviewed script
-    ok, reason = can_run_tts(args.video_id)
-    if not ok:
-        print(f"Blocked: {reason}")
-        notify_action_required(args.video_id, "tts", reason,
-                               next_action="Fix the issue above, then re-run tts")
-        return EXIT_ACTION_REQUIRED
-
-    if not paths.script_txt.is_file():
-        print(f"Script not found: {paths.script_txt}")
-        print(f"\nNext: python3 tools/pipeline.py script --video-id {args.video_id}")
-        return EXIT_ACTION_REQUIRED
-
-    # Prefer narration.txt (markers stripped, avatar removed) for TTS
-    if paths.narration_txt.is_file():
-        script_text = paths.narration_txt.read_text(encoding="utf-8")
-    else:
-        script_text = paths.script_txt.read_text(encoding="utf-8")
-    paths.audio_chunks.mkdir(parents=True, exist_ok=True)
-
-    if args.patch:
-        print(f"Patching chunks: {args.patch}")
-        results = generate_patch(
-            args.video_id,
-            args.patch,
-            script_text,
-            output_dir=paths.audio_chunks,
-        )
-    else:
-        # Check for existing chunks unless --force
-        if not args.force:
-            existing_chunks = list(paths.audio_chunks.glob("*.mp3"))
-            existing_chunks = [f for f in existing_chunks if not f.stem.startswith("micro_")]
-            if existing_chunks:
-                print(f"Found {len(existing_chunks)} existing chunks. Use --force to regenerate.")
-                print("Use --patch N to regenerate specific chunk(s).")
-                return EXIT_OK
-
-        results = generate_full(
-            args.video_id,
-            script_text,
-            output_dir=paths.audio_chunks,
-        )
-
-    # Write tts_meta.json
-    meta = {
-        "video_id": args.video_id,
-        "generated_at": now_iso(),
-        "chunks": [
-            {
-                "index": m.index,
-                "status": m.status,
-                "word_count": m.word_count,
-                "char_count": m.char_count,
-                "estimated_duration_s": m.estimated_duration_s,
-                "actual_duration_s": m.actual_duration_s,
-                "file_path": m.file_path,
-                "checksum_sha256": m.checksum_sha256,
-                "error": m.error,
-            }
-            for m in results
-        ],
-    }
-    paths.tts_meta.parent.mkdir(parents=True, exist_ok=True)
-    paths.tts_meta.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-
-    ok = sum(1 for m in results if m.status == "success")
-    failed = sum(1 for m in results if m.status == "failed")
-
-    # Supabase: upload chunks + save metadata
-    try:
-        from tools.lib.supabase_pipeline import (
-            ensure_run_id as _tts_erid, upload_video_file as _tts_uvf, save_tts_chunk as _tts_save,
-        )
-        _tts_rid = _tts_erid(args.video_id, "tts")
-        if _tts_rid:
-            for m in results:
-                s_url = ""
-                if m.status == "success" and m.file_path:
-                    s_url = _tts_uvf(args.video_id, "rayviewslab-audio",
-                                     m.file_path, f"chunks/chunk_{m.index:02d}.mp3")
-                _tts_save(_tts_rid, chunk_index=m.index, text=getattr(m, "text", ""),
-                          storage_url=s_url, ok=(m.status == "success"),
-                          error=getattr(m, "error", ""),
-                          duration_seconds=getattr(m, "actual_duration_s", 0) or 0)
-    except Exception:
-        pass
-
-    if failed:
-        failed_indices = [m.index for m in results if m.status == "failed"]
-        _log_error(args.video_id, "voice", f"{failed} TTS chunk(s) failed",
-                   context={"command": "tts", "failed_indices": failed_indices})
-        notify_error(
-            args.video_id, "voice", "chunks_failed",
-            f"{failed} chunk(s) failed",
-            next_action=f"Retry: python3 tools/pipeline.py tts --video-id {args.video_id} --patch {' '.join(str(i) for i in failed_indices)}",
-        )
-        print(f"\n{failed} chunk(s) failed. Retry with:")
-        print(f"  python3 tools/pipeline.py tts --video-id {args.video_id} --patch {' '.join(str(i) for i in failed_indices)}")
-        return EXIT_ERROR
-
-    update_milestone(args.video_id, "voice", "chunks_generated")
-    notify_progress(
-        args.video_id, "voice", "chunks_generated",
-        progress_done=ok, progress_total=len(results),
-        next_action=f"python3 tools/pipeline.py manifest --video-id {args.video_id}",
-        details=[f"Generated {ok} TTS chunks successfully"],
-    )
-    print(f"\nNext: python3 tools/pipeline.py manifest --video-id {args.video_id}")
-    return EXIT_OK
-
-
-def cmd_broll_plan(args) -> int:
-    """Generate B-roll search plan from products.json."""
-    from tools.lib.dzine_schema import CATEGORY_BROLL_TERMS, detect_category
-
-    _print_header(f"B-Roll Plan: {args.video_id}")
-
-    paths = VideoPaths(args.video_id)
-    products = _load_products(paths)
-    niche = _load_niche(paths)
-
-    if not products:
-        print(f"Products not found: {paths.products_json}")
-        return EXIT_ACTION_REQUIRED
-
-    category = detect_category(niche) if niche else "default"
-    broll_terms = CATEGORY_BROLL_TERMS.get(category, ("hands using product", "modern lifestyle technology"))
-
-    lines = [
-        f"# B-Roll Plan — {args.video_id}",
-        f"Niche: {niche} (category: {category})",
-        "",
-        "Download 2-3 clips per product (3-6s each, 1080p minimum).",
-        "Save to: assets/broll/",
-        "Naming: <rank>_<description>.mp4 (e.g. 05_hands_using.mp4)",
-        "",
-        "Free sources: Pexels, Pixabay, Mixkit, Coverr",
-        "",
-        "---",
-        "",
-    ]
-
-    for p in sorted(products, key=lambda x: x.rank, reverse=True):
-        name_short = p.name.split("(")[0].strip()[:40]
-        lines.append(f"## #{p.rank} — {p.name}")
-        if p.positioning:
-            lines.append(f"Positioning: {p.positioning}")
-        lines.append("")
-        lines.append("Search terms:")
-        lines.append(f'  - "{name_short} in use"')
-        lines.append(f'  - "{niche} lifestyle"')
-        lines.append(f'  - "{broll_terms[0]}"')
-        lines.append(f'  - "{broll_terms[1]}"')
-
-        if p.benefits:
-            lines.append(f'  - "{p.benefits[0][:30]}" (benefit visual)')
-        lines.append("")
-        lines.append("Suggested clips: hero transition, usage context, detail B-roll")
-        lines.append("")
-
-    # General clips section
-    lines.extend([
-        "---",
-        "",
-        "## General Clips (reusable across segments)",
-        "",
-        "Search terms:",
-        '  - "transition whoosh motion"',
-        '  - "abstract light leak"',
-        '  - "modern technology montage"',
-        f'  - "{niche} comparison"',
-        "",
-        "Retention reset clip:",
-        '  - "split screen comparison" or "fast montage product"',
-    ])
-
-    plan_text = "\n".join(lines)
-
-    # Write to resolve/ dir
-    paths.resolve_dir.mkdir(parents=True, exist_ok=True)
-    plan_path = paths.resolve_dir / "broll_plan.txt"
-    plan_path.write_text(plan_text, encoding="utf-8")
-    print(f"Wrote {plan_path}")
-
-    # Also ensure broll dir exists
-    paths.assets_broll.mkdir(parents=True, exist_ok=True)
-    print(f"B-roll directory: {paths.assets_broll}")
-
-    print(f"\n{len(products)} products, ~{len(products) * 2}-{len(products) * 3} clips needed")
-    return EXIT_OK
-
-
-def cmd_manifest(args) -> int:
-    """Generate DaVinci Resolve edit manifest, markers, and notes."""
-    from tools.lib.pipeline_status import update_milestone
-    from tools.lib.resolve_schema import (
-        generate_manifest,
-        manifest_to_edl,
-        manifest_to_json,
-        manifest_to_markers_csv,
-        manifest_to_notes,
-    )
-
-    _print_header(f"Manifest: {args.video_id}")
-    _pre_run_learning_check("manifest")
-    gate = _run_learning_gate(args.video_id, "manifest")
-    if gate is not None:
-        return gate
-
-    paths = VideoPaths(args.video_id)
-
-    if not paths.script_txt.is_file():
-        print(f"Script not found: {paths.script_txt}")
-        return EXIT_ACTION_REQUIRED
-
-    script_text = paths.script_txt.read_text(encoding="utf-8")
-
-    products = _load_products(paths)
-    niche = _load_niche(paths)
-    product_names = {}
-    product_benefits = {}
-    product_data: dict[int, dict] = {}
-    if products:
-        for p in products:
-            product_names[p.rank] = p.name
-            product_benefits[p.rank] = p.benefits
-            product_data[p.rank] = {
-                "benefits": p.benefits,
-                "downside": p.downside,
-                "positioning": p.positioning,
-            }
-
-    # Generate manifest
-    manifest = generate_manifest(
-        args.video_id,
-        script_text,
-        paths.root,
-        product_names=product_names,
-        product_benefits=product_benefits,
-    )
-
-    # Write outputs
-    paths.resolve_dir.mkdir(parents=True, exist_ok=True)
-
-    manifest_path = paths.resolve_dir / "edit_manifest.json"
-    manifest_path.write_text(manifest_to_json(manifest), encoding="utf-8")
-    print(f"Wrote {manifest_path}")
-
-    markers_path = paths.resolve_dir / "markers.csv"
-    markers_path.write_text(manifest_to_markers_csv(manifest), encoding="utf-8")
-    print(f"Wrote {markers_path}")
-
-    edl_path = paths.resolve_dir / "markers.edl"
-    edl_path.write_text(manifest_to_edl(manifest), encoding="utf-8")
-    print(f"Wrote {edl_path}")
-
-    notes_path = paths.resolve_dir / "notes.md"
-    notes_path.write_text(
-        manifest_to_notes(manifest, product_data=product_data, niche=niche),
-        encoding="utf-8",
-    )
-    print(f"Wrote {notes_path}")
-
-    print(f"\nTotal duration: {manifest.total_duration_s:.0f}s ({manifest.total_duration_s/60:.1f} min)")
-    print(f"Segments: {len(manifest.segments)}")
-
-    # Supabase: upload resolve files
-    try:
-        from tools.lib.supabase_pipeline import ensure_run_id as _man_erid, upload_video_file as _man_uvf
-        _man_rid = _man_erid(args.video_id, "manifest")
-        if _man_rid:
-            for fname in ["edit_manifest.json", "markers.csv", "markers.edl", "notes.md"]:
-                fpath = paths.resolve_dir / fname
-                if fpath.is_file():
-                    _man_uvf(args.video_id, "rayviewslab-manifests", str(fpath), f"resolve/{fname}")
-    except Exception:
-        pass
-
-    update_milestone(args.video_id, "edit_prep", "notes_generated")
-
-    from tools.lib.notify import notify_summary
-    notify_summary(
-        args.video_id,
-        details=[
-            f"Duration: {manifest.total_duration_s:.0f}s ({manifest.total_duration_s/60:.1f} min)",
-            f"Segments: {len(manifest.segments)}",
-            "Files: edit_manifest.json, markers.csv, markers.edl, notes.md",
-        ],
-        next_action="Open DaVinci Resolve > Import Timeline Markers from EDL > markers.edl",
-    )
-
-    print("\nNext: Open DaVinci Resolve > right-click timeline > Import > Timeline Markers from EDL > select markers.edl")
-    return EXIT_OK
-
-
-def cmd_run(args) -> int:
-    """Run full pipeline via multi-agent orchestrator."""
-    from tools.agent_orchestrator import Orchestrator, Stage
-
-    _print_header(f"Run: {args.video_id}")
-
-    orchestrator = Orchestrator()
-
-    start_stage = None
-    if args.stage:
-        try:
-            start_stage = Stage(args.stage)
-        except ValueError:
-            print(f"Unknown stage: {args.stage}")
-            print(f"Available: {', '.join(s.value for s in Stage)}")
-            return EXIT_ERROR
-
-    stop_after = None
-    if args.stop_after:
-        try:
-            stop_after = Stage(args.stop_after)
-        except ValueError:
-            print(f"Unknown stage: {args.stop_after}")
-            return EXIT_ERROR
-
-    ctx = orchestrator.run_pipeline(
-        args.video_id,
-        niche=args.niche,
-        start_stage=start_stage,
-        stop_after=stop_after,
-        dry_run=args.dry_run,
-        force=args.force,
-    )
-
-    # Print summary
-    print(f"\nPipeline {'COMPLETE' if not ctx.aborted else 'STOPPED'}: {args.video_id}")
-    print(f"  Niche: {ctx.niche}")
-    print(f"  Stages: {len(ctx.stages_completed)}/{len(list(Stage))}")
-    for s in ctx.stages_completed:
-        print(f"    [x] {s.value}")
-    pending = [s for s in Stage if s not in ctx.stages_completed]
-    for s in pending:
-        print(f"    [ ] {s.value}")
-    if ctx.errors:
-        print(f"  Errors ({len(ctx.errors)}):")
-        for e in ctx.errors[:5]:
-            print(f"    - {e}")
-
-    if ctx.aborted:
-        return EXIT_ACTION_REQUIRED
-    return EXIT_OK
-
-
-def cmd_day(args) -> int:
-    """Daily pipeline: init (if needed) -> research -> script-brief. Stops for human."""
-    import argparse
-    import datetime
-    from tools.lib.notify import notify_action_required
-
-    _print_header(f"Day: {args.video_id}")
-    _pre_run_learning_check("pipeline")
-    gate = _run_learning_gate(args.video_id, "day")
-    if gate is not None:
-        return gate
-
-    paths = VideoPaths(args.video_id)
-    niche = getattr(args, "niche", "") or ""
-    force = getattr(args, "force", False)
-
-    cluster_slug = getattr(args, "cluster", "") or ""
-
-    # --- Step 1: Init if root doesn't exist ---
-    if not paths.root.exists() or force:
-        if not niche:
-            # Try cluster-based selection first
-            today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-            try:
-                from tools.cluster_manager import (
-                    current_week_monday,
-                    load_clusters,
-                    pick_cluster,
-                    pick_micro_niche,
-                    update_cluster_history,
-                )
-                if cluster_slug:
-                    # Force a specific cluster
-                    all_clusters = load_clusters()
-                    matched = [c for c in all_clusters if c.slug == cluster_slug]
-                    if not matched:
-                        print(f"Unknown cluster slug: {cluster_slug}")
-                        return EXIT_ERROR
-                    cluster = matched[0]
-                else:
-                    cluster = pick_cluster(today)
-
-                week_monday = current_week_monday(today)
-
-                # Get existing video_ids for this week
-                from tools.cluster_manager import load_cluster_history
-                history = load_cluster_history()
-                existing_ids = []
-                for entry in history:
-                    if entry.week_start == week_monday and entry.cluster_slug == cluster.slug:
-                        existing_ids = entry.video_ids
-                        break
-
-                micro = pick_micro_niche(cluster, existing_ids)
-                niche = micro.intent_phrase
-
-                # Write cluster.txt and micro_niche.json
-                paths.ensure_dirs()
-                paths.cluster_txt.write_text(
-                    f"{cluster.slug}\n", encoding="utf-8",
-                )
-
-                import json as _json
-                mn_data = {
-                    "subcategory": micro.subcategory,
-                    "buyer_pain": micro.buyer_pain,
-                    "intent_phrase": micro.intent_phrase,
-                    "price_min": micro.price_min,
-                    "price_max": micro.price_max,
-                    "must_have_features": micro.must_have_features,
-                    "forbidden_variants": micro.forbidden_variants,
-                    "cluster_slug": cluster.slug,
-                    "cluster_name": cluster.name,
-                }
-                paths.micro_niche_json.write_text(
-                    _json.dumps(mn_data, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-
-                # Generate subcategory contract from micro-niche
-                from tools.lib.subcategory_contract import (
-                    generate_contract_from_micro_niche,
-                    write_contract,
-                )
-                contract = generate_contract_from_micro_niche(micro)
-                write_contract(contract, paths.subcategory_contract)
-
-                # Update cluster history
-                update_cluster_history(cluster.slug, week_monday, args.video_id)
-
-                print(f"Cluster: {cluster.name} ({cluster.slug})")
-                print(f"Micro-niche: {micro.subcategory}")
-                print(f"Intent: {micro.intent_phrase}")
-                print(f"Price: ${micro.price_min}-${micro.price_max}")
-
-            except Exception as exc:
-                print(f"Cluster selection failed ({exc}), falling back to niche picker")
-                from tools.niche_picker import pick_niche
-                candidate = pick_niche(today)
-                niche = candidate.keyword
-                print(f"Auto-picked niche: {niche} (static: {candidate.static_score:.0f}, intent: {candidate.intent})")
-
-        init_args = argparse.Namespace(
-            video_id=args.video_id, niche=niche, force=force,
-        )
-        rc = cmd_init(init_args)
-        if rc != EXIT_OK:
-            return rc
-    else:
-        print(f"Video folder exists: {paths.root}")
-        niche = _load_niche(paths)
-        if not niche:
-            print("niche.txt not found — run init first or pass --niche")
-            return EXIT_ERROR
-
-    # --- Step 2: Research ---
-    print()
-    no_approval = getattr(args, "no_approval", False)
-    research_args = argparse.Namespace(
-        video_id=args.video_id, mode="run", dry_run=False, force=force,
-        no_approval=no_approval,
-    )
-    rc = cmd_research(research_args)
-    if rc != EXIT_OK:
-        return rc
-
-    # --- Step 3: Script brief (for reference) ---
-    print()
-    brief_args = argparse.Namespace(video_id=args.video_id)
-    rc = cmd_script_brief(brief_args)
-    if rc != EXIT_OK:
-        return rc
-
-    # --- Step 4: Script (auto-generate) ---
-    print()
-    script_args = argparse.Namespace(
-        video_id=args.video_id, generate=True, force=force,
-        charismatic="reality_check",
-        no_approval=no_approval,
-    )
-    rc = cmd_script(script_args)
-    if rc != EXIT_OK:
-        from tools.lib.notify import notify_action_required
-        notify_action_required(
-            args.video_id, "script",
-            "Script auto-generation failed — write manually",
-            next_action=(
-                f"Write script in {paths.script_raw}, then run: "
-                f"python3 tools/pipeline.py script-review --video-id {args.video_id}"
-            ),
-        )
-        return rc
-
-    print(f"\n{'=' * 50}")
-    print(f"  Day pipeline complete — script generated")
-    print(f"{'=' * 50}")
-    print(f"\n  Script: {paths.script_txt}")
-    print(f"\n  Next: Review script.txt, then run:")
-    print(f"    python3 tools/pipeline.py assets --video-id {args.video_id}")
-
-    return EXIT_OK
-
-
-def cmd_status(args) -> int:
-    """Show pipeline status for one or all videos."""
-    from tools.lib.pipeline_status import format_status_text, get_status
-    from tools.lib.video_paths import VIDEOS_BASE
-
-    if args.all:
-        # List all video projects
-        if not VIDEOS_BASE.is_dir():
-            print("No videos found.")
-            return EXIT_OK
-
-        video_dirs = sorted(
-            d for d in VIDEOS_BASE.iterdir()
-            if d.is_dir() and not d.name.startswith(".")
-        )
-
-        if not video_dirs:
-            print("No video projects found.")
-            return EXIT_OK
-
-        print(f"Found {len(video_dirs)} video project(s):\n")
-        has_action = False
-        for vd in video_dirs:
-            vid = vd.name
-            status = get_status(vid)
-            stage = status.stage or "not started"
-            milestone = status.milestone or "-"
-            mark = "done" if status.completed_at else stage
-            print(f"  {vid:30s}  {mark:15s}  {milestone}")
-            if not status.completed_at and status.started_at:
-                has_action = True
-
-        return EXIT_ACTION_REQUIRED if has_action else EXIT_OK
-
-    # Single video status
-    if not args.video_id:
-        print("Error: --video-id or --all required")
-        return EXIT_ERROR
-
-    _print_header(f"Status: {args.video_id}")
-
-    paths = VideoPaths(args.video_id)
-
-    # Filesystem checks
-    checks = [
-        ("inputs/products.json", paths.products_json.is_file()),
-        ("inputs/niche.txt", paths.niche_txt.is_file()),
-        ("script/script.txt", paths.script_txt.is_file()),
-        ("script/prompts/", paths.prompts_dir.is_dir() and any(paths.prompts_dir.iterdir()) if paths.prompts_dir.is_dir() else False),
-        ("assets/dzine/thumbnail.png", paths.thumbnail_path().is_file()),
-    ]
-
-    # Check product images (variant-aware)
-    from tools.lib.dzine_schema import variants_for_rank
-    for rank in [5, 4, 3, 2, 1]:
-        expected = variants_for_rank(rank)
-        present = [v for v in expected if paths.product_image_path(rank, v).is_file()]
-        missing_v = [v for v in expected if v not in present]
-        if missing_v:
-            checks.append((f"  product {rank:02d}: {len(present)}/{len(expected)} variants (missing: {', '.join(missing_v)})", False))
-        else:
-            checks.append((f"  product {rank:02d}: {len(present)}/{len(expected)} variants", True))
-
-    # Check audio chunks
-    chunk_count = 0
-    if paths.audio_chunks.is_dir():
-        chunk_count = len([f for f in paths.audio_chunks.glob("*.mp3") if not f.stem.startswith("micro_")])
-    checks.append((f"audio/voice/chunks/ ({chunk_count} chunks)", chunk_count > 0))
-
-    # Check resolve outputs
-    checks.append(("resolve/edit_manifest.json", (paths.resolve_dir / "edit_manifest.json").is_file()))
-    checks.append(("resolve/markers.csv", (paths.resolve_dir / "markers.csv").is_file()))
-    checks.append(("resolve/markers.edl", (paths.resolve_dir / "markers.edl").is_file()))
-    checks.append(("resolve/notes.md", (paths.resolve_dir / "notes.md").is_file()))
-
-    print("Files:")
-    for label, present in checks:
-        mark = "[x]" if present else "[ ]"
-        print(f"  {mark} {label}")
-
-    # Pipeline status
-    print()
-    print(format_status_text(args.video_id))
-
-    # Determine next action
-    has_errors = False
-    needs_action = False
-    for _, present in checks:
-        if not present:
-            needs_action = True
-
-    if has_errors:
-        return EXIT_ERROR
-    if needs_action:
-        return EXIT_ACTION_REQUIRED
-    return EXIT_OK
-
-
-# ---------------------------------------------------------------------------
-# Runs subcommand
-# ---------------------------------------------------------------------------
-
-
-def cmd_runs(args) -> int:
-    """Show pipeline run history."""
+def cmd_runs(args):
+    """Display pipeline run log."""
     from tools.lib.run_log import format_runs_text, get_daily_summary
 
-    if args.summary:
-        date = ""
-        if args.today:
-            from tools.lib.common import now_iso
-            date = now_iso()[:10]
-        summary = get_daily_summary(date=date)
-        if summary["total_runs"] == 0:
-            print(f"No runs recorded for {summary['date']}.")
-            return EXIT_OK
-        print(f"Date: {summary['date']}  |  Runs: {summary['total_runs']}  |  Videos: {', '.join(summary['videos_touched']) or 'none'}")
-        for cmd, stats in sorted(summary["by_command"].items()):
-            print(f"  {cmd:<15s}  {stats['count']} runs ({stats['ok']} ok, {stats['failed']} failed)  avg {stats['avg_duration_s']:.1f}s")
-        return EXIT_OK
-
-    since = ""
-    if args.today:
-        from tools.lib.common import now_iso
-        since = now_iso()[:10]
+    if getattr(args, "summary", False):
+        summary = get_daily_summary()
+        print(f"Date: {summary['date']}")
+        print(f"Total runs: {summary['total_runs']}")
+        print(f"Videos: {', '.join(summary['videos_touched']) or 'none'}")
+        for cmd, stats in summary.get("by_command", {}).items():
+            print(f"  {cmd}: {stats['count']} runs ({stats['ok']} ok, {stats['failed']} failed)")
+        return 0
 
     text = format_runs_text(
-        video_id=args.video_id,
-        command=args.filter_command,
-        since=since,
+        video_id=getattr(args, "video_id", "") or "",
+        command=getattr(args, "filter_command", "") or "",
     )
     print(text)
+    return 0
+
+
+# ===================================================================
+# SCRIPT BRIEF / REVIEW
+# ===================================================================
+
+
+def cmd_script_brief(args):
+    """Generate a manual script brief from products + niche."""
+    from tools.lib.script_brief import generate_brief
+    from tools.lib.video_paths import VideoPaths
+
+    video_id = args.video_id
+    paths = VideoPaths(video_id)
+
+    if not paths.products_json.is_file():
+        print(f"Missing products.json for {video_id}")
+        return EXIT_ACTION_REQUIRED
+
+    products = json.loads(paths.products_json.read_text(encoding="utf-8"))
+    niche = paths.niche_txt.read_text(encoding="utf-8").strip() if paths.niche_txt.is_file() else ""
+    seo = json.loads(paths.seo_json.read_text(encoding="utf-8")) if paths.seo_json.is_file() else {}
+
+    brief = generate_brief(niche, products, seo)
+    paths.manual_brief.parent.mkdir(parents=True, exist_ok=True)
+    paths.manual_brief.write_text(brief, encoding="utf-8")
+    print(f"Brief written: {paths.manual_brief}")
     return EXIT_OK
 
 
-# ---------------------------------------------------------------------------
-# Errors subcommand
-# ---------------------------------------------------------------------------
+def cmd_script_review(args):
+    """Review a raw script and produce notes + final version."""
+    from tools.lib.script_brief import review_script, apply_light_fixes, format_review_notes
+    from tools.lib.video_paths import VideoPaths
 
+    video_id = args.video_id
+    paths = VideoPaths(video_id)
 
-def cmd_metrics(args) -> int:
-    """Record or view video performance metrics."""
-    from tools.lib.video_analytics import record_metrics, get_niche_performance, update_niche_scores
+    if not paths.script_raw.is_file():
+        print(f"Missing script_raw for {video_id}")
+        return EXIT_ACTION_REQUIRED
 
-    if args.update_scores:
-        print("Recomputing niche performance scores...")
-        update_niche_scores()
-        print("Done. Scores saved to channel_memory['niche_performance_scores'].")
-        return EXIT_OK
+    script_text = paths.script_raw.read_text(encoding="utf-8")
+    products = json.loads(paths.products_json.read_text(encoding="utf-8")) if paths.products_json.is_file() else {}
 
-    if args.record:
-        if not args.video_id:
-            print("Error: --video-id required with --record")
-            return EXIT_ERROR
+    result = review_script(script_text, products)
 
-        # Parse key=value pairs
-        kw: dict = {}
-        niche = ""
-        if args.video_id:
-            niche = _load_niche(VideoPaths(args.video_id))
-        for pair in args.data:
-            if "=" not in pair:
-                print(f"Invalid data format: {pair} (expected key=value)")
-                return EXIT_ERROR
-            k, v = pair.split("=", 1)
-            # Type coercion
-            if k in ("views_24h", "views_48h", "views_7d", "views_30d",
-                      "avd_seconds", "affiliate_clicks", "conversions"):
-                kw[k] = int(v)
-            elif k in ("ctr_percent", "avg_view_percent", "rpm_estimate"):
-                kw[k] = float(v)
-            else:
-                kw[k] = v
+    # Write review notes
+    notes = format_review_notes(result, video_id)
+    paths.script_review_notes.parent.mkdir(parents=True, exist_ok=True)
+    paths.script_review_notes.write_text(notes, encoding="utf-8")
 
-        record_metrics(args.video_id, niche=niche, **kw)
-        print(f"Recorded metrics for {args.video_id}: {kw}")
-        return EXIT_OK
+    # Apply light fixes and write final
+    fixed_text, _changes = apply_light_fixes(script_text)
+    paths.script_final.parent.mkdir(parents=True, exist_ok=True)
+    paths.script_final.write_text(fixed_text, encoding="utf-8")
 
-    # Show recent performance
-    metrics = get_niche_performance(limit=20)
-    if not metrics:
-        print("No metrics recorded yet.")
-        print("Record with: pipeline.py metrics --video-id <id> --record --data views_7d=5000 ctr_percent=5.2")
-        return EXIT_OK
+    if not result.passed:
+        error_count = sum(1 for i in result.issues if i.severity == "error")
+        print(f"Script review found {error_count} errors")
+        return EXIT_ACTION_REQUIRED
 
-    _print_header("Recent Video Metrics")
-    for m in metrics:
-        vid = m.get("video_id", "?")
-        niche = m.get("niche", "?")
-        ctr = m.get("ctr", "?")
-        v7 = m.get("views_7d", "?")
-        ts = m.get("recorded_at", "?")[:10]
-        print(f"  {vid:25s} {niche:25s} CTR={ctr}% Views7d={v7} ({ts})")
-
+    print(f"Script reviewed: {len(result.issues)} issues, final written")
     return EXIT_OK
 
 
-def cmd_study(args) -> int:
-    """Study a YouTube video — download, analyze, extract knowledge."""
-    from tools.video_study import run_study
-
-    _print_header(f"Video Study")
-    return run_study(
-        url=args.url,
-        file_path=args.file_path,
-        context=args.context,
-        max_frames=args.max_frames,
-        frame_strategy=args.frame_strategy,
-        video_id_override=getattr(args, "video_id", ""),
-    )
+# ===================================================================
+# DAY (research + script in one shot)
+# ===================================================================
 
 
-def cmd_studies(args) -> int:
-    """List or show existing video studies."""
-    from tools.video_study import cmd_list, cmd_show
+def cmd_day(args):
+    """Run research + script + brief generation for a video."""
+    from tools.lib.video_paths import VideoPaths
+    from tools.lib.script_brief import generate_brief
 
-    if hasattr(args, "show_video_id") and args.show_video_id:
-        return cmd_show(args.show_video_id, as_json=getattr(args, "json", False))
-    return cmd_list()
-
-
-def cmd_errors(args) -> int:
-    """Review cross-video error log."""
-    from tools.lib.error_log import (
-        resolve_error, get_patterns, format_log_text,
-        get_lessons, get_stale,
-    )
-
-    if args.resolve:
-        root_cause = input("Root cause: ").strip()
-        fix = input("Fix applied: ").strip()
-        result = resolve_error(args.resolve, root_cause, fix)
-        if result:
-            print(f"Resolved: {result['id']}")
-        else:
-            print(f"Error ID not found: {args.resolve}")
-            return EXIT_ERROR
-        return EXIT_OK
-
-    if args.patterns:
-        patterns = get_patterns()
-        if not patterns:
-            print("No recurring patterns found.")
-            return EXIT_OK
-        for p in patterns:
-            status = f"{p['unresolved']} open" if p['unresolved'] else "all resolved"
-            print(
-                f"[{p['count']}x] {p['stage']} | {p['pattern']}\n"
-                f"       Videos: {', '.join(p['video_ids'])} | "
-                f"Last: {p['last_seen'][:19]} | {status}"
-            )
-        return EXIT_OK
-
-    if args.lessons:
-        lessons = get_lessons()
-        if not lessons:
-            print("No lessons yet (resolve some errors first).")
-            return EXIT_OK
-        for l in lessons:
-            print(
-                f"[{l['occurrences']}x] {l['stage']} | {l['pattern']}\n"
-                f"       Cause: {l['root_cause']}\n"
-                f"       Fix:   {l['fix']}\n"
-                f"       Last:  {l['last_resolved'][:19]}"
-            )
-        return EXIT_OK
-
-    if args.stale:
-        stale = get_stale()
-        if not stale:
-            print("No stale errors (all recent or resolved).")
-            return EXIT_OK
-        print(f"Stale unresolved errors (>7 days): {len(stale)}\n")
-        for e in stale:
-            ts = e.get("timestamp", "?")[:19]
-            print(
-                f"  {e.get('video_id', '?')} | {e.get('stage', '?')} | "
-                f"{e.get('error', '?')}\n"
-                f"         {ts}  id={e.get('id', '?')}"
-            )
-        return EXIT_OK
-
-    text = format_log_text(
-        stage=args.stage,
-        video_id=args.video_id,
-        show_resolved=args.all,
-    )
-    print(text)
-    return EXIT_OK
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Rayviews production pipeline orchestrator",
-    )
-    sub = parser.add_subparsers(dest="command", help="Pipeline stage to run")
-
-    # init
-    p_init = sub.add_parser("init", help="Initialize a new video project")
-    p_init.add_argument("--video-id", required=True, help="Unique video identifier")
-    p_init.add_argument("--niche", required=True, help="Product niche")
-    p_init.add_argument("--force", action="store_true", help="Reinitialize existing project")
-
-    # research
-    p_res = sub.add_parser("research", help="Run evidence-first research pipeline")
-    p_res.add_argument("--video-id", required=True)
-    p_res.add_argument("--mode", choices=("run", "build"), default="run",
-                        help="run (default): execute full pipeline. build: validate only.")
-    p_res.add_argument("--dry-run", action="store_true",
-                        help="Show what would be done without doing it")
-    p_res.add_argument("--force", action="store_true",
-                        help="Force re-run even if intermediate files exist")
-    p_res.add_argument("--no-approval", action="store_true",
-                        help="Skip Telegram approval gates")
-
-    # script
-    p_script = sub.add_parser("script", help="Generate script prompts / validate script")
-    p_script.add_argument("--video-id", required=True)
-    p_script.add_argument(
-        "--charismatic", default="reality_check",
-        choices=("reality_check", "micro_humor", "micro_comparison"),
-        help="Charismatic signature type",
-    )
-    p_script.add_argument(
-        "--generate", action="store_true", default=True,
-        help="Auto-generate script via OpenAI (draft) + Anthropic (refinement) [default]",
-    )
-    p_script.add_argument(
-        "--no-generate", action="store_false", dest="generate",
-        help="Disable auto-generation, manual mode only",
-    )
-    p_script.add_argument("--force", action="store_true", help="Regenerate even if script exists")
-    p_script.add_argument("--no-approval", action="store_true",
-                          help="Skip Telegram approval gates")
-
-    # script-brief
-    p_brief = sub.add_parser("script-brief", help="Generate structured manual brief for script writing")
-    p_brief.add_argument("--video-id", required=True)
-
-    # script-review
-    p_review = sub.add_parser("script-review", help="Review script_raw.txt: validate, check claims, light fixes")
-    p_review.add_argument("--video-id", required=True)
-
-    # assets
-    p_assets = sub.add_parser("assets", help="Check/generate Dzine assets")
-    p_assets.add_argument("--video-id", required=True)
-    p_assets.add_argument("--force", action="store_true", help="Regenerate all assets")
-    p_assets.add_argument("--dry-run", action="store_true", help="Show status only")
-
-    # tts
-    p_tts = sub.add_parser("tts", help="Generate TTS voiceover")
-    p_tts.add_argument("--video-id", required=True)
-    p_tts.add_argument("--force", action="store_true", help="Regenerate all chunks")
-    p_tts.add_argument("--patch", type=int, nargs="+", help="Regenerate specific chunk indices")
-
-    # broll-plan
-    p_broll = sub.add_parser("broll-plan", help="Generate B-roll search plan from products")
-    p_broll.add_argument("--video-id", required=True)
-
-    # manifest
-    p_man = sub.add_parser("manifest", help="Generate Resolve edit manifest")
-    p_man.add_argument("--video-id", required=True)
-
-    # day (daily pipeline)
-    p_day = sub.add_parser("day", help="Daily pipeline: init -> research -> script-brief (stops for human)")
-    p_day.add_argument("--video-id", required=True)
-    p_day.add_argument("--niche", default="", help="Product niche (auto-picked if empty, bypasses cluster)")
-    p_day.add_argument("--cluster", default="", help="Force a specific cluster slug")
-    p_day.add_argument("--force", action="store_true", help="Force re-run all stages")
-    p_day.add_argument("--no-approval", action="store_true",
-                       help="Skip Telegram approval gates")
-
-    # run (full orchestrator)
-    p_run = sub.add_parser("run", help="Run full pipeline via multi-agent orchestrator")
-    p_run.add_argument("--video-id", required=True)
-    p_run.add_argument("--niche", default="", help="Product niche (auto-picked if empty)")
-    p_run.add_argument("--stage", default="", help="Start from this stage")
-    p_run.add_argument("--stop-after", default="", help="Stop after this stage")
-    p_run.add_argument("--dry-run", action="store_true", help="Show plan without executing")
-    p_run.add_argument("--force", action="store_true", help="Force re-run all stages")
-
-    # status
-    p_stat = sub.add_parser("status", help="Show pipeline status")
-    p_stat.add_argument("--video-id", default="")
-    p_stat.add_argument("--all", action="store_true", help="Show all video projects")
-
-    # runs
-    p_runs = sub.add_parser("runs", help="Show pipeline run history")
-    p_runs.add_argument("--video-id", default="")
-    p_runs.add_argument("--cmd", default="", dest="filter_command",
-                        help="Filter by pipeline command (e.g. research, script)")
-    p_runs.add_argument("--today", action="store_true", help="Filter to today only")
-    p_runs.add_argument("--summary", action="store_true", help="Show daily summary")
-
-    # metrics
-    p_metrics = sub.add_parser("metrics", help="Record or view video performance metrics")
-    p_metrics.add_argument("--video-id", default="")
-    p_metrics.add_argument("--record", action="store_true", help="Record metrics for a video")
-    p_metrics.add_argument("--data", nargs="+", default=[],
-                           help="Key=value pairs: views_7d=5000 ctr_percent=5.2")
-    p_metrics.add_argument("--update-scores", action="store_true",
-                           help="Recompute niche performance scores")
-
-    # study
-    p_study = sub.add_parser("study", help="Study a YouTube video (download, analyze, extract knowledge)")
-    p_study.add_argument("--url", default="", help="YouTube video URL")
-    p_study.add_argument("--file", default="", dest="file_path", help="Local video file path")
-    p_study.add_argument("--context", default="", help="Context hint for analysis")
-    p_study.add_argument("--max-frames", type=int, default=80, help="Max frames to extract")
-    p_study.add_argument("--frame-strategy", default="scene", choices=("scene", "interval"))
-    p_study.add_argument("--video-id", default="", help="Override video ID")
-
-    # studies
-    p_studies = sub.add_parser("studies", help="List or show existing video studies")
-    p_studies.add_argument("--show", default="", dest="show_video_id", help="Show a specific study")
-    p_studies.add_argument("--json", action="store_true", help="Output as JSON")
-
-    # errors
-    p_errors = sub.add_parser("errors", help="Review cross-video error log")
-    p_errors.add_argument("--stage", default="")
-    p_errors.add_argument("--video-id", default="")
-    p_errors.add_argument("--all", action="store_true", help="Include resolved")
-    p_errors.add_argument("--patterns", action="store_true",
-                          help="Show recurring patterns only")
-    p_errors.add_argument("--resolve", default="", metavar="ID",
-                          help="Mark error resolved")
-    p_errors.add_argument("--lessons", action="store_true",
-                          help="Show lessons learned from resolved errors")
-    p_errors.add_argument("--stale", action="store_true",
-                          help="Show unresolved errors older than 7 days")
-
-    # discover-products
-    p_discover = sub.add_parser("discover-products",
-                                help="Discover Amazon products via browser")
-    p_discover.add_argument("--video-id", required=True)
-    p_discover.add_argument("--source", default="browser",
-                            choices=("browser", "scrape"),
-                            help="Discovery method (default: browser)")
-    p_discover.add_argument("--keyword", default="",
-                            help="Search keyword (default: from niche.txt)")
-    p_discover.add_argument("--top-n", type=int, default=5,
-                            help="Number of products to discover")
-    p_discover.add_argument("--tag", default="",
-                            help="Amazon affiliate tag")
-    p_discover.add_argument("--min-rating", type=float, default=3.5,
-                            help="Minimum product rating")
-    p_discover.add_argument("--min-reviews", type=int, default=50,
-                            help="Minimum review count")
-    p_discover.add_argument("--force", action="store_true",
-                            help="Re-discover even if products.json exists")
-
-    # generate-images
-    p_genimg = sub.add_parser("generate-images",
-                              help="Generate Dzine images for product set")
-    p_genimg.add_argument("--video-id", required=True)
-    p_genimg.add_argument("--rebuild", action="store_true",
-                          help="Rebuild assets_manifest.json from products.json")
-    p_genimg.add_argument("--dry-run", action="store_true",
-                          help="Show what would be generated without doing it")
-
-    args = parser.parse_args()
-
-    if not args.command:
-        parser.print_help()
+    video_id = getattr(args, "video_id", "")
+    if not video_id:
         return EXIT_ERROR
 
-    commands = {
-        "init": cmd_init,
-        "research": cmd_research,
-        "script": cmd_script,
-        "script-brief": cmd_script_brief,
-        "script-review": cmd_script_review,
-        "assets": cmd_assets,
-        "discover-products": cmd_discover_products,
-        "generate-images": cmd_generate_images,
-        "tts": cmd_tts,
-        "broll-plan": cmd_broll_plan,
-        "manifest": cmd_manifest,
-        "day": cmd_day,
-        "run": cmd_run,
-        "status": cmd_status,
-        "runs": cmd_runs,
-        "metrics": cmd_metrics,
-        "study": cmd_study,
-        "studies": cmd_studies,
-        "errors": cmd_errors,
-    }
+    paths = VideoPaths(video_id)
+    paths.ensure_dirs()
 
-    # Run the command, timing it for the run log
-    import time as _time
-    _start = _time.monotonic()
-    exit_code = commands[args.command](args)
-    _duration = _time.monotonic() - _start
+    # Run research
+    rc = cmd_research(args)
+    if rc != 0:
+        return rc
 
-    # Log run for commands that operate on a video
-    video_id = getattr(args, "video_id", "")
-    if video_id:
+    # Run script
+    rc = cmd_script(args)
+    if rc != 0:
+        return rc
+
+    # Write niche.txt if not present (from args)
+    niche = getattr(args, "niche", "") or ""
+    if niche and not paths.niche_txt.is_file():
+        paths.niche_txt.parent.mkdir(parents=True, exist_ok=True)
+        paths.niche_txt.write_text(niche + "\n", encoding="utf-8")
+
+    # Auto-generate brief from products
+    if paths.products_json.is_file():
+        products = json.loads(paths.products_json.read_text(encoding="utf-8"))
+        brief_niche = paths.niche_txt.read_text(encoding="utf-8").strip() if paths.niche_txt.is_file() else niche
+        seo = json.loads(paths.seo_json.read_text(encoding="utf-8")) if paths.seo_json.is_file() else {}
+        brief = generate_brief(brief_niche or products.get("keyword", "product"), products, seo)
+        paths.manual_brief.parent.mkdir(parents=True, exist_ok=True)
+        paths.manual_brief.write_text(brief, encoding="utf-8")
+
+    return EXIT_OK
+
+
+def cmd_research(args):
+    """Placeholder for research command — must be mocked in tests."""
+    return EXIT_ERROR
+
+
+def cmd_script(args):
+    """Placeholder for script command — must be mocked in tests."""
+    return EXIT_ERROR
+
+
+# ===================================================================
+# ERRORS
+# ===================================================================
+
+
+def _log_error(video_id: str, stage: str, error: str, **kwargs) -> None:
+    """Log a pipeline error (fire-and-forget wrapper)."""
+    try:
+        from tools.lib.error_log import log_error
+        log_error(video_id, stage, error, **kwargs)
+    except Exception:
+        pass
+
+
+def cmd_errors(args):
+    """Display cross-video error log."""
+    from tools.lib.error_log import format_log_text, get_patterns
+
+    if getattr(args, "patterns", False):
+        patterns = get_patterns(min_count=2)
+        if not patterns:
+            print("No recurring patterns found.")
+        else:
+            for p in patterns:
+                print(
+                    f"[{p['count']}x] {p['stage']} | {p['pattern']} "
+                    f"({p['unresolved']} open)"
+                )
+        return 0
+
+    text = format_log_text(
+        stage=getattr(args, "stage", "") or "",
+        video_id=getattr(args, "video_id", "") or "",
+        show_resolved=getattr(args, "show_resolved", False),
+        limit=getattr(args, "limit", 20),
+    )
+    print(text)
+    return 0
+
+
+# ===================================================================
+# RUN-E2E
+# ===================================================================
+
+def cmd_run_e2e(args):
+    # Ensure a stable run_id for this invocation.
+    if not args.run_id:
+        args.run_id = generate_run_id(args.category)
+    run_id = args.run_id
+
+    # Init (idempotent + contract receipt)
+    _run_with_contract("init-run", args, cmd_init_run)
+    run_dir = get_run_dir(run_id)
+
+    gate1_package_steps = [
+        ("discover-products", cmd_discover_products),
+        ("plan-variations", cmd_plan_variations),
+        ("generate-script", cmd_generate_script),
+    ]
+    gate2_package_steps = [
+        ("generate-assets", cmd_generate_assets),
+        ("generate-voice", cmd_generate_voice),
+        ("build-davinci", cmd_build_davinci),
+        ("convert-to-rayvault", cmd_convert_to_rayvault),
+        ("validate-originality", cmd_validate_originality),
+        ("validate-compliance", cmd_validate_compliance),
+    ]
+
+    with RunLock(run_dir):
+        for name, fn in gate1_package_steps:
+            print(f"\n{'='*60}")
+            print(f"STEP: {name}")
+            print(f"{'='*60}")
+            try:
+                _run_with_contract(name, args, fn)
+            except Exception as e:
+                print(f"\n[FAIL] {name}: {e}")
+                log_ops_event(run_id, "pipeline_failed", {"step": name, "error": str(e)})
+                print(f"\nPipeline stopped at {name}. Fix and re-run from this step:")
+                print(f"  python3 tools/pipeline.py {name} --run-id {run_id}")
+                sys.exit(1)
+
+        # Gate 1 is mandatory.
+        run_config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        gates, changed = ensure_quality_gates(run_config)
+        if changed:
+            save_run_config(run_dir, run_config)
+        gate1_checks = _pre_gate1_auto_checks(run_dir)
+        if not gate1_checks.get("ok_for_gate1", False):
+            print(f"\n{'='*60}")
+            print("GATE 1 AUTO-CHECK FAILED")
+            print(f"{'='*60}")
+            row = gate1_checks.get("input_guard", {})
+            fail_codes = row.get("fail_reason_codes", []) if isinstance(row, dict) else []
+            warn_codes = row.get("warn_reason_codes", []) if isinstance(row, dict) else []
+            fail_s = ", ".join(str(x) for x in fail_codes if str(x).strip()) or "-"
+            warn_s = ", ".join(str(x) for x in warn_codes if str(x).strip()) or "-"
+            print(
+                f"- input_guard: {row.get('status')} "
+                f"(blocked={row.get('blocked_count')}, fail_codes=[{fail_s}], warn_codes=[{warn_s}])"
+            )
+            print("Fix report and re-run:")
+            print(f"  python3 tools/pipeline.py generate-script --run-id {run_id} --force")
+            return
+        if gate1_checks.get("has_warn", False):
+            print(
+                f"\n[WARN] Pre-Gate1 contracts returned WARN for: "
+                f"{', '.join(gate1_checks.get('warn_items', []))}. "
+                "WARN is telemetry-only (approval allowed). Review security/input_guard_report.json."
+            )
+        if gates["gate1"]["status"] != "approved":
+            print(f"\n{'='*60}")
+            print("WAITING FOR GATE 1 APPROVAL")
+            print(f"{'='*60}")
+            print(f"Run: {run_id}")
+            print(f"Approve: python3 tools/pipeline.py approve-gate1 --run-id {run_id} --reviewer Ray --notes \"GO\"")
+            print(f"Reject : python3 tools/pipeline.py reject-gate1 --run-id {run_id} --reviewer Ray --notes \"Needs rewrite\"")
+            return
+
+        for name, fn in gate2_package_steps:
+            print(f"\n{'='*60}")
+            print(f"STEP: {name}")
+            print(f"{'='*60}")
+            try:
+                _run_with_contract(name, args, fn)
+            except Exception as e:
+                print(f"\n[FAIL] {name}: {e}")
+                log_ops_event(run_id, "pipeline_failed", {"step": name, "error": str(e)})
+                print(f"\nPipeline stopped at {name}. Fix and re-run from this step:")
+                print(f"  python3 tools/pipeline.py {name} --run-id {run_id}")
+                sys.exit(1)
+
+        run_config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        _ops_tier_report(run_dir, run_config, persist=True)
+        auto_checks = _pre_gate2_auto_checks(run_dir)
+        if not auto_checks.get("ok_for_gate2", False):
+            print(f"\n{'='*60}")
+            print("GATE 2 AUTO-CHECK FAILED")
+            print(f"{'='*60}")
+            for key in ("originality", "compliance"):
+                row = auto_checks.get(key, {})
+                print(f"- {key}: {row.get('status')} (report exists: {row.get('exists')})")
+            print("Fix reports and re-run:")
+            print(f"  python3 tools/pipeline.py validate-originality --run-id {run_id} --force")
+            print(f"  python3 tools/pipeline.py validate-compliance --run-id {run_id} --force")
+            return
+        if auto_checks.get("has_warn", False):
+            print(f"\n[WARN] Pre-Gate2 contracts returned WARN for: {', '.join(auto_checks.get('warn_items', []))}")
+            print("WARN is telemetry-only (approval allowed). Review the reports before rendering/uploading.")
+
+        # Gate 2 is mandatory before render/upload.
+        run_config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        gates, changed = ensure_quality_gates(run_config)
+        if changed:
+            save_run_config(run_dir, run_config)
+        if gates["gate2"]["status"] != "approved":
+            print(f"\n{'='*60}")
+            print("WAITING FOR GATE 2 APPROVAL")
+            print(f"{'='*60}")
+            print(f"Run: {run_id}")
+            print(f"Approve: python3 tools/pipeline.py approve-gate2 --run-id {run_id} --reviewer Ray --notes \"GO\"")
+            print(f"Reject : python3 tools/pipeline.py reject-gate2 --run-id {run_id} --reviewer Ray --notes \"Regenerate assets\"")
+            return
+
+        if not str(getattr(args, "youtube_client_secrets", "") or "").strip():
+            print(f"\n{'='*60}")
+            print("GATE 2 APPROVED — READY TO RENDER/UPLOAD")
+            print(f"{'='*60}")
+            print(
+                "Run render/upload with:\n"
+                f"  python3 tools/pipeline.py render-and-upload --run-id {run_id} "
+                "--youtube-client-secrets /abs/path/client_secret.json"
+            )
+            return
+
         try:
-            from tools.lib.run_log import log_run
-            niche = ""
-            niche_path = VideoPaths(video_id).niche_txt
-            if niche_path.is_file():
-                niche = niche_path.read_text(encoding="utf-8").strip()
-            log_run(video_id, args.command, exit_code, round(_duration, 1), niche=niche)
-        except Exception:
-            pass  # never let logging break the pipeline
+            _run_with_contract("render-and-upload", args, cmd_render_and_upload)
+        except Exception as e:
+            print(f"\n[FAIL] render-and-upload: {e}")
+            log_ops_event(run_id, "pipeline_failed", {"step": "render-and-upload", "error": str(e)})
+            print(f"\nRender/upload blocked. Re-run with:")
+            print(f"  python3 tools/pipeline.py render-and-upload --run-id {run_id} --youtube-client-secrets /abs/path/client_secret.json")
+            sys.exit(1)
 
-        # Supabase: ensure run exists for standalone commands
-        try:
-            from tools.lib.supabase_pipeline import ensure_run_id
-            ensure_run_id(video_id, args.command)
-        except Exception:
-            pass
+        print(f"\n{'='*60}")
+        print("PIPELINE COMPLETE")
+        print(f"{'='*60}")
+        print(f"Run: {run_id}")
+        print(f"Dir: {run_dir}")
 
-    return exit_code
+
+# ===================================================================
+# Helpers
+# ===================================================================
+
+def load_run(args) -> Tuple[Path, str, Dict]:
+    run_id = args.run_id
+    if not run_id:
+        raise RuntimeError("--run-id is required")
+    # Prevent path traversal (e.g. --run-id "../../etc/passwd")
+    if "/" in run_id or "\\" in run_id or ".." in run_id:
+        raise RuntimeError(f"Invalid run-id: {run_id!r} (must not contain path separators or ..)")
+    run_dir = get_run_dir(run_id)
+    config_path = run_dir / "run.json"
+    if not config_path.exists():
+        raise RuntimeError(f"Run not found: {run_dir}. Run init-run first.")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    return run_dir, run_id, config
+
+
+def mark_step_complete(run_dir: Path, step: str):
+    config_path = run_dir / "run.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    completed = config.get("steps_completed", [])
+    if step not in completed:
+        completed.append(step)
+    config["steps_completed"] = completed
+    config["status"] = step
+    config["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    # Update step_status
+    step_status = config.get("step_status", {})
+    step_status[step] = "done"
+    config["step_status"] = step_status
+    # Update artifact checksums
+    config["artifact_checksums"] = compute_artifact_checksums(run_dir)
+    atomic_write_json(config_path, config)
+
+
+# ===================================================================
+# CLI
+# ===================================================================
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="pipeline",
+        description="RayViewsLab — File-driven E2E video production pipeline",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # Shared args
+    def add_common(p):
+        p.add_argument("--run-id", default="")
+        p.add_argument("--force", action="store_true", help="Force re-run even if outputs exist")
+
+    def add_all_config(p):
+        add_common(p)
+        p.add_argument("--category", default="desk_gadgets")
+        p.add_argument("--duration", type=int, default=8)
+        p.add_argument("--voice", default=DEFAULT_VOICE)
+        p.add_argument("--affiliate-tag", default=DEFAULT_AFFILIATE_TAG)
+        p.add_argument("--tracking-id-override", default="", help="Optional per-video Associates tracking ID")
+        p.add_argument("--min-rating", type=float, default=4.2)
+        p.add_argument("--min-reviews", type=int, default=500)
+        p.add_argument("--min-price", type=float, default=100)
+        p.add_argument("--max-price", type=float, default=500)
+        p.add_argument("--exclude-last-days", type=int, default=15)
+        p.add_argument(
+            "--source",
+            choices=["mock", "scrape", "openclaw", "chatgpt_ui", "minimax"],
+            default="openclaw",
+            help="Script/discovery source. Policy: scripts must use openclaw/chatgpt_ui (ChatGPT UI).",
+        )
+        p.add_argument("--resolution", choices=["1920x1080", "3840x2160"], default="1920x1080")
+        p.add_argument("--daily-budget-usd", type=float, default=30.0)
+        p.add_argument("--spent-usd", type=float, default=0.0)
+        p.add_argument("--critical-failures", type=int, default=0)
+
+    # init-run
+    p = sub.add_parser("init-run", help="Create run folder + run.json")
+    add_all_config(p)
+    p.set_defaults(func=cmd_init_run)
+
+    # discover-products
+    p = sub.add_parser("discover-products", help="Find products from Amazon")
+    add_all_config(p)
+    p.set_defaults(func=cmd_discover_products)
+
+    # plan-variations
+    p = sub.add_parser("plan-variations", help="Generate variation_plan.json for format diversity")
+    add_common(p)
+    p.set_defaults(func=cmd_plan_variations)
+
+    # generate-script
+    p = sub.add_parser("generate-script", help="Generate structured script.json")
+    add_all_config(p)
+    p.set_defaults(func=cmd_generate_script)
+
+    # generate-assets
+    p = sub.add_parser("generate-assets", help="Generate Dzine image prompts + manifest")
+    add_common(p)
+    p.set_defaults(func=cmd_generate_assets)
+
+    # generate-voice
+    p = sub.add_parser("generate-voice", help="Generate voice timestamps + narration text")
+    add_common(p)
+    p.add_argument("--source", choices=["mock", "elevenlabs"], default="mock",
+                   help="mock = timestamps only; elevenlabs = timestamps + actual TTS audio")
+    p.set_defaults(func=cmd_generate_voice)
+
+    # build-davinci
+    p = sub.add_parser("build-davinci", help="Build DaVinci project.json")
+    add_common(p)
+    p.set_defaults(func=cmd_build_davinci)
+
+    # convert-to-rayvault
+    p = sub.add_parser("convert-to-rayvault", help="Convert pipeline output → RayVault format")
+    add_common(p)
+    p.add_argument("--frame-path", default=None, help="Path to 03_frame.png")
+    p.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    p.add_argument("--no-overlays", action="store_true", help="Skip overlays_index.json")
+    p.set_defaults(func=cmd_convert_to_rayvault)
+
+    # validate-originality
+    p = sub.add_parser("validate-originality", help="Run originality budget checks before Gate 2")
+    add_common(p)
+    p.add_argument("--policy-json", default="", help="Optional JSON thresholds override")
+    p.set_defaults(func=cmd_validate_originality)
+
+    # validate-compliance
+    p = sub.add_parser("validate-compliance", help="Run compliance contract checks before Gate 2")
+    add_common(p)
+    p.set_defaults(func=cmd_validate_compliance)
+
+    # gate decisions (mandatory human approvals)
+    for cmd_name, fn, label in [
+        ("approve-gate1", cmd_approve_gate1, "Approve Gate 1 (products + script)"),
+        ("reject-gate1", cmd_reject_gate1, "Reject Gate 1"),
+        ("approve-gate2", cmd_approve_gate2, "Approve Gate 2 (assets + audio)"),
+        ("reject-gate2", cmd_reject_gate2, "Reject Gate 2"),
+    ]:
+        p = sub.add_parser(cmd_name, help=label)
+        add_common(p)
+        p.add_argument("--reviewer", default="Ray")
+        p.add_argument("--notes", default="")
+        p.set_defaults(func=fn)
+
+    # render-and-upload
+    p = sub.add_parser("render-and-upload", help="Render video + upload to YouTube")
+    add_common(p)
+    p.add_argument("--youtube-client-secrets", default="", help="Path to YouTube OAuth client secrets JSON")
+    p.add_argument("--youtube-token-file", default="", help="Path to cached YouTube OAuth token JSON")
+    p.add_argument("--video-file", default="", help="Optional override for rendered video path")
+    p.add_argument("--thumbnail", default="", help="Optional thumbnail image")
+    p.add_argument("--privacy-status", choices=["private", "public", "unlisted"], default="private")
+    p.add_argument("--tracking-id-override", default="", help="Optional per-video Associates tracking ID")
+    p.add_argument("--step-retries", type=int, default=3, help="Retries for render/upload external calls")
+    p.add_argument("--step-backoff-sec", type=int, default=8, help="Base backoff seconds (x1, x3, x9)")
+    p.set_defaults(func=cmd_render_and_upload)
+
+    # collect-metrics
+    p = sub.add_parser("collect-metrics", help="Collect YouTube metrics (24h after upload)")
+    add_common(p)
+    p.set_defaults(func=cmd_collect_metrics)
+
+    # run-e2e
+    p = sub.add_parser("run-e2e", help="Run full pipeline end-to-end")
+    add_all_config(p)
+    p.add_argument("--youtube-client-secrets", default="", help="Optional: if set and gate2 approved, upload runs automatically")
+    p.add_argument("--youtube-token-file", default="", help="Optional cached token for YouTube upload")
+    p.add_argument("--video-file", default="", help="Optional override for rendered video path")
+    p.add_argument("--thumbnail", default="", help="Optional thumbnail image")
+    p.add_argument("--privacy-status", choices=["private", "public", "unlisted"], default="private")
+    p.add_argument("--step-retries", type=int, default=3)
+    p.add_argument("--step-backoff-sec", type=int, default=8)
+    p.set_defaults(func=cmd_run_e2e)
+
+    # status
+    p = sub.add_parser("status", help="Show pipeline run status")
+    add_common(p)
+    p.set_defaults(func=cmd_status)
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        _run_with_contract(args.command, args, args.func)
+    except RuntimeError as e:
+        print(f"\n[ERROR] {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

@@ -43,15 +43,15 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import shutil
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from rayvault.io import atomic_write_json, sha1_file, sha1_text, utc_now_iso
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -78,32 +78,6 @@ MANIFEST_SCHEMA_VERSION = "1.1"
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def sha1_file(path: Path) -> str:
-    h = hashlib.sha1()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def sha1_text(s: str) -> str:
-    return hashlib.sha1(s.strip().encode("utf-8")).hexdigest()[:12]
-
-
-def atomic_write_json(path: Path, obj: Dict[str, Any]) -> None:
-    """Write JSON atomically via tmp + os.replace."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    os.replace(tmp, path)
 
 
 def copy_asset(src: Path, dst: Path) -> None:
@@ -376,7 +350,7 @@ def handoff(
 
     # Load prompt for hashing
     prompt_text = load_prompt_text(prompt_id, prompts_dir)
-    prompt_hash = sha1_text(prompt_text) if prompt_text else None
+    prompt_hash = sha1_text(prompt_text.strip()) if prompt_text else None
 
     # Default reference_strength
     if reference_strength is None:

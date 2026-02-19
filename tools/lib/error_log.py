@@ -45,10 +45,10 @@ def _write_log(entries: list[dict], path: Path | None = None) -> None:
                  encoding="utf-8")
 
 
-def _make_id(timestamp: str, error: str) -> str:
+def _make_id(timestamp: str, error: str, salt: str = "") -> str:
     """Generate a unique error ID: e-<ts_short>-<5-char hash>."""
     ts_short = timestamp[:19].replace("-", "").replace(":", "").replace("T", "T")
-    h = hashlib.sha256(f"{timestamp}{error}".encode()).hexdigest()[:5]
+    h = hashlib.sha256(f"{timestamp}{error}{salt}".encode()).hexdigest()[:5]
     return f"e-{ts_short}-{h}"
 
 
@@ -67,8 +67,9 @@ def log_error(
 ) -> dict:
     """Append an error entry and return it."""
     ts = now_iso()
+    entries = _read_log(_path)
     entry = {
-        "id": _make_id(ts, error),
+        "id": _make_id(ts, error, f"{video_id}{len(entries)}"),
         "video_id": video_id,
         "timestamp": ts,
         "stage": stage,
@@ -78,7 +79,6 @@ def log_error(
         "resolved": False,
         "resolution": None,
     }
-    entries = _read_log(_path)
     entries.append(entry)
     _write_log(entries, _path)
     return entry

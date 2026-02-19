@@ -1,0 +1,25 @@
+{
+  "cluster_name": "rayviewslab-cluster",
+  "state_dir": "state/cluster",
+  "auth": {
+    "secret_env": "RAYVAULT_CLUSTER_SECRET"
+  },
+  "controller": {
+    "node_id": "mac-controller",
+    "request_timeout_sec": 15,
+    "poll_interval_sec": 2,
+    "poll_timeout_sec": 900,
+    "local_workspace_root": "state/cluster/local_worker_data"
+  },
+  "nodes": [
+    {
+      "node_id": "windows-worker-1",
+      "host": "100.123.180.81",
+      "port": 8787,
+      "role": "worker",
+      "enabled": true,
+      "timeout_sec": 20,
+      "tags": ["windows", "headless"]
+    }
+  ]
+}
