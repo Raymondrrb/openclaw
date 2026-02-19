@@ -3,6 +3,16 @@
 - Repo: https://github.com/openclaw/openclaw
 - GitHub issues/comments/PR comments: use literal multiline strings or `-F - <<'EOF'` (or $'...') for real newlines; never embed "\\n".
 
+## RayViews Canonical Workspace (Mandatory)
+
+- For RayViewsLab work, use this folder: `/Users/ray/Documents/openclaw`
+- Use this GitHub remote as source of truth: `rayviewslab` (`https://github.com/Raymondrrb/rayviewslab.git`)
+- Do not edit `/Users/ray/Documents/Rayviews` unless explicitly requested for migration.
+- Session preflight (required): `pwd`, `git branch --show-current`, `git remote -v`
+- Before implementing RayViews changes, sync canonical baseline:
+  - `git fetch rayviewslab`
+  - `git pull --rebase rayviewslab main`
+
 ## Project Structure & Module Organization
 
 - Source code: `src/` (CLI wiring in `src/cli`, commands in `src/commands`, web provider in `src/provider-web.ts`, infra in `src/infra`, media pipeline in `src/media`).
