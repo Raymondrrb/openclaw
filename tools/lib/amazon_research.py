@@ -82,8 +82,32 @@ def make_tag_url(url: str, tag: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+_ACCESSORY_KEYWORDS = {
+    "replacement", "accessories", "accessory", "compatible with",
+    "kit for", "pack of", "pcs for", "parts for", "filter for",
+    "brush for", "pad for", "bag for", "case for", "cover for",
+    "charger for", "cable for", "mount for", "stand for",
+    "refill", "cartridge", "spare",
+}
+
+
+def _parse_price(price_str: str) -> float:
+    """Parse a price string like '$26.59' into a float. Returns 0 on failure."""
+    if not price_str:
+        return 0.0
+    cleaned = re.sub(r"[^\d.]", "", price_str)
+    try:
+        return float(cleaned)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def validate_products(products: list[AmazonProduct]) -> list[str]:
-    """Validate a list of products for pipeline readiness."""
+    """Validate a list of products for pipeline readiness.
+
+    Checks: basic fields, accessory detection, price anomalies,
+    duplicate evidence, and data quality.
+    """
     errors: list[str] = []
 
     if not products:
@@ -94,13 +118,63 @@ def validate_products(products: list[AmazonProduct]) -> list[str]:
     if len(ranks) != len(set(ranks)):
         errors.append("Duplicate ranks found")
 
+    # Collect prices for median calculation
+    prices = [_parse_price(p.price) for p in products if _parse_price(p.price) > 0]
+    median_price = sorted(prices)[len(prices) // 2] if prices else 0.0
+
+    # Collect all benefits for duplication check
+    all_benefits: dict[str, list[int]] = {}
+
     for p in products:
+        prefix = f"Rank {p.rank} ({p.name})"
+
+        # --- Basic field checks ---
         if not p.name:
             errors.append(f"Rank {p.rank}: missing name")
         if not p.affiliate_url and not p.amazon_url:
-            errors.append(f"Rank {p.rank}: missing URL (need affiliate_url or amazon_url)")
+            errors.append(f"{prefix}: missing URL (need affiliate_url or amazon_url)")
         if p.rank < 1:
             errors.append(f"Product '{p.name}': rank must be >= 1")
+
+        # --- Accessory detection ---
+        name_lower = p.name.lower()
+        title_lower = name_lower  # name is what we have in the data model
+        for kw in _ACCESSORY_KEYWORDS:
+            if kw in title_lower:
+                errors.append(
+                    f"{prefix}: LIKELY ACCESSORIES — name contains '{kw}'. "
+                    f"Must be a standalone product, not parts/accessories."
+                )
+                break
+
+        # --- Price anomaly detection ---
+        price_val = _parse_price(p.price)
+        if price_val > 0 and median_price > 0:
+            if price_val < median_price * 0.3:
+                errors.append(
+                    f"{prefix}: PRICE ANOMALY — ${price_val:.2f} is <30% of "
+                    f"category median ${median_price:.2f}. Likely accessories or wrong ASIN."
+                )
+
+        # --- Downside required ---
+        if not p.downside or len(p.downside.strip()) < 10:
+            errors.append(f"{prefix}: missing or too short downside (every product needs honest limitations)")
+
+        # --- Benefit uniqueness tracking ---
+        for b in p.benefits:
+            b_stripped = b.strip()
+            if len(b_stripped) > 20:  # Skip trivially short benefits
+                all_benefits.setdefault(b_stripped, []).append(p.rank)
+
+    # --- Duplicate evidence check ---
+    for benefit_text, used_by_ranks in all_benefits.items():
+        if len(used_by_ranks) > 1:
+            rank_list = ", ".join(str(r) for r in used_by_ranks)
+            snippet = benefit_text[:80] + "..." if len(benefit_text) > 80 else benefit_text
+            errors.append(
+                f"DUPLICATE EVIDENCE: same benefit text used by ranks [{rank_list}]: "
+                f'"{snippet}"'
+            )
 
     return errors
 

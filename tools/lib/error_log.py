@@ -193,6 +193,38 @@ def get_lessons(
     return sorted(lessons, key=lambda l: l["occurrences"], reverse=True)
 
 
+def promote_to_learning(
+    error_id: str,
+    root_cause: str,
+    fix: str,
+    *,
+    verification: str = "",
+    severity: str = "FAIL",
+    component: str = "",
+    agent: str = "",
+    _path: Path | None = None,
+) -> dict | None:
+    """Bridge: resolve error and create a LearningEvent in one call.
+
+    Returns the created LearningEvent as dict, or None if error not found.
+    """
+    from tools.learning_event import promote_from_error
+    event = promote_from_error(
+        error_id,
+        root_cause=root_cause,
+        fix=fix,
+        verification=verification,
+        severity=severity,
+        component=component,
+        agent=agent,
+        _error_path=_path,
+    )
+    if event is None:
+        return None
+    from dataclasses import asdict
+    return asdict(event)
+
+
 def get_stale(
     *,
     days: int = 7,

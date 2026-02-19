@@ -71,6 +71,10 @@ class VideoPaths:
         # subcategory contract
         self.subcategory_contract = self.root / "inputs" / "subcategory_contract.json"
 
+        # learning
+        self.learning_dir = self.root / "learning"
+        self.learning_events_dir = self.learning_dir / "events"
+
         # status
         self.status_json = self.root / "status.json"
 
@@ -117,6 +121,7 @@ class VideoPaths:
             self.audio_chunks,
             self.audio_music,
             self.audio_sfx,
+            self.learning_events_dir,
             self.resolve_dir,
             self.export_dir,
         ]

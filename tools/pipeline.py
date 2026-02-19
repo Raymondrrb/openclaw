@@ -60,6 +60,41 @@ EXIT_ACTION_REQUIRED = 2
 # ---------------------------------------------------------------------------
 
 
+def _pre_run_learning_check(stage: str = "") -> None:
+    """Surface relevant learnings from the skill graph before running a stage.
+
+    Prints warnings and mandatory rules so agents see accumulated knowledge.
+    """
+    try:
+        from tools.lib.skill_graph import pre_run_check
+        warnings = pre_run_check(tool=stage)
+        if warnings:
+            print(f"\n--- Skill Graph Pre-Run Check ({len(warnings)} items) ---")
+            for w in warnings:
+                print(f"  ! {w}")
+            print("---")
+    except Exception:
+        pass  # Non-blocking; graceful degradation
+
+
+def _run_learning_gate(video_id: str, stage: str) -> int | None:
+    """Run the learning gate. Returns EXIT_ACTION_REQUIRED if blocked, else None."""
+    try:
+        from tools.learning_gate import learning_gate
+        result = learning_gate(video_id, stage)
+        if result.blocked:
+            print(f"\n--- Learning Gate BLOCKED ---")
+            print(f"  {result.reason}")
+            for c in result.checks:
+                status = "PASS" if c.passed else "FAIL"
+                print(f"  [{status}] {c.name}: {c.reason}")
+            print("---")
+            return EXIT_ACTION_REQUIRED
+    except Exception:
+        pass  # Non-blocking; graceful degradation
+    return None
+
+
 def _print_header(title: str) -> None:
     print(f"\n{'=' * 50}")
     print(f"  {title}")
@@ -209,6 +244,10 @@ def cmd_research(args) -> int:
     force = getattr(args, "force", False)
 
     _print_header(f"Research: {args.video_id} [{mode.upper()} mode]")
+    _pre_run_learning_check("research")
+    gate = _run_learning_gate(args.video_id, "research")
+    if gate is not None:
+        return gate
 
     paths = VideoPaths(args.video_id)
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
@@ -527,6 +566,10 @@ def cmd_script(args) -> int:
     from tools.lib.notify import notify_progress, notify_action_required, notify_error
 
     _print_header(f"Script: {args.video_id}")
+    _pre_run_learning_check("script")
+    gate = _run_learning_gate(args.video_id, "script")
+    if gate is not None:
+        return gate
 
     paths = VideoPaths(args.video_id)
     generate = getattr(args, "generate", True)
@@ -1050,8 +1093,15 @@ def _download_amazon_images(products, paths: VideoPaths) -> dict[int, Path]:
 
     Returns {rank: local_path} for successfully downloaded images.
     Skips if file already exists and is >10KB.
+    Retries up to 3 times with backoff. Validates content-type and body.
     """
+    import time as _time
     import urllib.request
+
+    MAX_RETRIES = 3
+    MIN_VALID_SIZE = 2 * 1024  # 2KB minimum for a real JPEG
+    KNOWN_ERROR_BODIES = {b"Not Found", b"AccessDenied", b"Forbidden"}
+
     ref_images: dict[int, Path] = {}
     paths.assets_amazon.mkdir(parents=True, exist_ok=True)
 
@@ -1060,18 +1110,82 @@ def _download_amazon_images(products, paths: VideoPaths) -> dict[int, Path]:
         if not image_url:
             continue
         dest = paths.amazon_ref_image(p.rank)
+
+        # Check existing file validity (not just size, also content)
         if dest.is_file() and dest.stat().st_size > 10 * 1024:
-            ref_images[p.rank] = dest
-            continue
-        try:
-            urllib.request.urlretrieve(image_url, str(dest))
-            if dest.is_file() and dest.stat().st_size > 1024:
+            # Quick check: is it actually an image, not a text error?
+            try:
+                with open(dest, "rb") as f:
+                    head = f.read(16)
+                if head[:2] in (b"\xff\xd8", b"\x89P"):  # JPEG or PNG magic
+                    ref_images[p.rank] = dest
+                    continue
+            except OSError:
+                pass
+            # If not a valid image, re-download
+
+        downloaded = False
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                req = urllib.request.Request(image_url, headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+                })
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    content_type = resp.headers.get("Content-Type", "")
+                    if "image" not in content_type:
+                        print(f"  Warning: rank {p.rank} got content-type '{content_type}', not image (attempt {attempt})")
+                        if attempt < MAX_RETRIES:
+                            _time.sleep(2 ** attempt)
+                            continue
+                        break
+
+                    data = resp.read()
+
+                # Check for text error bodies
+                if len(data) < 256 and data.strip() in KNOWN_ERROR_BODIES:
+                    print(f"  Warning: rank {p.rank} returned '{data.decode(errors='replace').strip()}' (attempt {attempt})")
+                    if attempt < MAX_RETRIES:
+                        _time.sleep(2 ** attempt)
+                        continue
+                    break
+
+                # Check minimum size
+                if len(data) < MIN_VALID_SIZE:
+                    print(f"  Warning: rank {p.rank} image too small ({len(data)} bytes, attempt {attempt})")
+                    if attempt < MAX_RETRIES:
+                        _time.sleep(2 ** attempt)
+                        continue
+                    break
+
+                # Verify magic bytes (JPEG: FF D8, PNG: 89 50)
+                if data[:2] not in (b"\xff\xd8", b"\x89P"):
+                    print(f"  Warning: rank {p.rank} not a valid JPEG/PNG (attempt {attempt})")
+                    if attempt < MAX_RETRIES:
+                        _time.sleep(2 ** attempt)
+                        continue
+                    break
+
+                # Write atomically
+                tmp = dest.with_suffix(".tmp")
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                tmp.replace(dest)
                 ref_images[p.rank] = dest
-                print(f"  Downloaded ref image: {dest.name}")
-            else:
-                print(f"  Warning: ref image too small for rank {p.rank}, skipping")
-        except Exception as exc:
-            print(f"  Warning: could not download ref image for rank {p.rank}: {exc}")
+                downloaded = True
+                print(f"  Downloaded ref image: {dest.name} ({len(data) // 1024}KB)")
+                break
+
+            except Exception as exc:
+                print(f"  Warning: rank {p.rank} download failed (attempt {attempt}): {exc}")
+                if attempt < MAX_RETRIES:
+                    _time.sleep(2 ** attempt)
+
+        if not downloaded:
+            print(f"  ERROR: could not download valid ref image for rank {p.rank} after {MAX_RETRIES} attempts")
+            # Clean up any bad file
+            if dest.is_file() and dest.stat().st_size < MIN_VALID_SIZE:
+                dest.unlink()
+
     return ref_images
 
 
@@ -1087,6 +1201,10 @@ def cmd_assets(args) -> int:
     MIN_ASSET_SIZE = 80 * 1024  # 80 KB minimum for valid images
 
     _print_header(f"Assets: {args.video_id}")
+    _pre_run_learning_check("dzine")
+    gate = _run_learning_gate(args.video_id, "assets")
+    if gate is not None:
+        return gate
 
     # Preflight safety gate (skip on --dry-run so status check still works)
     if not args.dry_run:
@@ -1570,6 +1688,10 @@ def cmd_tts(args) -> int:
     from tools.lib.notify import notify_action_required, notify_progress, notify_error
 
     _print_header(f"TTS: {args.video_id}")
+    _pre_run_learning_check("tts")
+    gate = _run_learning_gate(args.video_id, "tts")
+    if gate is not None:
+        return gate
 
     paths = VideoPaths(args.video_id)
 
@@ -1778,6 +1900,10 @@ def cmd_manifest(args) -> int:
     )
 
     _print_header(f"Manifest: {args.video_id}")
+    _pre_run_learning_check("manifest")
+    gate = _run_learning_gate(args.video_id, "manifest")
+    if gate is not None:
+        return gate
 
     paths = VideoPaths(args.video_id)
 
@@ -1925,6 +2051,10 @@ def cmd_day(args) -> int:
     from tools.lib.notify import notify_action_required
 
     _print_header(f"Day: {args.video_id}")
+    _pre_run_learning_check("pipeline")
+    gate = _run_learning_gate(args.video_id, "day")
+    if gate is not None:
+        return gate
 
     paths = VideoPaths(args.video_id)
     niche = getattr(args, "niche", "") or ""
