@@ -1587,6 +1587,7 @@ def cmd_init_run(args):
 
 def cmd_discover_products(args):
     run_dir, run_id, run_config = load_run(args)
+    _run_learning_gate(run_id, "research")
     log = setup_logger(run_dir, "01_discovery")
     products_json_path = run_dir / "products.json"
     products_csv_path = run_dir / "products.csv"
@@ -1915,6 +1916,7 @@ def cmd_plan_variations(args):
 
 def cmd_generate_script(args):
     run_dir, run_id, run_config = load_run(args)
+    _run_learning_gate(run_id, "script")
     log = setup_logger(run_dir, "02_script")
     script_path = run_dir / "script.json"
     security_dir = run_dir / "security"
@@ -2777,6 +2779,7 @@ def generate_script_minimax(run_id: str, category: str, products: List[Dict],
 
 def cmd_generate_assets(args):
     run_dir, run_id, run_config = load_run(args)
+    _run_learning_gate(run_id, "assets")
     log = setup_logger(run_dir, "03_assets")
     manifest_path = run_dir / "assets_manifest.json"
 
@@ -2911,6 +2914,7 @@ def cmd_generate_assets(args):
 
 def cmd_generate_voice(args):
     run_dir, run_id, run_config = load_run(args)
+    _run_learning_gate(run_id, "tts")
     log = setup_logger(run_dir, "04_voice")
     voice_dir = run_dir / "voice"
     voice_dir.mkdir(parents=True, exist_ok=True)
@@ -3028,6 +3032,7 @@ def _voice_source_requests_tts(source: str) -> bool:
 
 def cmd_build_davinci(args):
     run_dir, run_id, run_config = load_run(args)
+    _run_learning_gate(run_id, "manifest")
     log = setup_logger(run_dir, "05_davinci")
     davinci_dir = run_dir / "davinci"
     davinci_dir.mkdir(parents=True, exist_ok=True)
