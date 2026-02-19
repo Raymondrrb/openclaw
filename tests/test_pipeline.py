@@ -190,7 +190,7 @@ class TestPipelineResearch(unittest.TestCase):
         paths = VideoPaths("test-res")
         paths.ensure_dirs()
 
-        args = _make_args(video_id="test-res", mode="build")
+        args = _make_args(video_id="test-res", mode="build", no_approval=True)
         result = cmd_research(args)
         self.assertEqual(result, 2)  # action_required
 
@@ -206,13 +206,19 @@ class TestPipelineResearch(unittest.TestCase):
         data = {
             "keyword": "speakers",
             "products": [
-                {"rank": r, "name": f"Product {r}", "amazon_url": f"https://amazon.com/dp/B00{r}"}
+                {
+                    "rank": r,
+                    "name": f"Product {r}",
+                    "amazon_url": f"https://amazon.com/dp/B00{r}",
+                    "downside": "Minor drawback noted",
+                    "benefits": ["Good sound", "Portable"],
+                }
                 for r in [5, 4, 3, 2, 1]
             ],
         }
         paths.products_json.write_text(json.dumps(data), encoding="utf-8")
 
-        args = _make_args(video_id="test-res-ok", mode="build")
+        args = _make_args(video_id="test-res-ok", mode="build", no_approval=True)
         result = cmd_research(args)
         self.assertEqual(result, 0)
 
@@ -234,7 +240,7 @@ class TestPipelineResearch(unittest.TestCase):
         paths.products_json.write_text(json.dumps(data), encoding="utf-8")
 
         from tools.pipeline import cmd_research
-        args = _make_args(video_id="test-res-bad", mode="build")
+        args = _make_args(video_id="test-res-bad", mode="build", no_approval=True)
         result = cmd_research(args)
         self.assertEqual(result, 1)
 
@@ -274,13 +280,19 @@ class TestPipelineScript(unittest.TestCase):
         data = {
             "keyword": "speakers",
             "products": [
-                {"rank": r, "name": f"Product {r}", "amazon_url": f"https://amazon.com/dp/B00{r}"}
+                {
+                    "rank": r,
+                    "name": f"Product {r}",
+                    "amazon_url": f"https://amazon.com/dp/B00{r}",
+                    "downside": "Minor drawback noted",
+                    "benefits": ["Good sound", "Portable"],
+                }
                 for r in [5, 4, 3, 2, 1]
             ],
         }
         paths.products_json.write_text(json.dumps(data), encoding="utf-8")
 
-        args = _make_args(video_id="test-script", charismatic="reality_check", generate=False)
+        args = _make_args(video_id="test-script", charismatic="reality_check", generate=False, no_approval=True)
         result = cmd_script(args)
         # No script.txt yet and generate=False, so it should return action_required
         self.assertEqual(result, 2)
@@ -305,7 +317,7 @@ class TestPipelineScript(unittest.TestCase):
         paths.ensure_dirs()
         paths.niche_txt.write_text("speakers\n", encoding="utf-8")
 
-        args = _make_args(video_id="test-script-nop", charismatic="reality_check")
+        args = _make_args(video_id="test-script-nop", charismatic="reality_check", no_approval=True)
         result = cmd_script(args)
         self.assertEqual(result, 2)
 
@@ -473,7 +485,7 @@ class TestPipelineDayCluster(unittest.TestCase):
         # Mock research + script-brief to avoid actual work
         with patch("tools.pipeline.cmd_research", return_value=0), \
              patch("tools.pipeline.cmd_script_brief", return_value=0):
-            args = _make_args(video_id="test-cluster", niche="", cluster="", force=False)
+            args = _make_args(video_id="test-cluster", niche="", cluster="", force=False, no_approval=True)
             cmd_day(args)
 
         paths = VideoPaths("test-cluster")
@@ -487,7 +499,7 @@ class TestPipelineDayCluster(unittest.TestCase):
 
         with patch("tools.pipeline.cmd_research", return_value=0), \
              patch("tools.pipeline.cmd_script_brief", return_value=0):
-            args = _make_args(video_id="test-mn", niche="", cluster="", force=False)
+            args = _make_args(video_id="test-mn", niche="", cluster="", force=False, no_approval=True)
             cmd_day(args)
 
         paths = VideoPaths("test-mn")
@@ -508,7 +520,7 @@ class TestPipelineDayCluster(unittest.TestCase):
              patch("tools.pipeline.cmd_script_brief", return_value=0):
             args = _make_args(
                 video_id="test-override", niche="wireless earbuds",
-                cluster="", force=False,
+                cluster="", force=False, no_approval=True,
             )
             cmd_day(args)
 

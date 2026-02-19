@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import json
 import tempfile
+import unittest
 from pathlib import Path
-
-import pytest
 
 from tools.lib.buyer_trust import (
     CONFIDENCE_EDITORIAL,
@@ -29,27 +28,27 @@ from tools.lib.buyer_trust import (
 # ---------------------------------------------------------------------------
 
 
-class TestConfidenceTag:
+class TestConfidenceTag(unittest.TestCase):
     def test_measured_with_unit(self):
-        assert confidence_tag("Battery lasts 30 hours on a single charge") == CONFIDENCE_MEASURED
+        self.assertEqual(confidence_tag("Battery lasts 30 hours on a single charge"), CONFIDENCE_MEASURED)
 
     def test_measured_with_db(self):
-        assert confidence_tag("40dB noise reduction measured in lab test") == CONFIDENCE_MEASURED
+        self.assertEqual(confidence_tag("40dB noise reduction measured in lab test"), CONFIDENCE_MEASURED)
 
     def test_measured_with_test_keyword(self):
-        assert confidence_tag("RTINGS tested the frequency response") == CONFIDENCE_MEASURED
+        self.assertEqual(confidence_tag("RTINGS tested the frequency response"), CONFIDENCE_MEASURED)
 
     def test_editorial_opinion(self):
-        assert confidence_tag("Great sound quality and comfortable fit") == CONFIDENCE_EDITORIAL
+        self.assertEqual(confidence_tag("Great sound quality and comfortable fit"), CONFIDENCE_EDITORIAL)
 
     def test_user_reported(self):
-        assert confidence_tag("Many users report Bluetooth connectivity issues") == CONFIDENCE_USER
+        self.assertEqual(confidence_tag("Many users report Bluetooth connectivity issues"), CONFIDENCE_USER)
 
     def test_user_amazon_review(self):
-        assert confidence_tag("Amazon reviews mention the build quality") == CONFIDENCE_USER
+        self.assertEqual(confidence_tag("Amazon reviews mention the build quality"), CONFIDENCE_USER)
 
     def test_editorial_default(self):
-        assert confidence_tag("Excellent noise cancellation") == CONFIDENCE_EDITORIAL
+        self.assertEqual(confidence_tag("Excellent noise cancellation"), CONFIDENCE_EDITORIAL)
 
 
 # ---------------------------------------------------------------------------
@@ -57,14 +56,14 @@ class TestConfidenceTag:
 # ---------------------------------------------------------------------------
 
 
-class TestEvidenceRow:
+class TestEvidenceRow(unittest.TestCase):
     def test_auto_confidence(self):
         row = EvidenceRow(claim="Battery rated 40 hours", source="RTINGS")
-        assert row.confidence == CONFIDENCE_MEASURED
+        self.assertEqual(row.confidence, CONFIDENCE_MEASURED)
 
     def test_explicit_confidence(self):
         row = EvidenceRow(claim="sounds great", source="PCMag", confidence="editorial")
-        assert row.confidence == "editorial"
+        self.assertEqual(row.confidence, "editorial")
 
 
 # ---------------------------------------------------------------------------
@@ -97,15 +96,15 @@ def _make_product(**overrides):
     return base
 
 
-class TestRegretScore:
+class TestRegretScore(unittest.TestCase):
     def test_good_product_low_regret(self):
         """Well-evidenced product with downside gets low regret."""
         p = _make_product()
         rs = regret_score(p)
-        assert rs.source_count_penalty == 0.0
-        assert rs.downside_penalty == 0.0  # "However, the case is bulky" found
-        assert rs.evidence_quality_penalty == 0.0  # has measured claims
-        assert rs.total < 3.0
+        self.assertEqual(rs.source_count_penalty, 0.0)
+        self.assertEqual(rs.downside_penalty, 0.0)  # "However, the case is bulky" found
+        self.assertEqual(rs.evidence_quality_penalty, 0.0)  # has measured claims
+        self.assertLess(rs.total, 3.0)
 
     def test_single_source_penalty(self):
         p = _make_product(evidence=[{
@@ -113,7 +112,7 @@ class TestRegretScore:
             "reasons": ["Good sound quality"],
         }])
         rs = regret_score(p)
-        assert rs.source_count_penalty == 2.0
+        self.assertEqual(rs.source_count_penalty, 2.0)
 
     def test_no_downside_penalty(self):
         p = _make_product(key_claims=["Great product", "Best overall"])
@@ -126,22 +125,22 @@ class TestRegretScore:
             "reasons": ["Good bass", "Flat response"],
         }]
         rs = regret_score(p)
-        assert rs.downside_penalty == 3.0
+        self.assertEqual(rs.downside_penalty, 3.0)
 
     def test_cheap_price_penalty(self):
         p = _make_product(amazon_price="$15.99")
         rs = regret_score(p)
-        assert rs.price_extreme_penalty == 2.0
+        self.assertEqual(rs.price_extreme_penalty, 2.0)
 
     def test_expensive_price_penalty(self):
         p = _make_product(amazon_price="$599.99")
         rs = regret_score(p)
-        assert rs.price_extreme_penalty == 2.0
+        self.assertEqual(rs.price_extreme_penalty, 2.0)
 
     def test_mid_range_no_price_penalty(self):
         p = _make_product(amazon_price="$149.99")
         rs = regret_score(p)
-        assert rs.price_extreme_penalty == 0.0
+        self.assertEqual(rs.price_extreme_penalty, 0.0)
 
     def test_no_measured_evidence_penalty(self):
         p = _make_product(evidence=[{
@@ -152,7 +151,7 @@ class TestRegretScore:
             "reasons": ["Nice design", "Good value"],
         }], key_claims=["Good product", "However, slightly bulky"])
         rs = regret_score(p)
-        assert rs.evidence_quality_penalty == 1.0
+        self.assertEqual(rs.evidence_quality_penalty, 1.0)
 
     def test_warranty_no_penalty_when_present(self):
         p = _make_product(key_claims=[
@@ -160,12 +159,12 @@ class TestRegretScore:
             "However, the case is bulky",
         ])
         rs = regret_score(p)
-        assert rs.warranty_penalty == 0.0
+        self.assertEqual(rs.warranty_penalty, 0.0)
 
     def test_warranty_penalty_when_missing(self):
         p = _make_product()
         rs = regret_score(p)
-        assert rs.warranty_penalty == 1.0
+        self.assertEqual(rs.warranty_penalty, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +172,7 @@ class TestRegretScore:
 # ---------------------------------------------------------------------------
 
 
-class TestScoreCard:
+class TestScoreCard(unittest.TestCase):
     def test_to_dict(self):
         rs = RegretScore(
             source_count_penalty=0, downside_penalty=0,
@@ -187,10 +186,10 @@ class TestScoreCard:
             regret_detail=rs,
         )
         d = card.to_dict()
-        assert d["evidence"] == 18.0
-        assert d["regret_penalty"] == 2.5
-        assert "regret_breakdown" in d
-        assert d["regret_breakdown"]["no_warranty"] == 1.0
+        self.assertEqual(d["evidence"], 18.0)
+        self.assertEqual(d["regret_penalty"], 2.5)
+        self.assertIn("regret_breakdown", d)
+        self.assertEqual(d["regret_breakdown"]["no_warranty"], 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -198,25 +197,25 @@ class TestScoreCard:
 # ---------------------------------------------------------------------------
 
 
-class TestTargetAudienceText:
+class TestTargetAudienceText(unittest.TestCase):
     def test_no_regret_pick(self):
         text = target_audience_text({}, "No-Regret Pick")
-        assert "reliable" in text.lower() or "overthinking" in text.lower()
+        self.assertTrue("reliable" in text.lower() or "overthinking" in text.lower())
 
     def test_best_value(self):
         text = target_audience_text({"amazon_price": "$49"}, "Best Value")
-        assert "budget" in text.lower() or "price" in text.lower()
+        self.assertTrue("budget" in text.lower() or "price" in text.lower())
 
     def test_best_upgrade(self):
         text = target_audience_text({}, "Best Upgrade")
-        assert "invest" in text.lower() or "premium" in text.lower()
+        self.assertTrue("invest" in text.lower() or "premium" in text.lower())
 
     def test_specific_scenario_travel(self):
         text = target_audience_text(
             {"key_claims": ["Best for travel, lightweight and portable"]},
             "Best for Specific Scenario",
         )
-        assert "travel" in text.lower()
+        self.assertIn("travel", text.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -224,12 +223,12 @@ class TestTargetAudienceText:
 # ---------------------------------------------------------------------------
 
 
-class TestPublishReadiness:
+class TestPublishReadiness(unittest.TestCase):
     def test_empty_dir_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             pr = publish_readiness_check(Path(tmp))
-            assert not pr.passed
-            assert len(pr.failures) > 0
+            self.assertFalse(pr.passed)
+            self.assertGreater(len(pr.failures), 0)
 
     def test_full_video_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -274,7 +273,7 @@ class TestPublishReadiness:
             pr = publish_readiness_check(root)
             if not pr.passed:
                 print(pr.summary())
-            assert pr.passed
+            self.assertTrue(pr.passed)
 
     def test_missing_disclosure_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -286,8 +285,8 @@ class TestPublishReadiness:
 
             pr = publish_readiness_check(root, script_text=f"[HOOK]\n{words}\nThanks")
             disclosure_checks = [c for c in pr.checks if c.name == "FTC disclosure"]
-            assert disclosure_checks
-            assert not disclosure_checks[0].passed
+            self.assertTrue(len(disclosure_checks) > 0)
+            self.assertFalse(disclosure_checks[0].passed)
 
     def test_summary_format(self):
         pr = PublishReadiness(checks=[
@@ -295,6 +294,6 @@ class TestPublishReadiness:
             CheckItem("Test 2", False, "missing"),
         ])
         s = pr.summary()
-        assert "NOT READY" in s
-        assert "[PASS]" in s
-        assert "[FAIL]" in s
+        self.assertIn("NOT READY", s)
+        self.assertIn("[PASS]", s)
+        self.assertIn("[FAIL]", s)

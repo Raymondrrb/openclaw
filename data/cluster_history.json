@@ -1,1 +1,7 @@
-[]
+[
+  {
+    "week_start": "2026-02-16",
+    "cluster_slug": "apartment_upgrades",
+    "video_ids": ["v025", "v026", "v027", "v028"]
+  }
+]

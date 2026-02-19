@@ -32,7 +32,13 @@ from tools.lib.script_schema import (
 def _make_products(count=5) -> list[ProductEntry]:
     """Helper: create valid product entries."""
     return [
-        ProductEntry(rank=i, name=f"Product {i}")
+        ProductEntry(
+            rank=i,
+            name=f"Product {i}",
+            amazon_url=f"https://amazon.com/dp/B0FAKE{i:04d}",
+            downside="Minor drawback noted",
+            benefits=["Benefit one", "Benefit two"],
+        )
         for i in range(1, count + 1)
     ]
 

@@ -1,0 +1,378 @@
+[
+  {
+    "video_id": "v025",
+    "command": "day",
+    "timestamp": "2026-02-18T16:40:34.812600+00:00",
+    "exit_code": 1,
+    "duration_s": 0.0,
+    "niche": ""
+  },
+  {
+    "video_id": "v026",
+    "command": "day",
+    "timestamp": "2026-02-18T16:40:44.284948+00:00",
+    "exit_code": 1,
+    "duration_s": 0.0,
+    "niche": ""
+  },
+  {
+    "video_id": "v027",
+    "command": "day",
+    "timestamp": "2026-02-18T16:40:56.922860+00:00",
+    "exit_code": 1,
+    "duration_s": 0.0,
+    "niche": ""
+  },
+  {
+    "video_id": "v028",
+    "command": "day",
+    "timestamp": "2026-02-18T16:41:06.396369+00:00",
+    "exit_code": 1,
+    "duration_s": 0.0,
+    "niche": ""
+  },
+  {
+    "video_id": "v028",
+    "command": "day",
+    "timestamp": "2026-02-18T16:42:48.519430+00:00",
+    "exit_code": 2,
+    "duration_s": 47.0,
+    "niche": "best compact air fryers for small kitchens"
+  },
+  {
+    "video_id": "v029",
+    "command": "day",
+    "timestamp": "2026-02-18T16:45:42.316751+00:00",
+    "exit_code": 2,
+    "duration_s": 47.7,
+    "niche": "wireless earbuds"
+  },
+  {
+    "video_id": "v029",
+    "command": "research",
+    "timestamp": "2026-02-18T16:46:41.853869+00:00",
+    "exit_code": 0,
+    "duration_s": 0.0,
+    "niche": "wireless earbuds"
+  },
+  {
+    "video_id": "v029",
+    "command": "script",
+    "timestamp": "2026-02-18T16:46:50.515958+00:00",
+    "exit_code": 1,
+    "duration_s": 0.0,
+    "niche": "wireless earbuds"
+  },
+  {
+    "video_id": "vtest",
+    "command": "status",
+    "timestamp": "2026-02-18T17:21:57.301164+00:00",
+    "exit_code": 2,
+    "duration_s": 0.0,
+    "niche": ""
+  },
+  {
+    "video_id": "v030",
+    "command": "day",
+    "timestamp": "2026-02-18T17:22:58.876524+00:00",
+    "exit_code": 2,
+    "duration_s": 45.3,
+    "niche": "wireless earbuds"
+  },
+  {
+    "video_id": "v030",
+    "command": "day",
+    "timestamp": "2026-02-18T17:31:34.738292+00:00",
+    "exit_code": 2,
+    "duration_s": 40.6,
+    "niche": "wireless earbuds"
+  },
+  {
+    "video_id": "v030",
+    "command": "day",
+    "timestamp": "2026-02-18T17:36:06.096558+00:00",
+    "exit_code": 2,
+    "duration_s": 152.2,
+    "niche": "wireless earbuds"
+  },
+  {
+    "video_id": "v030",
+    "command": "research",
+    "timestamp": "2026-02-18T17:44:59.520260+00:00",
+    "exit_code": 2,
+    "duration_s": 159.6,
+    "niche": "wireless earbuds"
+  },
+  {
+    "video_id": "v030",
+    "command": "research",
+    "timestamp": "2026-02-18T17:51:57.130385+00:00",
+    "exit_code": 2,
+    "duration_s": 299.8,
+    "niche": "wireless earbuds"
+  },
+  {
+    "video_id": "v031",
+    "command": "day",
+    "timestamp": "2026-02-18T18:18:46.628782+00:00",
+    "exit_code": 1,
+    "duration_s": 106.9,
+    "niche": "wireless earbuds"
+  },
+  {
+    "video_id": "v032",
+    "command": "day",
+    "timestamp": "2026-02-18T18:24:49.762566+00:00",
+    "exit_code": 1,
+    "duration_s": 121.6,
+    "niche": "wireless earbuds"
+  },
+  {
+    "video_id": "v033",
+    "command": "day",
+    "timestamp": "2026-02-18T18:27:48.237522+00:00",
+    "exit_code": 2,
+    "duration_s": 50.4,
+    "niche": "carry on luggage"
+  },
+  {
+    "video_id": "v034",
+    "command": "day",
+    "timestamp": "2026-02-18T18:28:52.101918+00:00",
+    "exit_code": 2,
+    "duration_s": 50.4,
+    "niche": "robot vacuum"
+  },
+  {
+    "video_id": "v035",
+    "command": "day",
+    "timestamp": "2026-02-18T18:30:06.214968+00:00",
+    "exit_code": 2,
+    "duration_s": 52.3,
+    "niche": "portable charger"
+  },
+  {
+    "video_id": "v036",
+    "command": "day",
+    "timestamp": "2026-02-18T18:39:30.844007+00:00",
+    "exit_code": 2,
+    "duration_s": 45.8,
+    "niche": "robot vacuum"
+  },
+  {
+    "video_id": "v037",
+    "command": "day",
+    "timestamp": "2026-02-18T18:42:01.105296+00:00",
+    "exit_code": 1,
+    "duration_s": 130.3,
+    "niche": "robot vacuum"
+  },
+  {
+    "video_id": "v038",
+    "command": "day",
+    "timestamp": "2026-02-18T18:47:00.987788+00:00",
+    "exit_code": 1,
+    "duration_s": 163.1,
+    "niche": "robot vacuum"
+  },
+  {
+    "video_id": "vtest-browser",
+    "command": "day",
+    "timestamp": "2026-02-18T19:14:13.657782+00:00",
+    "exit_code": 1,
+    "duration_s": 289.5,
+    "niche": "portable bluetooth speakers"
+  },
+  {
+    "video_id": "vtest-browser2",
+    "command": "day",
+    "timestamp": "2026-02-18T19:18:00.920664+00:00",
+    "exit_code": 1,
+    "duration_s": 218.2,
+    "niche": "mechanical keyboards"
+  },
+  {
+    "video_id": "vtest-browser3",
+    "command": "day",
+    "timestamp": "2026-02-18T19:21:28.835605+00:00",
+    "exit_code": 1,
+    "duration_s": 198.3,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-browser3",
+    "command": "script",
+    "timestamp": "2026-02-18T19:22:13.537718+00:00",
+    "exit_code": 1,
+    "duration_s": 27.8,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-browser3",
+    "command": "script",
+    "timestamp": "2026-02-18T19:34:48.706671+00:00",
+    "exit_code": 0,
+    "duration_s": 89.2,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-browser3",
+    "command": "script",
+    "timestamp": "2026-02-18T19:40:16.621370+00:00",
+    "exit_code": 0,
+    "duration_s": 296.2,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-browser3",
+    "command": "script",
+    "timestamp": "2026-02-18T19:47:02.058561+00:00",
+    "exit_code": 0,
+    "duration_s": 260.7,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "init",
+    "timestamp": "2026-02-18T20:06:20.146111+00:00",
+    "exit_code": 0,
+    "duration_s": 0.9,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "research",
+    "timestamp": "2026-02-18T20:27:49.544276+00:00",
+    "exit_code": 0,
+    "duration_s": 1282.9,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "script",
+    "timestamp": "2026-02-18T20:32:35.623997+00:00",
+    "exit_code": 0,
+    "duration_s": 279.6,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "script",
+    "timestamp": "2026-02-18T21:17:29.878185+00:00",
+    "exit_code": 0,
+    "duration_s": 0.0,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "script",
+    "timestamp": "2026-02-18T21:23:16.445818+00:00",
+    "exit_code": 0,
+    "duration_s": 275.5,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "script",
+    "timestamp": "2026-02-18T21:25:12.550813+00:00",
+    "exit_code": 0,
+    "duration_s": 0.0,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "script",
+    "timestamp": "2026-02-18T21:26:43.589411+00:00",
+    "exit_code": 0,
+    "duration_s": 0.0,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "status",
+    "timestamp": "2026-02-18T21:31:47.039287+00:00",
+    "exit_code": 2,
+    "duration_s": 0.0,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "assets",
+    "timestamp": "2026-02-18T21:51:45.135543+00:00",
+    "exit_code": 2,
+    "duration_s": 184.3,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "assets",
+    "timestamp": "2026-02-18T22:07:46.024142+00:00",
+    "exit_code": 2,
+    "duration_s": 183.5,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "assets",
+    "timestamp": "2026-02-18T22:32:08.093182+00:00",
+    "exit_code": 2,
+    "duration_s": 180.8,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "assets",
+    "timestamp": "2026-02-19T03:38:06.678268+00:00",
+    "exit_code": 0,
+    "duration_s": 509.1,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "assets",
+    "timestamp": "2026-02-19T03:57:31.780367+00:00",
+    "exit_code": 0,
+    "duration_s": 155.6,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "assets",
+    "timestamp": "2026-02-19T04:10:58.307758+00:00",
+    "exit_code": 0,
+    "duration_s": 450.8,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "assets",
+    "timestamp": "2026-02-19T04:51:00.152671+00:00",
+    "exit_code": 0,
+    "duration_s": 1643.3,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "assets",
+    "timestamp": "2026-02-19T05:20:29.325769+00:00",
+    "exit_code": 0,
+    "duration_s": 1502.9,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "assets",
+    "timestamp": "2026-02-19T05:30:29.413706+00:00",
+    "exit_code": 0,
+    "duration_s": 338.7,
+    "niche": "robot vacuum cleaners"
+  },
+  {
+    "video_id": "vtest-qa",
+    "command": "assets",
+    "timestamp": "2026-02-19T07:07:42.187188+00:00",
+    "exit_code": 0,
+    "duration_s": 1434.7,
+    "niche": "robot vacuum cleaners"
+  }
+]
