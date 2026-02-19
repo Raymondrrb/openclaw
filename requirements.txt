@@ -1,2 +1,18 @@
-# Python dependencies for tools/
-playwright>=1.40
+# Core pipeline dependencies
+beautifulsoup4>=4.12
+pandas>=2.2
+requests>=2.32
+jsonschema>=4.23
+psutil>=5.9
+
+# YouTube upload (tools/youtube_upload_api.py)
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2
+
+# Transcript extraction (tools/run_davinci_training_cycle.sh)
+youtube-transcript-api>=1.0
+
+# Distributed cluster worker/controller (rayvault/agent)
+fastapi>=0.115
+uvicorn>=0.30

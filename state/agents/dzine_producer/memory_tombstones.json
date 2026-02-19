@@ -1,0 +1,21 @@
+{
+  "tombstones": [
+    {
+      "rule_id": "r-le-test-001",
+      "source_event_id": "le-test-001",
+      "created": "2026-02-19T17:43:48.550256+00:00",
+      "severity": "FAIL",
+      "component": "assets",
+      "rule": "Amazon ref had phone → Drawbox white-out",
+      "symptom": "Phone ghost in background",
+      "video_id": "test004",
+      "applied_count": 1,
+      "last_applied": "2026-02-19T17:43:48.550386+00:00",
+      "tombstoned_at": "2026-02-19T17:43:48.556082+00:00",
+      "reason": "No longer relevant — new pipeline handles this",
+      "evidence_ids": [],
+      "superseded_by": ""
+    }
+  ],
+  "count": 1
+}

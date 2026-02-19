@@ -701,6 +701,7 @@ class TestPipelineScriptGenerate(unittest.TestCase):
         self._setup_video("test-gen-nokey")
 
         from tools.pipeline import cmd_script
+        from tools.lib.script_generate import ScriptGenResult
         args = argparse.Namespace(
             video_id="test-gen-nokey",
             charismatic="reality_check",
@@ -709,7 +710,10 @@ class TestPipelineScriptGenerate(unittest.TestCase):
             no_approval=True,
         )
 
-        with patch.dict("os.environ", {"OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": ""}, clear=False):
+        # Mock browser fallback to fail so we test the no-key path
+        failed_browser = ScriptGenResult(success=False, error="no browser in test")
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": "", "OPENCLAW_BROWSER_LLM": ""}, clear=False), \
+             patch("tools.lib.script_generate._try_browser_draft", return_value=failed_browser):
             # Need to ensure the key isn't inherited
             import os
             old_key = os.environ.pop("OPENAI_API_KEY", None)

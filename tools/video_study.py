@@ -250,7 +250,7 @@ def _try_notify(video_id: str, knowledge) -> None:
             f"Insights: {len(knowledge.key_insights)}, "
             f"Actions: {len(knowledge.action_items)}"
         )
-        send_telegram(msg, parse_mode="")
+        send_telegram(msg)
     except Exception:
         pass
 

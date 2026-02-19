@@ -178,6 +178,12 @@
   },
   "active": "graph-leaf",
   "lastOpenFiles": [
+    "pipeline/claude-code-execution-contract.md",
+    "pipeline/openclaw-stability-guardrails.md",
+    "learnings/2026-02-19-fail-assets-product-image-hallucinated.md",
+    "learnings/2026-02-19-fail-assets-dzine-phone-ghost-in-bg.md",
+    "learnings/2026-02-19-fail-research-asin-b0f8hm4pyl-was-accessories-not-vacuum.md",
+    "learnings/2026-02-19-v038-asin-accessories-detected-by-price-anomaly.md",
     "learnings/2026-02-19-script-quality-rules.md",
     "learnings/2026-02-19-image-qa-rules.md",
     "learnings/2026-02-19-bg-remove-prerequisite.md",

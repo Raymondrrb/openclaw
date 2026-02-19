@@ -1,0 +1,360 @@
+{
+  "schema_version": "1.0.0",
+  "description": "Single source of truth for all format variation dimensions. Used by variation_planner.py to generate variation_plan.json per run.",
+
+  "opener_styles": {
+    "overwhelm": {
+      "label": "Overwhelm Hook",
+      "description": "Open with category confusion and jargon overload",
+      "template": "{category} in {year} is more confusing than ever. {jargon_a}, {jargon_b}, {jargon_c}. So which one is actually worth your money?"
+    },
+    "mystery": {
+      "label": "Mystery Hook",
+      "description": "Tease the winner without revealing, create curiosity gap",
+      "template": "One of these five {category} destroyed the competition. The other four? Not even close. I tested all of them so you don't have to."
+    },
+    "anti_shill": {
+      "label": "Anti-Shill Hook",
+      "description": "Open by calling out fake reviews and positioning as honest",
+      "template": "Most {category} reviews are paid ads disguised as opinions. I bought these five with my own money and I'm going to tell you what they won't."
+    },
+    "meta_complaint": {
+      "label": "Meta Complaint Hook",
+      "description": "Open with a relatable frustration about buying in this category",
+      "template": "I spent three hours reading {category} reviews last week and ended up more confused than when I started. Sound familiar?"
+    },
+    "price_shock": {
+      "label": "Price Shock Hook",
+      "description": "Lead with surprising price differences to grab attention",
+      "template": "The cheapest one here costs {low_price}. The most expensive? {high_price}. But the best one isn't the most expensive. Not even close."
+    },
+    "personal_fail": {
+      "label": "Personal Fail Hook",
+      "description": "Open with a personal bad purchase experience",
+      "template": "I wasted {amount} on a terrible {category_singular} last year. So this time I tested five of them properly. Here's what actually works."
+    },
+    "stat_hook": {
+      "label": "Statistics Hook",
+      "description": "Open with a surprising data point about the category",
+      "template": "{stat_fact} about {category}. That's why I tested the top five and ranked them on what actually matters."
+    },
+    "contrarian": {
+      "label": "Contrarian Hook",
+      "description": "Challenge a common belief about the category",
+      "template": "Everyone says {common_belief} about {category}. After testing five of them for two weeks, I think they're wrong."
+    }
+  },
+
+  "structure_templates": {
+    "classic_countdown": {
+      "label": "Classic Countdown (#5 to #1)",
+      "description": "Standard ranking from worst to best, building anticipation",
+      "segment_flow": "HOOK → CREDIBILITY → CRITERIA → 5×(INTRO+DEMO+REVIEW+RANK+FORWARD_HOOK) → WINNER_REINFORCEMENT → ENDING_DECISION",
+      "product_order": "ascending_rank"
+    },
+    "winner_first": {
+      "label": "Winner First (Reveal + Context)",
+      "description": "Reveal the winner immediately, then explain why through the rankings",
+      "segment_flow": "HOOK → WINNER_TEASE → CREDIBILITY → CRITERIA → 5×(INTRO+DEMO+REVIEW+RANK) → WINNER_REINFORCEMENT → ENDING_DECISION",
+      "product_order": "ascending_rank"
+    },
+    "tier_system": {
+      "label": "Tier System (Budget/Mid/Premium)",
+      "description": "Group products by price tier instead of strict ranking",
+      "segment_flow": "HOOK → CREDIBILITY → CRITERIA → TIER_BREAK(budget) → products → TIER_BREAK(mid) → products → TIER_BREAK(premium) → products → WINNER_REINFORCEMENT → ENDING_DECISION",
+      "product_order": "by_price_tier"
+    },
+    "problem_first": {
+      "label": "Problem First",
+      "description": "Open with the buyer's problem, then present solutions ranked",
+      "segment_flow": "HOOK → CRITERIA → 5×(INTRO+DEMO+REVIEW+RANK+FORWARD_HOOK) → CREDIBILITY → WINNER_REINFORCEMENT → ENDING_DECISION",
+      "product_order": "ascending_rank"
+    },
+    "head_to_head": {
+      "label": "Head-to-Head Comparisons",
+      "description": "Compare products in pairs before final ranking",
+      "segment_flow": "HOOK → CREDIBILITY → CRITERIA → COMPARISON(5v4) → COMPARISON(3v2) → INTRO+DEMO+REVIEW(1) → WINNER_REINFORCEMENT → ENDING_DECISION",
+      "product_order": "paired_comparison"
+    },
+    "surprise_pick": {
+      "label": "Surprise Pick Reveal",
+      "description": "Tease that the winner is unexpected, build to the surprise",
+      "segment_flow": "HOOK → CREDIBILITY → CRITERIA → 4×(INTRO+DEMO+REVIEW+RANK+FORWARD_HOOK) → SURPRISE_PICK → INTRO+DEMO+REVIEW+RANK → WINNER_REINFORCEMENT → ENDING_DECISION",
+      "product_order": "ascending_rank"
+    }
+  },
+
+  "editorial_formats": {
+    "classic_top5": {
+      "label": "Classic Top 5",
+      "description": "Traditional ranked countdown with balanced coverage.",
+      "chapter_pattern": "intro + #5..#1 + final verdict",
+      "script_rules": [
+        "Maintain five ranked products (#5 to #1).",
+        "Use one clear verdict sentence per product."
+      ]
+    },
+    "buy_skip_upgrade": {
+      "label": "Buy / Skip / Upgrade",
+      "description": "Each product gets an explicit buy/skip/upgrade verdict.",
+      "chapter_pattern": "intro + 5 verdict chapters + recap",
+      "script_rules": [
+        "For each product, include one explicit verdict: BUY, SKIP, or UPGRADE.",
+        "Justify verdict using one concrete trade-off statement."
+      ]
+    },
+    "persona_top3": {
+      "label": "Top Picks by Persona",
+      "description": "Map products to user personas and use-case fit.",
+      "chapter_pattern": "intro + 5 products + persona mapping recap",
+      "script_rules": [
+        "For each product, identify the best-fit buyer persona.",
+        "In recap, map winners for at least 3 personas."
+      ]
+    },
+    "one_winner_two_alts": {
+      "label": "One Winner + 2 Alternatives",
+      "description": "Declare one winner and two practical alternatives.",
+      "chapter_pattern": "intro + 5 products + winner/alternatives recap",
+      "script_rules": [
+        "Declare one clear winner and exactly two alternatives.",
+        "Explain why the other products did not qualify as alternatives."
+      ]
+    },
+    "budget_vs_premium": {
+      "label": "Budget vs Premium",
+      "description": "Split recommendations by budget and premium tiers.",
+      "chapter_pattern": "intro + budget lane + premium lane + final recommendation",
+      "script_rules": [
+        "Assign each product to budget/mid/premium lane.",
+        "Recommend one budget-safe pick and one premium pick."
+      ]
+    }
+  },
+
+  "product_block_patterns": {
+    "classic_4seg": {
+      "label": "Classic 4-Segment",
+      "description": "INTRO → DEMO → REVIEW → RANK per product",
+      "segments_per_product": ["PRODUCT_INTRO", "PRODUCT_DEMO", "PRODUCT_REVIEW", "PRODUCT_RANK"]
+    },
+    "comparison_lead": {
+      "label": "Comparison Lead",
+      "description": "Open each product by comparing to previous, then demo and rank",
+      "segments_per_product": ["COMPARISON", "PRODUCT_DEMO", "PRODUCT_REVIEW", "PRODUCT_RANK"]
+    },
+    "problem_solution": {
+      "label": "Problem-Solution",
+      "description": "Frame each product as solving a specific problem",
+      "segments_per_product": ["PRODUCT_INTRO", "PRODUCT_DEMO", "PRODUCT_RANK"]
+    },
+    "rapid_fire": {
+      "label": "Rapid Fire",
+      "description": "Condensed blocks for faster pacing, fewer segments per product",
+      "segments_per_product": ["PRODUCT_INTRO", "PRODUCT_REVIEW", "PRODUCT_RANK"]
+    }
+  },
+
+  "visual_styles": {
+    "clean_studio": {
+      "label": "Clean Studio",
+      "description": "Neutral background, product hero shots, minimal distractions",
+      "dzine_direction": "clean studio background, product centered, soft lighting, minimal props"
+    },
+    "lifestyle_broll": {
+      "label": "Lifestyle B-Roll",
+      "description": "Products shown in real usage scenarios",
+      "dzine_direction": "realistic lifestyle scene, product in active use, natural lighting, everyday environment"
+    },
+    "spec_cards": {
+      "label": "Spec Cards + Overlays",
+      "description": "Data-driven visual style with specs and comparison overlays",
+      "dzine_direction": "product on neutral background with space for text overlays, spec card layout, clean 16:9"
+    },
+    "split_screen": {
+      "label": "Split-Screen Comparisons",
+      "description": "Side-by-side product comparisons throughout",
+      "dzine_direction": "split-screen comparison layout, two products side by side, matching angles"
+    },
+    "unboxing_style": {
+      "label": "Unboxing/Hands-On",
+      "description": "Close-up hands-on shots, packaging, first impressions",
+      "dzine_direction": "close-up hands-on shot, product being held or unboxed, desk surface visible"
+    }
+  },
+
+  "voice_pacing_profiles": {
+    "standard": {
+      "label": "Standard",
+      "wpm_target": 150,
+      "description": "Clear, measured delivery. Good for detailed reviews."
+    },
+    "fast_energy": {
+      "label": "Fast Energy",
+      "wpm_target": 170,
+      "description": "Upbeat, quick-paced. Good for countdown and hype."
+    },
+    "deliberate": {
+      "label": "Deliberate",
+      "wpm_target": 135,
+      "description": "Slower, authoritative. Good for premium/technical products."
+    },
+    "conversational": {
+      "label": "Conversational",
+      "wpm_target": 145,
+      "description": "Natural, like talking to a friend. Good for lifestyle categories."
+    }
+  },
+
+  "cta_variants": {
+    "soft_subscribe": {
+      "label": "Soft Subscribe",
+      "line": "If this helped you decide, subscribing lets me keep testing stuff like this."
+    },
+    "question_engage": {
+      "label": "Question Engage",
+      "line": "Which one would you pick? Drop it in the comments. I read every single one."
+    },
+    "save_for_later": {
+      "label": "Save for Later",
+      "line": "Save this video for when you're ready to buy. The links stay updated."
+    },
+    "next_video_tease": {
+      "label": "Next Video Tease",
+      "line": "Next week I'm testing {next_category}. Subscribe so you don't miss it."
+    },
+    "community_poll": {
+      "label": "Community Poll",
+      "line": "Vote in the poll above. I'll review whatever wins next month."
+    },
+    "challenge": {
+      "label": "Challenge",
+      "line": "Try the winner for 30 days. Come back and tell me if I was right."
+    },
+    "direct_link": {
+      "label": "Direct Link",
+      "line": "Links to everything are in the description with current prices."
+    },
+    "personal_pick": {
+      "label": "Personal Pick",
+      "line": "If you're asking what I'd buy with my own money, it's the {winner}. Links below."
+    }
+  },
+
+  "disclosure_templates": {
+    "standard": {
+      "label": "Standard",
+      "text": "This video contains affiliate links. If you buy through them, I earn a small commission at no extra cost to you. This video was produced with AI assistance."
+    },
+    "transparent": {
+      "label": "Transparent",
+      "text": "Full transparency: the links below are affiliate links. I earn a commission if you purchase. I bought every product myself and my opinions are my own. AI tools were used in production."
+    },
+    "brief": {
+      "label": "Brief",
+      "text": "Affiliate links in description. AI-assisted production."
+    },
+    "ftc_detailed": {
+      "label": "FTC Detailed",
+      "text": "Material Connection Disclosure: This video contains affiliate links to products. If you click and purchase, I receive a commission. All products were independently purchased and tested. Opinions are my own. This content was produced with AI assistance including script generation and image creation."
+    },
+    "sponsored_base": {
+      "label": "Sponsored Base",
+      "text": "This video is sponsored by {sponsor}. All opinions are my own and I was not required to give a positive review. Additional affiliate links in the description. AI tools were used in production."
+    }
+  },
+
+  "marketing_angles": {
+    "_description": "Fogarty two-shot method: select an angle FIRST, then write the script through that lens. Each angle frames the entire video differently even with the same products.",
+    "value_hunter": {
+      "label": "Value Hunter",
+      "description": "Frame everything through price-to-performance. Lead with what you get per dollar. Emphasize hidden costs and overlooked value.",
+      "prompt_injection": "Frame every product evaluation through value-for-money. Lead with price-to-performance ratio. Highlight hidden costs competitors ignore. The viewer is budget-conscious but not cheap — they want the best deal, not the cheapest option."
+    },
+    "problem_solver": {
+      "label": "Problem Solver",
+      "description": "Start with a specific pain point the category solves. Each product is rated on how well it solves THAT problem.",
+      "prompt_injection": "The viewer has a specific problem they need solved. Open with that problem. Rate every product primarily on how well it addresses that core pain point. Features that don't solve the problem get brief mention only."
+    },
+    "upgrade_path": {
+      "label": "Upgrade Path",
+      "description": "Viewer already owns something in this category. Focus on what's better, what's changed, whether upgrading is worth it.",
+      "prompt_injection": "The viewer already owns a product in this category and is considering upgrading. Focus on what's genuinely improved vs previous generation. Be honest about whether the upgrade is worth it. Include 'if your current one still works, here's when to upgrade' framing."
+    },
+    "first_timer": {
+      "label": "First-Time Buyer",
+      "description": "Viewer knows nothing about this category. Explain jargon. Focus on what actually matters vs marketing noise.",
+      "prompt_injection": "The viewer has never bought anything in this category before. They're overwhelmed by jargon and options. Cut through the noise. Explain what specs actually matter in plain language. Focus on 'what will you actually notice in daily use' over raw numbers."
+    },
+    "pro_vs_consumer": {
+      "label": "Pro vs Consumer",
+      "description": "Compare products through two lenses: what a professional needs vs what a casual user needs. Different winners for different use cases.",
+      "prompt_injection": "Evaluate each product through two lenses: professional/power-user needs and casual/everyday needs. Be explicit that different viewers will have different winners. The pro pick and the consumer pick may be different products."
+    },
+    "durability_test": {
+      "label": "Durability & Longevity",
+      "description": "Focus on build quality, warranty, long-term reliability. What will still work in 2 years?",
+      "prompt_injection": "Frame every evaluation through durability and longevity. What's the build quality like? What do long-term reviews say? What breaks first? Focus on 'will this still be good in 2 years' over flashy features."
+    },
+    "gift_guide": {
+      "label": "Gift Guide",
+      "description": "Viewer is buying for someone else. Focus on who each product is best for, ease of setup, wow factor.",
+      "prompt_injection": "The viewer is buying this as a gift for someone else. Focus on who each product is perfect for (the minimalist, the tech enthusiast, the practical person). Emphasize unboxing experience, ease of setup, and wow factor. Include 'buy this one for...' framing."
+    },
+    "honest_disappointment": {
+      "label": "Honest Disappointment",
+      "description": "Lead with what disappointed you. Builds trust through radical honesty. The eventual recommendation hits harder.",
+      "prompt_injection": "Lead each product review with what disappointed you or what the marketing got wrong. Be radically honest. This builds trust so that when you DO recommend something, the viewer believes you. Include at least one product you expected to love but didn't."
+    },
+    "workflow_integration": {
+      "label": "Workflow Integration",
+      "description": "How each product fits into a real daily workflow. Focus on ecosystem, compatibility, setup friction.",
+      "prompt_injection": "Evaluate each product based on how it fits into a real daily workflow. How does it integrate with other devices? What's the setup friction? Does it play well with your existing ecosystem? Focus on real daily use, not isolated benchmarks."
+    },
+    "spec_myth_buster": {
+      "label": "Spec Myth Buster",
+      "description": "Challenge misleading marketing specs. What specs actually matter vs what's just marketing.",
+      "prompt_injection": "Challenge the marketing specs that mislead buyers. Which numbers actually matter in real use? Which are inflated or meaningless? Bust at least one common myth about this category. Be the viewer's BS detector."
+    }
+  },
+
+  "category_context": {
+    "_description": "Per-category context docs (Fogarty method). Place .txt or .md files in config/category_context/{category_slug}/. Two files: offer_characteristics.md (product landscape, key differentiators, pricing tiers) and customer_avatar.md (who buys, pain points, desires, objections, language they use). These get injected into the LLM prompt for deep brand context.",
+    "context_dir": "config/category_context",
+    "expected_files": ["offer_characteristics.md", "customer_avatar.md"],
+    "fallback_prompt": "Research this product category from a buyer's perspective. Consider: who buys these products, what problems they're solving, what they care about most, and what language they use when discussing purchases."
+  },
+
+  "dzine_model_preferences": {
+    "product_photography": {
+      "model": "Seedream 5.0",
+      "reason": "Superior material rendering (glass, metal, fabric), physically accurate lighting, multi-generation consistency"
+    },
+    "avatar_creative": {
+      "model": "NanoBanana Pro",
+      "reason": "Better for creative/avatar shots, consistent Ray identity across products"
+    },
+    "workflow_notes": [
+      "Upload reference image → set model → adjust lighting/background → generate variants",
+      "Product photography: focus on in-use scenes, not static. Clean backgrounds with negative space for overlays.",
+      "Thumbnail: 2 variants (A/B test), Ray as presenter + hero product"
+    ]
+  },
+
+  "constraints": {
+    "min_variation_score": 0.6,
+    "max_reuse_days": 7,
+    "lookback_runs": 10,
+    "dimension_weights": {
+      "opener_style": 0.15,
+      "structure_template": 0.2,
+      "marketing_angle": 0.2,
+      "editorial_format": 0.12,
+      "product_block_pattern": 0.1,
+      "visual_style": 0.12,
+      "voice_pacing": 0.08,
+      "cta_variant": 0.1,
+      "disclosure_template": 0.05
+    }
+  }
+}

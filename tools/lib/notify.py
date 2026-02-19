@@ -170,7 +170,7 @@ def notify_start(video_id: str, *, details: list[str] | None = None) -> bool:
         next_action="Pipeline running. No action required.",
         details=details,
     )
-    ok = send_telegram(msg, parse_mode="")
+    ok = send_telegram(msg)
     if ok:
         mark_notified(video_id, key)
     return ok
@@ -198,7 +198,7 @@ def notify_progress(
         next_action=next_action,
         details=details,
     )
-    ok = send_telegram(msg, parse_mode="")
+    ok = send_telegram(msg)
     if ok:
         mark_notified(video_id, key)
     return ok
@@ -220,7 +220,7 @@ def notify_action_required(
         TYPE_ACTION_REQUIRED, video_id, stage, issue,
         next_action=next_action or f"Resolve: {issue}",
     )
-    ok = send_telegram(msg, parse_mode="")
+    ok = send_telegram(msg)
     if ok:
         mark_notified(video_id, key)
     return ok
@@ -245,7 +245,7 @@ def notify_error(
         next_action=next_action or f"Investigate and retry: {milestone}",
         details=details or [f"Reason: {error[:100]}"],
     )
-    ok = send_telegram(msg, parse_mode="")
+    ok = send_telegram(msg)
     if ok:
         mark_notified(video_id, key)
     return ok
@@ -279,7 +279,7 @@ def notify_heartbeat(
         progress_total=pt,
         next_action="No action required",
     )
-    ok = send_telegram(msg, parse_mode="")
+    ok = send_telegram(msg)
     if ok:
         mark_notified(video_id, key)
     return ok
@@ -300,7 +300,7 @@ def notify_rate_limited(
         wait_minutes=wait_minutes,
         next_action=f"Waiting {wait_minutes} minutes, will retry automatically",
     )
-    ok = send_telegram(msg, parse_mode="")
+    ok = send_telegram(msg)
     if ok:
         mark_notified(video_id, key)
     return ok
@@ -320,7 +320,7 @@ def notify_summary(
         next_action=next_action,
         details=details,
     )
-    ok = send_telegram(msg, parse_mode="")
+    ok = send_telegram(msg)
     if ok:
         mark_notified(video_id, key)
     return ok

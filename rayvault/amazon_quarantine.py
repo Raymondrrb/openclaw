@@ -28,23 +28,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+from rayvault.io import atomic_write_json, utc_now_iso
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    os.replace(tmp, path)
 
 
 def _parse_utc(iso_str: str) -> Optional[float]:
@@ -102,7 +91,7 @@ def set_quarantine(
         "cooldown_hours": float(cooldown_hours),
         "cooldown_until_utc": until_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
-    _atomic_write_json(lock_path, payload)
+    atomic_write_json(lock_path, payload)
 
 
 def remaining_minutes(lock_path: Path) -> int:

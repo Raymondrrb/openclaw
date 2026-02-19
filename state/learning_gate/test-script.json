@@ -1,0 +1,10 @@
+{
+  "policies_sha": "b9a0e22ea03b8aee8e45801ca228b9ca0ad01fd0",
+  "soul_shas": {
+    "scriptwriter": "f492a9c517b93d68c3d41e1c4f13cb9ce51e3000"
+  },
+  "last_passed": {
+    "stage": "script",
+    "timestamp": "2026-02-19T18:07:32.872494+00:00"
+  }
+}

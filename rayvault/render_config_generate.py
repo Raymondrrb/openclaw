@@ -19,14 +19,13 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
-import wave
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from rayvault.io import atomic_write_json, read_json, sha1_file, utc_now_iso, wav_duration_seconds
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -71,49 +70,6 @@ RAY_DEFAULTS = {
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def read_json(path: Path) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-
-def sha1_file(path: Path) -> str:
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def wav_duration_seconds(path: Path) -> Optional[float]:
-    """Read actual WAV duration via wave module. Returns None if unreadable."""
-    if not path.exists():
-        return None
-    try:
-        with wave.open(str(path), "rb") as w:
-            frames = w.getnframes()
-            rate = w.getframerate()
-            if rate <= 0:
-                return None
-            return frames / float(rate)
-    except Exception:
-        return None
 
 
 def estimate_duration_from_words(script_path: Path) -> float:

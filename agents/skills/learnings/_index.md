@@ -39,6 +39,51 @@ Every pipeline run records its outcome here. Before starting any generation, the
 - [[2026-02-19-duplicate-title-2]] — Entry 1
 - [[2026-02-19-duplicate-title]] — Entry 0
 - [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
 - [[2026-02-19-fail-assets-product-image-hallucinated]] — Changed reference angle → Keep original angle
 - [[2026-02-19-fail-assets-dzine-phone-ghost-in-bg]] — Amazon ref had phone, BG Remove missed it → Added drawbox white-out before BG Remove
 - [[2026-02-19-fail-research-asin-b0f8hm4pyl-was-accessories-not-vacuum]] — No price validation against median → Added price anomaly check (<30% median)

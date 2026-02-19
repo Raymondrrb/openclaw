@@ -11,7 +11,9 @@ then parse/validate them locally.
 from __future__ import annotations
 
 import base64
+import fcntl
 import json
+import os
 import subprocess
 import time
 from typing import Any, Dict, Optional
@@ -21,9 +23,49 @@ class ChatGPTUIError(RuntimeError):
     pass
 
 
+_BROWSER_LOCK_PATH = os.environ.get("RAYVIEWS_OPENCLAW_BROWSER_LOCK", "/tmp/rayviews_openclaw_browser.lock")
+_BROWSER_RATE_FILE = os.environ.get("RAYVIEWS_OPENCLAW_BROWSER_RATE_FILE", "/tmp/rayviews_openclaw_browser.rate")
+_BROWSER_MIN_INTERVAL_MS = int(os.environ.get("RAYVIEWS_OPENCLAW_BROWSER_MIN_INTERVAL_MS", "250"))
+
+
+def _maybe_throttle_browser_calls() -> None:
+    if _BROWSER_MIN_INTERVAL_MS <= 0:
+        return
+    now = time.time()
+    prev = 0.0
+    try:
+        with open(_BROWSER_RATE_FILE, "r", encoding="utf-8") as f:
+            prev = float((f.read() or "0").strip() or "0")
+    except OSError:
+        prev = 0.0
+    sleep_s = max(0.0, (_BROWSER_MIN_INTERVAL_MS / 1000.0) - (now - prev))
+    if sleep_s > 0:
+        time.sleep(sleep_s)
+    try:
+        with open(_BROWSER_RATE_FILE, "w", encoding="utf-8") as f:
+            f.write(f"{time.time():.6f}\n")
+    except OSError:
+        pass
+
+
 def _run_browser_json(args: list[str], *, timeout_ms: int = 30000) -> Dict[str, Any]:
     cmd = ["openclaw", "browser", "--timeout", str(int(timeout_ms)), "--json", *args]
-    p = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    timeout_sec = max(20, int(timeout_ms / 1000) + 20)
+    try:
+        with open(_BROWSER_LOCK_PATH, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            _maybe_throttle_browser_calls()
+            p = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_sec,
+            )
+    except subprocess.TimeoutExpired:
+        raise ChatGPTUIError(
+            f"OpenClaw browser command timed out after {timeout_sec}s: {' '.join(cmd[:4])} ..."
+        ) from None
     if p.returncode != 0:
         stderr = (p.stderr or "").strip()
         stdout = (p.stdout or "").strip()
@@ -190,22 +232,37 @@ def send_prompt_and_wait_for_assistant(
     _eval_set_prompt(prompt, timeout_ms=timeout_ms)
     _run_browser_json(["press", "Enter"], timeout_ms=timeout_ms)
 
-    start = time.time()
+    wait_fn = f"""() => {{
+  const prev = {int(prev_assistant)};
+  const assistant = document.querySelectorAll('[data-message-author-role="assistant"]').length;
+  const stop = !!document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop"], button[aria-label*="Parar"], button[aria-label*="Interromper"]');
+  return assistant > prev && !stop;
+}}"""
     last_url = str(before.get("url", "") or "")
-    while time.time() - start < max(5, int(timeout_sec)):
-        state = _eval_counts(timeout_ms=timeout_ms)
-        last_url = str(state.get("url", "") or last_url)
-        assistant_count = int(state.get("assistant", 0) or 0)
-        stop = bool(state.get("stop", False))
-        if assistant_count > prev_assistant and not stop:
-            break
-        time.sleep(max(0.25, float(poll_sec)))
-    else:
-        raise ChatGPTUIError(
-            f"Timed out waiting for ChatGPT response (timeout={timeout_sec}s). "
-            "Open the ChatGPT tab and confirm it can respond."
+    try:
+        _run_browser_json(
+            ["wait", "--fn", wait_fn, "--timeout-ms", str(max(5, int(timeout_sec)) * 1000)],
+            timeout_ms=max(timeout_ms, max(5, int(timeout_sec)) * 1000 + 5000),
         )
+    except ChatGPTUIError:
+        # Compatibility fallback for older browser-control versions.
+        start = time.time()
+        while time.time() - start < max(5, int(timeout_sec)):
+            state = _eval_counts(timeout_ms=timeout_ms)
+            last_url = str(state.get("url", "") or last_url)
+            assistant_count = int(state.get("assistant", 0) or 0)
+            stop = bool(state.get("stop", False))
+            if assistant_count > prev_assistant and not stop:
+                break
+            time.sleep(max(1.5, float(poll_sec)))
+        else:
+            raise ChatGPTUIError(
+                f"Timed out waiting for ChatGPT response (timeout={timeout_sec}s). "
+                "Open the ChatGPT tab and confirm it can respond."
+            ) from None
 
+    state_after = _eval_counts(timeout_ms=timeout_ms)
+    last_url = str(state_after.get("url", "") or last_url)
     text = _eval_last_assistant_text(timeout_ms=max(timeout_ms, 45000))
     return {"conversation_url": last_url, "assistant_text": text}
 

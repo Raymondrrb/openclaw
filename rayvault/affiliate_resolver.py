@@ -30,19 +30,11 @@ Usage:
 
 from __future__ import annotations
 
-import hashlib
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _sha1_text(s: str) -> str:
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+from rayvault.io import sha1_text, utc_now_iso
 
 
 class AffiliateResolver:
@@ -63,12 +55,20 @@ class AffiliateResolver:
         if not self.path.exists():
             self.data = {"version": "0", "items": {}}
             self.file_hash = None
-            self.loaded_at_utc = _utc_now_iso()
+            self.loaded_at_utc = utc_now_iso()
             return
         raw = self.path.read_text(encoding="utf-8")
-        self.data = json.loads(raw)
-        self.file_hash = _sha1_text(raw)
-        self.loaded_at_utc = _utc_now_iso()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = {"version": "0", "items": {}}
+        if not isinstance(parsed, dict):
+            parsed = {"version": "0", "items": {}}
+        if not isinstance(parsed.get("items"), dict):
+            parsed["items"] = {}
+        self.data = parsed
+        self.file_hash = sha1_text(raw)
+        self.loaded_at_utc = utc_now_iso()
 
     def resolve(self, asin: str) -> Optional[Dict[str, Any]]:
         """Resolve an ASIN to affiliate link info.
