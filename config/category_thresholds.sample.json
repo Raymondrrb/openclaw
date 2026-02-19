@@ -1,0 +1,4 @@
+{
+  "default": { "min_rating": 4.3, "min_reviews": 500, "min_price": 20, "max_price": 200 },
+  "usb c hubs": { "min_rating": 4.4, "min_reviews": 700, "min_price": 25, "max_price": 180 }
+}

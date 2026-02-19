@@ -13,37 +13,12 @@ Usage:
 
 from __future__ import annotations
 
-import hashlib
 import json
-import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def sha1_file(path: Path) -> str:
-    """Compute SHA1 hash of a file."""
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def wav_duration(path: Path) -> Optional[float]:
-    """Read WAV duration in seconds via the wave module."""
-    try:
-        with wave.open(str(path), "rb") as w:
-            frames = w.getnframes()
-            rate = w.getframerate()
-            return frames / float(rate) if rate > 0 else None
-    except Exception:
-        return None
+from rayvault.io import sha1_file, wav_duration_seconds
 
 
 AUDIO_EXTENSIONS = {".wav", ".aif", ".aiff"}
@@ -141,7 +116,7 @@ def validate_track_meta(meta: Dict[str, Any], track_dir: Path) -> TrackInfo:
         )
 
     # Duration
-    duration = wav_duration(audio_path)
+    duration = wav_duration_seconds(audio_path)
     if duration is None:
         errors.append("cannot read audio duration")
         duration = 0.0

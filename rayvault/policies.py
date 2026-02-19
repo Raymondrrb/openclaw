@@ -43,6 +43,24 @@ TRUE_PEAK_MAX = -0.5
 AUDIO_SAMPLE_RATE = 48000
 
 # ---------------------------------------------------------------------------
+# TTS / Voice synthesis
+# ---------------------------------------------------------------------------
+
+TTS_DEFAULT_PROVIDER = "elevenlabs"
+TTS_FALLBACK_PROVIDER = "elevenlabs"    # Fallback if primary fails
+TTS_CACHE_DIR = "state/cache/tts"
+TTS_OUTPUT_FORMAT = "mp3"               # elevenlabs outputs mp3; moss outputs wav
+TTS_NORMALIZE_LUFS = -16.0             # Pre-mix VO loudness (before DaVinci ducking)
+TTS_NORMALIZE_SAMPLE_RATE = 48000       # Match AUDIO_SAMPLE_RATE for DaVinci
+TTS_NORMALIZE_BIT_DEPTH = 16            # PCM 16-bit for compatibility
+TTS_NORMALIZE_CHANNELS = 1              # Mono VO
+TTS_MAX_SEGMENT_CHARS = 5000            # Max chars per TTS call (split if longer)
+TTS_WPM_ESTIMATE = 155                  # Words-per-minute for duration estimation
+TTS_MOSS_TIMEOUT_SEC = 600              # MOSS-TTS may be slow on large texts
+TTS_ELEVENLABS_TIMEOUT_SEC = 300        # Standard ElevenLabs timeout
+TTS_KNOWN_PROVIDERS = {"elevenlabs", "moss_tts", "mock"}
+
+# ---------------------------------------------------------------------------
 # Product truth
 # ---------------------------------------------------------------------------
 

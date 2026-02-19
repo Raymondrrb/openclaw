@@ -1,0 +1,14 @@
+[
+  {
+    "source": "video_published",
+    "action": "create_followup_short",
+    "probability": 0.4,
+    "cooldown_minutes": 120
+  },
+  {
+    "source": "mission_failed",
+    "action": "diagnose_failure",
+    "probability": 1.0,
+    "cooldown_minutes": 60
+  }
+]

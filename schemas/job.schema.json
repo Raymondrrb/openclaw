@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rayviewslab.local/schemas/job.schema.json",
+  "title": "RayViewsLab Job Contract",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "step_name",
+    "command",
+    "timestamp_utc",
+    "inputs",
+    "requirements"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "step_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "command": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "inputs": {
+      "type": "object",
+      "required": ["args", "required_files"],
+      "properties": {
+        "args": {
+          "type": "object"
+        },
+        "required_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "file_digests": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "requirements": {
+      "type": "object",
+      "properties": {
+        "os_in": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "gpu_required": {
+          "type": "boolean"
+        },
+        "min_ram_gb": {
+          "type": "number",
+          "minimum": 0
+        },
+        "min_vram_gb": {
+          "type": "number",
+          "minimum": 0
+        },
+        "davinci_available": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "distributed": {
+      "type": "object",
+      "properties": {
+        "controller_node": {
+          "type": "string"
+        },
+        "preferred_worker": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

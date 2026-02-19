@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rayviewslab.local/schemas/receipt.schema.json",
+  "title": "RayViewsLab Step Receipt Contract",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "step_name",
+    "ok",
+    "status",
+    "exit_code",
+    "inputs_hash",
+    "outputs_hash",
+    "timings",
+    "tool_versions",
+    "host",
+    "artifacts",
+    "started_at",
+    "finished_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "step_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["OK", "WARN", "FAIL"]
+    },
+    "exit_code": {
+      "type": "integer",
+      "enum": [0, 1, 2]
+    },
+    "idempotent_skip": {
+      "type": "boolean"
+    },
+    "inputs_hash": {
+      "type": "string",
+      "minLength": 8
+    },
+    "outputs_hash": {
+      "type": "string",
+      "minLength": 8
+    },
+    "timings": {
+      "type": "object",
+      "required": ["started_monotonic", "finished_monotonic", "duration_ms"],
+      "properties": {
+        "started_monotonic": {
+          "type": "number"
+        },
+        "finished_monotonic": {
+          "type": "number"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "tool_versions": {
+      "type": "object",
+      "required": ["python", "node", "ffmpeg"],
+      "properties": {
+        "python": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "ffmpeg": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "host": {
+      "type": "object",
+      "required": ["hostname", "platform", "pid"],
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": true
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "sha1": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": true
+}

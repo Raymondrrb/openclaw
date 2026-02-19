@@ -1,0 +1,21 @@
+{
+  "daily_video_cap": 1,
+  "daily_shorts_cap": 3,
+  "voice_minutes_cap": 60,
+  "auto_approve": {
+    "enabled": true,
+    "allowed_step_kinds": [
+      "trend_scan",
+      "research",
+      "script",
+      "assets",
+      "seo",
+      "edit",
+      "review",
+      "qa",
+      "export",
+      "upload"
+    ]
+  },
+  "stale_step_minutes": 30
+}

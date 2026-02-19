@@ -1,0 +1,101 @@
+[
+  {
+    "slug": "open_ear_earbuds",
+    "query": "open ear earbuds review",
+    "region": "US",
+    "category_id": "",
+    "published_hours": 48,
+    "duration": "medium",
+    "max_results": 25
+  },
+  {
+    "slug": "portable_monitors",
+    "query": "portable monitor review",
+    "region": "US",
+    "category_id": "",
+    "published_hours": 48,
+    "duration": "medium",
+    "max_results": 25
+  },
+  {
+    "slug": "robot_vacuum_mop",
+    "query": "robot vacuum mop combo review",
+    "region": "US",
+    "category_id": "",
+    "published_hours": 48,
+    "duration": "medium",
+    "max_results": 25
+  },
+  {
+    "slug": "air_purifiers",
+    "query": "best air purifier review",
+    "region": "US",
+    "category_id": "",
+    "published_hours": 48,
+    "duration": "medium",
+    "max_results": 25
+  },
+  {
+    "slug": "portable_projectors",
+    "query": "portable projector review",
+    "region": "US",
+    "category_id": "",
+    "published_hours": 48,
+    "duration": "medium",
+    "max_results": 25
+  },
+  {
+    "slug": "smart_rings",
+    "query": "smart ring review",
+    "region": "US",
+    "category_id": "",
+    "published_hours": 48,
+    "duration": "medium",
+    "max_results": 25
+  },
+  {
+    "slug": "video_doorbells",
+    "query": "video doorbell review",
+    "region": "US",
+    "category_id": "",
+    "published_hours": 48,
+    "duration": "medium",
+    "max_results": 25
+  },
+  {
+    "slug": "mesh_wifi",
+    "query": "mesh wifi system review",
+    "region": "US",
+    "category_id": "",
+    "published_hours": 48,
+    "duration": "medium",
+    "max_results": 25
+  },
+  {
+    "slug": "under_desk_treadmills",
+    "query": "under desk treadmill review",
+    "region": "US",
+    "category_id": "",
+    "published_hours": 48,
+    "duration": "medium",
+    "max_results": 25
+  },
+  {
+    "slug": "hearing_amplifiers",
+    "query": "hearing amplifier review",
+    "region": "US",
+    "category_id": "",
+    "published_hours": 48,
+    "duration": "medium",
+    "max_results": 25
+  },
+  {
+    "slug": "electric_toothbrushes",
+    "query": "electric toothbrush review",
+    "region": "US",
+    "category_id": "",
+    "published_hours": 48,
+    "duration": "medium",
+    "max_results": 25
+  }
+]

@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rayviewslab.local/schemas/run.schema.json",
+  "title": "RayViewsLab Run Contract",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "category",
+    "created_at",
+    "config",
+    "status",
+    "step_status",
+    "quality_gates"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "category": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string"
+    },
+    "channel": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "minLength": 1
+    },
+    "config": {
+      "type": "object",
+      "required": ["target_duration_minutes", "voice", "affiliate_tag"],
+      "properties": {
+        "target_duration_minutes": {
+          "type": "number",
+          "minimum": 1
+        },
+        "voice": {
+          "type": "string",
+          "minLength": 1
+        },
+        "affiliate_tag": {
+          "type": "string"
+        },
+        "min_rating": {
+          "type": "number"
+        },
+        "min_reviews": {
+          "type": "number"
+        },
+        "min_price": {
+          "type": "number"
+        },
+        "max_price": {
+          "type": "number"
+        },
+        "exclude_last_days": {
+          "type": "number"
+        },
+        "resolution": {
+          "type": "string"
+        },
+        "fps": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": true
+    },
+    "step_status": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "quality_gates": {
+      "type": "object",
+      "required": ["gate1", "gate2"],
+      "properties": {
+        "gate1": {
+          "$ref": "#/$defs/gateDecision"
+        },
+        "gate2": {
+          "$ref": "#/$defs/gateDecision"
+        }
+      },
+      "additionalProperties": false
+    },
+    "steps_completed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "artifact_checksums": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "gateDecision": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "rejected"]
+        },
+        "reviewer": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "decided_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

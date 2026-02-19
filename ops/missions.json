@@ -1,0 +1,65 @@
+[
+  {
+    "id": "mission_a7d03f29",
+    "proposal_id": "prop_38f718f6",
+    "title": "Open-ear earbuds Top 5",
+    "status": "running",
+    "created_at": "2026-02-07T12:58:11Z",
+    "steps": [
+      {
+        "id": "step_6dcc99",
+        "kind": "trend_scan",
+        "status": "succeeded",
+        "reserved_at": null
+      },
+      {
+        "id": "step_96c067",
+        "kind": "research",
+        "status": "succeeded",
+        "reserved_at": null
+      },
+      {
+        "id": "step_f9d6da",
+        "kind": "script",
+        "status": "succeeded",
+        "reserved_at": null
+      },
+      {
+        "id": "step_6339b5",
+        "kind": "seo",
+        "status": "succeeded",
+        "reserved_at": null
+      },
+      {
+        "id": "step_e048ca",
+        "kind": "edit",
+        "status": "succeeded",
+        "reserved_at": null
+      },
+      {
+        "id": "step_337854",
+        "kind": "review",
+        "status": "succeeded",
+        "reserved_at": null
+      },
+      {
+        "id": "step_2d646b",
+        "kind": "qa",
+        "status": "succeeded",
+        "reserved_at": null
+      },
+      {
+        "id": "step_140265",
+        "kind": "export",
+        "status": "queued",
+        "reserved_at": null
+      },
+      {
+        "id": "step_95df7e",
+        "kind": "upload",
+        "status": "queued",
+        "reserved_at": null
+      }
+    ]
+  }
+]

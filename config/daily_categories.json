@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "policy": {
+    "region": "US",
+    "min_price_usd": 100,
+    "no_repeat_days": 15
+  },
+  "categories": [
+    {
+      "slug": "portable_monitors",
+      "label": "Portable monitors",
+      "amazon": {
+        "searchUrl": "https://www.amazon.com/s?k=portable+monitor&rh=p_36%3A10000-&s=review-rank&dc"
+      }
+    },
+    {
+      "slug": "robot_vacuum_mop",
+      "label": "Robot vacuum + mop combos",
+      "amazon": {
+        "searchUrl": "https://www.amazon.com/s?k=robot+vacuum+mop+combo&rh=p_36%3A10000-&s=review-rank&dc"
+      }
+    },
+    {
+      "slug": "air_purifiers",
+      "label": "Air purifiers",
+      "amazon": {
+        "searchUrl": "https://www.amazon.com/s?k=air+purifier&rh=p_36%3A10000-&s=review-rank&dc"
+      }
+    },
+    {
+      "slug": "video_doorbells",
+      "label": "Video doorbells",
+      "amazon": {
+        "searchUrl": "https://www.amazon.com/s?k=video+doorbell&rh=p_36%3A10000-&s=review-rank&dc"
+      }
+    },
+    {
+      "slug": "mesh_wifi",
+      "label": "Mesh Wi-Fi systems",
+      "amazon": {
+        "searchUrl": "https://www.amazon.com/s?k=mesh+wifi+system&rh=p_36%3A10000-&s=review-rank&dc"
+      }
+    },
+    {
+      "slug": "portable_projectors",
+      "label": "Portable projectors",
+      "amazon": {
+        "searchUrl": "https://www.amazon.com/s?k=portable+projector&rh=p_36%3A10000-&s=review-rank&dc"
+      }
+    },
+    {
+      "slug": "smart_rings",
+      "label": "Smart rings",
+      "amazon": {
+        "searchUrl": "https://www.amazon.com/s?k=smart+ring&rh=p_36%3A10000-&s=review-rank&dc"
+      }
+    },
+    {
+      "slug": "under_desk_treadmills",
+      "label": "Walking pads / under-desk treadmills",
+      "amazon": {
+        "searchUrl": "https://www.amazon.com/s?k=under+desk+treadmill&rh=p_36%3A10000-&s=review-rank&dc"
+      }
+    },
+    {
+      "slug": "electric_toothbrushes",
+      "label": "Electric toothbrushes",
+      "amazon": {
+        "searchUrl": "https://www.amazon.com/s?k=electric+toothbrush&rh=p_36%3A10000-&s=review-rank&dc"
+      }
+    },
+    {
+      "slug": "hearing_amplifiers",
+      "label": "Hearing amplifiers",
+      "amazon": {
+        "searchUrl": "https://www.amazon.com/s?k=hearing+amplifier&rh=p_36%3A10000-&s=review-rank&dc"
+      }
+    },
+    {
+      "slug": "open_ear_earbuds",
+      "label": "Open-ear earbuds",
+      "amazon": {
+        "bestSellersUrl": "https://www.amazon.com/Best-Sellers-Headphones/zgbs/electronics/172541",
+        "newReleasesUrl": "https://www.amazon.com/gp/new-releases/electronics/172541",
+        "moversUrl": "https://www.amazon.com/gp/movers-and-shakers/electronics/172541",
+        "searchUrl": "https://www.amazon.com/s?k=open+ear+earbuds&rh=p_36%3A10000-&s=review-rank&dc"
+      }
+    }
+  ]
+}

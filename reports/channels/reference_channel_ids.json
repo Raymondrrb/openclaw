@@ -1,0 +1,52 @@
+{
+  "channels": [
+    {
+      "name": "Matt Talks Tech",
+      "channel_id": "UCz6PEeVLG1TL6jMRTvSLm4g",
+      "handle": "@matttalktech",
+      "subscribers": 783000
+    },
+    {
+      "name": "The Tech Chap",
+      "channel_id": "UCzlXf-yUIaOpOjEjPrOO9TA",
+      "handle": "@thetechchap",
+      "subscribers": 1620000
+    },
+    {
+      "name": "Hayls World",
+      "channel_id": "UCIxLxlan8q9WA7sjuq6LdTQ",
+      "handle": "@haylsworld",
+      "subscribers": 2600000
+    },
+    {
+      "name": "TechDaily",
+      "channel_id": "UCAl07YZamCkD9BU4GXUMocQ",
+      "handle": "@techdaily",
+      "subscribers": 382000
+    },
+    {
+      "name": "Just Josh",
+      "channel_id": "UCtHm9ai5zSb-yfRnnUBopAg",
+      "handle": "@justjoshtech",
+      "subscribers": 370000
+    },
+    {
+      "name": "Consumer Tech Review",
+      "channel_id": "UCzqlzMvlYyWVxFcNMZYzE0g",
+      "handle": "@consumertechreview",
+      "subscribers": 230000
+    },
+    {
+      "name": "TechZone",
+      "channel_id": "UC6H07z6zAwbHRl4Lbl0GSsw",
+      "handle": "@tech___zone",
+      "subscribers": 4770000
+    },
+    {
+      "name": "Future Tech",
+      "channel_id": "UC17Uwo5BkSTtGVbOkywJ7_Q",
+      "handle": "@futuretechofficial",
+      "subscribers": 695000
+    }
+  ]
+}

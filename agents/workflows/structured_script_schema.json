@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Rayviews Structured Script",
+  "description": "Machine-readable script output for the Rayviews pipeline. Consumed by Dzine (images), ElevenLabs (voice), DaVinci (timeline), and YouTube (metadata).",
+  "type": "object",
+  "required": [
+    "video_title",
+    "estimated_duration_minutes",
+    "total_word_count",
+    "segments",
+    "youtube"
+  ],
+  "properties": {
+    "video_title": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 100,
+      "description": "YouTube video title (SEO-optimized, under 70 chars ideal)"
+    },
+    "estimated_duration_minutes": {
+      "type": "number",
+      "minimum": 8,
+      "maximum": 12,
+      "description": "Target narration duration in minutes"
+    },
+    "total_word_count": {
+      "type": "integer",
+      "minimum": 1100,
+      "maximum": 1800,
+      "description": "Total spoken words across all narration segments"
+    },
+    "segments": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 45,
+      "description": "Ordered list of video segments. Product count x segments_per_product + transitions + bookend sections. Varies by structure template.",
+      "items": {
+        "$ref": "#/$defs/segment"
+      }
+    },
+    "youtube": {
+      "$ref": "#/$defs/youtube_metadata"
+    }
+  },
+  "$defs": {
+    "segment_type": {
+      "type": "string",
+      "enum": [
+        "HOOK",
+        "CREDIBILITY",
+        "CRITERIA",
+        "PRODUCT_INTRO",
+        "PRODUCT_DEMO",
+        "PRODUCT_REVIEW",
+        "PRODUCT_RANK",
+        "FORWARD_HOOK",
+        "WINNER_REINFORCEMENT",
+        "ENDING_DECISION",
+        "COMPARISON",
+        "TIER_BREAK",
+        "SURPRISE_PICK",
+        "MYTH_BUST",
+        "WINNER_TEASE"
+      ]
+    },
+    "segment": {
+      "type": "object",
+      "required": ["type", "narration"],
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/segment_type"
+        },
+        "narration": {
+          "type": "string",
+          "minLength": 10,
+          "description": "Spoken text optimized for voice synthesis. Short sentences, no markdown, no emojis."
+        },
+        "visual_hint": {
+          "type": "string",
+          "description": "Scene description for Dzine image generation. Describe product usage, not static appearance."
+        },
+        "product_name": {
+          "type": "string",
+          "description": "Product name (required for PRODUCT_* segment types)"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": ["PRODUCT_INTRO", "PRODUCT_DEMO", "PRODUCT_REVIEW", "PRODUCT_RANK"]
+              }
+            }
+          },
+          "then": {
+            "required": ["type", "narration", "product_name"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "enum": ["PRODUCT_DEMO"] } }
+          },
+          "then": {
+            "required": ["type", "narration", "product_name", "visual_hint"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": { "enum": ["HOOK", "CREDIBILITY", "CRITERIA", "WINNER_REINFORCEMENT"] }
+            }
+          },
+          "then": {
+            "required": ["type", "narration", "visual_hint"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "enum": ["COMPARISON", "TIER_BREAK"] } }
+          },
+          "then": {
+            "required": ["type", "narration", "visual_hint"]
+          }
+        }
+      ]
+    },
+    "chapter": {
+      "type": "object",
+      "required": ["time", "label"],
+      "properties": {
+        "time": {
+          "type": "string",
+          "pattern": "^\\d{1,2}:\\d{2}$",
+          "description": "Timestamp in M:SS or MM:SS format"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 60
+        }
+      }
+    },
+    "youtube_metadata": {
+      "type": "object",
+      "required": ["description", "chapters"],
+      "properties": {
+        "description": {
+          "type": "string",
+          "minLength": 100,
+          "description": "YouTube description with affiliate links, disclosures, and SEO keywords"
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 30,
+          "description": "YouTube tags (max 500 chars total)"
+        },
+        "chapters": {
+          "type": "array",
+          "minItems": 7,
+          "items": { "$ref": "#/$defs/chapter" },
+          "description": "YouTube chapters (first must be 0:00)"
+        }
+      }
+    }
+  }
+}

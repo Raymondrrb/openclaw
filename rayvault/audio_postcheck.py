@@ -823,13 +823,8 @@ def write_postcheck_json(
     """Write soundtrack_postcheck.json to publish dir (always)."""
     publish_dir.mkdir(parents=True, exist_ok=True)
     output = publish_dir / "soundtrack_postcheck.json"
-    tmp = output.with_suffix(output.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, output)
+    from rayvault.io import atomic_write_json
+    atomic_write_json(output, result.to_dict())
     return output
 
 
@@ -846,12 +841,7 @@ def patch_render_receipt(
         st = receipt.get("soundtrack_receipt", {})
         st["post_checks"] = result.to_dict()
         receipt["soundtrack_receipt"] = st
-        tmp = receipt_path.with_suffix(receipt_path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(receipt, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, receipt_path)
+        from rayvault.io import atomic_write_json
+        atomic_write_json(receipt_path, receipt)
     except Exception:
         pass

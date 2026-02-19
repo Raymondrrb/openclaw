@@ -19,6 +19,11 @@ Every pipeline run records its outcome here. Before starting any generation, the
 
 ## Recent Learnings (newest first)
 
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
 - [[2026-02-19-script-quality-rules]] — **MANDATORY**: Script quality standards, feedback loop protocol, and text generation rules. Check BEFORE every script generation.
 - [[2026-02-19-image-qa-rules]] — **MANDATORY**: Pre-generation ref checks + post-generation QA (phone ghosts, ghosting, color fidelity, white-on-white). Check BEFORE every run.
 - [[2026-02-19-bg-remove-prerequisite]] — Product Background requires empty BG. Must run BG Remove first or get "Background is NOT empty" error.

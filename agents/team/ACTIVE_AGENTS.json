@@ -1,0 +1,32 @@
+{
+  "schema_version": "1.0.0",
+  "core_daily_agents": [
+    "market_scout",
+    "researcher",
+    "scriptwriter",
+    "reviewer",
+    "dzine_producer",
+    "davinci_editor",
+    "publisher"
+  ],
+  "legacy_optional_agents": [
+    "affiliate_linker",
+    "asset_hunter",
+    "seo",
+    "edit_strategist",
+    "quality_gate",
+    "youtube_uploader",
+    "benchmark_analyst",
+    "dzine_researcher",
+    "davinci_researcher",
+    "researcher2"
+  ],
+  "executor_policy": {
+    "canonical_orchestrator": "tools/pipeline.py",
+    "active_libraries": {
+      "tools/video_pipeline_lib.py": "Shared data models, scrapers, and script generation. Imported by pipeline.py and pipeline_step_*.py.",
+      "tools/top5_video_pipeline.py": "Re-exports video_pipeline_lib symbols for backward compat. Contains gate/state/writer logic still used by CLI."
+    },
+    "legacy_orchestrators_deprecated": ["tools/pipeline_orchestrator.py"]
+  }
+}
