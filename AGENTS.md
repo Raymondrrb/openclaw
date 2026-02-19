@@ -3,6 +3,13 @@
 - Repo: https://github.com/openclaw/openclaw
 - GitHub issues/comments/PR comments: use literal multiline strings or `-F - <<'EOF'` (or $'...') for real newlines; never embed "\\n".
 
+## RayViews Multi-Repo Boundary (local)
+
+- Channel ops source of truth: `/Users/ray/Documents/Rayviews` (separate repo).
+- OpenClaw runtime source of truth: `/Users/ray/Documents/openclaw` (this repo).
+- If a task is channel automation (scripts, gate flow, Supabase/Vercel ops), switch to `/Users/ray/Documents/Rayviews`.
+- Only keep cross-repo syncs explicit and minimal (`tools/chatgpt_ui.py`, test coverage, recovery scripts).
+
 ## Project Structure & Module Organization
 
 - Source code: `src/` (CLI wiring in `src/cli`, commands in `src/commands`, web provider in `src/provider-web.ts`, infra in `src/infra`, media pipeline in `src/media`).
