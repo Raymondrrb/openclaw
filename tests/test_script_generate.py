@@ -23,12 +23,14 @@ from tools.lib.script_generate import (
     extract_metadata,
     extract_script_body,
     normalize_section_markers,
+    split_script_outputs,
     generate_draft,
     generate_refinement,
     run_script_pipeline,
     ScriptGenResult,
     ScriptPipelineResult,
 )
+from tools.lib.tts_preprocess import strip_section_markers
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +735,107 @@ class TestPipelineScriptGenerate(unittest.TestCase):
         )
         result = cmd_script(args)
         self.assertEqual(result, 2)  # EXIT_ACTION_REQUIRED
+
+
+class TestSplitScriptOutputs(unittest.TestCase):
+    """Test split_script_outputs() separation logic."""
+
+    SCRIPT_BODY = (
+        "[HOOK]\n"
+        "You spent hours reading Amazon reviews.\n\n"
+        "[AVATAR_INTRO]\n"
+        "I'm Ray, and I research products so you don't have to.\n\n"
+        "[PRODUCT_5]\n"
+        "Starting at five, the JBL Tune 230NC.\n\n"
+        "[PRODUCT_4]\n"
+        "Number four, Samsung Galaxy Buds3 Pro.\n\n"
+        "[PRODUCT_3]\n"
+        "The AirPods Pro 2 at number three.\n\n"
+        "[RETENTION_RESET]\n"
+        "Have you ever returned earbuds because they didn't fit?\n\n"
+        "[PRODUCT_2]\n"
+        "Number two, Sony WF-1000XM5.\n\n"
+        "[PRODUCT_1]\n"
+        "Number one: Bose QuietComfort Ultra Earbuds.\n\n"
+        "[CONCLUSION]\n"
+        "Links to all five products are in the description.\n"
+    )
+
+    META = {
+        "avatar_intro": "I'm Ray, and I research products so you don't have to.",
+        "youtube_description": "The 5 best wireless earbuds based on expert reviews.",
+    }
+
+    def test_split_script_outputs_basic(self):
+        """narration has no markers, avatar extracted, desc extracted."""
+        result = split_script_outputs(self.SCRIPT_BODY, self.META)
+        self.assertIn("Amazon reviews", result["narration"])
+        self.assertIn("Ray", result["avatar"])
+        self.assertIn("wireless earbuds", result["youtube_description"])
+
+    def test_split_narration_strips_markers(self):
+        """[PRODUCT_5] and other markers must not appear in narration."""
+        result = split_script_outputs(self.SCRIPT_BODY, self.META)
+        self.assertNotIn("[PRODUCT_5]", result["narration"])
+        self.assertNotIn("[HOOK]", result["narration"])
+        self.assertNotIn("[RETENTION_RESET]", result["narration"])
+        self.assertNotIn("[CONCLUSION]", result["narration"])
+
+    def test_split_narration_excludes_avatar(self):
+        """Avatar intro section must not appear in narration."""
+        result = split_script_outputs(self.SCRIPT_BODY, self.META)
+        self.assertNotIn("[AVATAR_INTRO]", result["narration"])
+        # The avatar content line should be removed from narration
+        self.assertNotIn("I'm Ray, and I research products", result["narration"])
+
+    def test_split_empty_metadata(self):
+        """Gracefully handle empty metadata."""
+        result = split_script_outputs(self.SCRIPT_BODY, {})
+        self.assertEqual(result["avatar"], "")
+        self.assertEqual(result["youtube_description"], "")
+        # Narration should still be clean
+        self.assertNotIn("[PRODUCT_5]", result["narration"])
+
+
+class TestStripSectionMarkers(unittest.TestCase):
+    """Test tts_preprocess.strip_section_markers() safety net."""
+
+    def test_strips_all_marker_types(self):
+        text = (
+            "[HOOK]\n"
+            "Hook text.\n"
+            "[PRODUCT_5]\n"
+            "Product text.\n"
+            "[RETENTION_RESET]\n"
+            "Reset text.\n"
+            "[CONCLUSION]\n"
+            "Conclusion text.\n"
+        )
+        result = strip_section_markers(text)
+        self.assertNotIn("[HOOK]", result)
+        self.assertNotIn("[PRODUCT_5]", result)
+        self.assertNotIn("[RETENTION_RESET]", result)
+        self.assertNotIn("[CONCLUSION]", result)
+        self.assertIn("Hook text.", result)
+        self.assertIn("Product text.", result)
+
+    def test_strips_marker_with_suffix(self):
+        text = "[PRODUCT_3] — AirPods Pro 2\nGreat earbuds.\n"
+        result = strip_section_markers(text)
+        self.assertNotIn("[PRODUCT_3]", result)
+        self.assertIn("Great earbuds.", result)
+
+    def test_preserves_clean_text(self):
+        text = "Just normal text without markers."
+        result = strip_section_markers(text)
+        self.assertEqual(result, text)
+
+    def test_strips_avatar_intro_marker(self):
+        text = "[AVATAR_INTRO]\nI'm Ray.\n[PRODUCT_5]\nProduct.\n"
+        result = strip_section_markers(text)
+        self.assertNotIn("[AVATAR_INTRO]", result)
+        self.assertNotIn("[PRODUCT_5]", result)
+        self.assertIn("I'm Ray.", result)
 
 
 if __name__ == "__main__":

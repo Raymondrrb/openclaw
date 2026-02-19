@@ -772,6 +772,7 @@ def _validate_existing_script(paths: VideoPaths, video_id: str) -> None:
         _match_marker,
         extract_metadata,
         extract_script_body,
+        split_script_outputs,
     )
     from tools.lib.script_schema import (
         SECTION_ORDER,
@@ -865,6 +866,16 @@ def _validate_existing_script(paths: VideoPaths, video_id: str) -> None:
             print(f"    - {e}")
     else:
         print("  Validation: PASSED")
+
+    # Write split outputs: narration.txt, avatar.txt, youtube_desc.txt
+    outputs = split_script_outputs(text, {
+        "avatar_intro": output.avatar_intro,
+        "youtube_description": output.youtube_description,
+    })
+    paths.narration_txt.write_text(outputs["narration"], encoding="utf-8")
+    paths.avatar_txt.write_text(outputs["avatar"], encoding="utf-8")
+    paths.youtube_desc_txt.write_text(outputs["youtube_description"], encoding="utf-8")
+    print(f"  Split outputs: narration.txt, avatar.txt, youtube_desc.txt")
 
     update_milestone(video_id, "script", "script_approved")
 
@@ -1526,7 +1537,11 @@ def cmd_tts(args) -> int:
         print(f"\nNext: python3 tools/pipeline.py script --video-id {args.video_id}")
         return EXIT_ACTION_REQUIRED
 
-    script_text = paths.script_txt.read_text(encoding="utf-8")
+    # Prefer narration.txt (markers stripped, avatar removed) for TTS
+    if paths.narration_txt.is_file():
+        script_text = paths.narration_txt.read_text(encoding="utf-8")
+    else:
+        script_text = paths.script_txt.read_text(encoding="utf-8")
     paths.audio_chunks.mkdir(parents=True, exist_ok=True)
 
     if args.patch:

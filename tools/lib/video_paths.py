@@ -39,6 +39,11 @@ class VideoPaths:
         self.script_meta = self.root / "script" / "script_meta.json"
         self.prompts_dir = self.root / "script" / "prompts"
 
+        # script/ — split outputs
+        self.narration_txt = self.root / "script" / "narration.txt"
+        self.avatar_txt = self.root / "script" / "avatar.txt"
+        self.youtube_desc_txt = self.root / "script" / "youtube_desc.txt"
+
         # assets/
         self.assets_dzine = self.root / "assets" / "dzine"
         self.assets_amazon = self.root / "assets" / "amazon"

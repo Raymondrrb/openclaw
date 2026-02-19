@@ -208,11 +208,25 @@ def simplify_product_codes(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def strip_section_markers(text: str) -> str:
+    """Remove [MARKER] lines from script text.
+
+    Safety net so TTS never reads markers like [PRODUCT_5] aloud.
+    """
+    return re.sub(
+        r"^\[(?:HOOK|AVATAR_INTRO|PRODUCT_\d+|RETENTION_RESET|CONCLUSION)\].*$",
+        "",
+        text,
+        flags=re.MULTILINE,
+    ).strip()
+
+
 def preprocess(text: str) -> str:
     """Run the full preprocessing pipeline on script text.
 
     Order matters: currency before numbers, acronyms after units.
     """
+    text = strip_section_markers(text)
     text = normalize_punctuation(text)
     text = normalize_currency(text)
     text = normalize_numbers(text)

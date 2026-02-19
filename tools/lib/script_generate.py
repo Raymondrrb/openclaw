@@ -515,6 +515,52 @@ def extract_metadata(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Split script into separate outputs
+# ---------------------------------------------------------------------------
+
+
+_STRIP_MARKERS_RE = re.compile(
+    r"^\[(?:HOOK|PRODUCT_\d+|RETENTION_RESET|CONCLUSION)\].*$",
+    re.MULTILINE,
+)
+_AVATAR_BLOCK_RE = re.compile(
+    r"^\[AVATAR_INTRO\].*(?:\n(?!\[).+)*",
+    re.MULTILINE,
+)
+
+
+def split_script_outputs(script_body: str, metadata: dict) -> dict[str, str]:
+    """Split validated script into 3 separate outputs.
+
+    Args:
+        script_body: The script text with [SECTION] markers.
+        metadata: Dict with avatar_intro and youtube_description keys.
+
+    Returns:
+        Dict with keys: narration, avatar, youtube_description.
+        - narration: Script body with markers stripped and avatar section
+          removed (clean prose for ElevenLabs TTS).
+        - avatar: Avatar intro text (for avatar lip-sync).
+        - youtube_description: YouTube description text.
+    """
+    # Remove avatar intro block entirely (spoken by avatar, not narrated)
+    narration = _AVATAR_BLOCK_RE.sub("", script_body)
+    # Strip remaining section markers
+    narration = _STRIP_MARKERS_RE.sub("", narration)
+    # Clean up excessive blank lines
+    narration = re.sub(r"\n{3,}", "\n\n", narration).strip()
+
+    avatar = metadata.get("avatar_intro", "")
+    youtube_desc = metadata.get("youtube_description", "")
+
+    return {
+        "narration": narration,
+        "avatar": avatar,
+        "youtube_description": youtube_desc,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Full pipeline
 # ---------------------------------------------------------------------------
 
