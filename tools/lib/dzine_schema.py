@@ -427,13 +427,13 @@ MAX_PROMPT_LENGTH = 3000
 
 MODEL_ROUTING: dict[str, dict[str, str]] = {
     "thumbnail": {
-        "primary": "Seedream 4.5",       # best material rendering for product photography
-        "fallback": "Nano Banana Pro",    # versatile, good text accuracy
+        "primary": "Nano Banana Pro",     # versatile, good text accuracy
+        "fallback": "Seedream 4.5",
         "test": "Z-Image Turbo",          # 3-6s, for rapid prompt testing
     },
     "product": {
-        "primary": "Seedream 4.5",
-        "fallback": "Realistic Product",  # studio product shots
+        "primary": "Nano Banana Pro",     # best product fidelity
+        "fallback": "Seedream 4.5",
         "test": "Z-Image Turbo",
     },
     "background": {
@@ -442,8 +442,8 @@ MODEL_ROUTING: dict[str, dict[str, str]] = {
         "test": "Z-Image Turbo",
     },
     "avatar_base": {
-        "primary": "Seedream 4.5",        # photorealistic faces
-        "fallback": "Dzine Realistic v3",
+        "primary": "Nano Banana Pro",
+        "fallback": "Seedream 4.5",
         "test": "Z-Image Turbo",
     },
     "product_faithful": {
@@ -456,24 +456,24 @@ MODEL_ROUTING: dict[str, dict[str, str]] = {
 # Per-variant model overrides (more specific than per-asset-type)
 VARIANT_MODEL_ROUTING: dict[str, dict[str, str]] = {
     "hero": {
-        "primary": "Seedream 4.5",
-        "fallback": "Realistic Product",
+        "primary": "Nano Banana Pro",
+        "fallback": "Seedream 4.5",
     },
     "usage1": {
-        "primary": "Seedream 4.5",
-        "fallback": "Dzine Realistic v3",
+        "primary": "Nano Banana Pro",
+        "fallback": "Seedream 4.5",
     },
     "usage2": {
-        "primary": "Seedream 4.5",
-        "fallback": "Dzine Realistic v3",
+        "primary": "Nano Banana Pro",
+        "fallback": "Seedream 4.5",
     },
     "detail": {
         "primary": "Nano Banana Pro",     # excellent for close-ups with text/detail
         "fallback": "Seedream 4.5",
     },
     "mood": {
-        "primary": "Seedream 4.5",
-        "fallback": "Dzine Realistic v3",
+        "primary": "Nano Banana Pro",
+        "fallback": "Seedream 4.5",
     },
 }
 

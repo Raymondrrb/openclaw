@@ -296,11 +296,11 @@ class TestBuildPrompts(unittest.TestCase):
 class TestModelRouting(unittest.TestCase):
     """Test model selection logic."""
 
-    def test_thumbnail_default_is_seedream(self):
-        self.assertEqual(recommended_model("thumbnail"), "Seedream 4.5")
+    def test_thumbnail_default_is_nano_banana(self):
+        self.assertEqual(recommended_model("thumbnail"), "Nano Banana Pro")
 
-    def test_product_default_is_seedream(self):
-        self.assertEqual(recommended_model("product"), "Seedream 4.5")
+    def test_product_default_is_nano_banana(self):
+        self.assertEqual(recommended_model("product"), "Nano Banana Pro")
 
     def test_background_is_nano_banana(self):
         self.assertEqual(recommended_model("background"), "Nano Banana Pro")
@@ -308,8 +308,8 @@ class TestModelRouting(unittest.TestCase):
     def test_detail_variant_is_nano_banana(self):
         self.assertEqual(recommended_model("product", variant="detail"), "Nano Banana Pro")
 
-    def test_hero_variant_is_seedream(self):
-        self.assertEqual(recommended_model("product", variant="hero"), "Seedream 4.5")
+    def test_hero_variant_is_nano_banana(self):
+        self.assertEqual(recommended_model("product", variant="hero"), "Nano Banana Pro")
 
     def test_testing_mode_returns_turbo(self):
         self.assertEqual(recommended_model("thumbnail", testing=True), "Z-Image Turbo")

@@ -291,6 +291,27 @@ def _js_get_result_images(page) -> list[dict]:
     }""")
 
 
+def _js_set_prompt(page, prompt: str) -> bool:
+    """Set the prompt text in the active panel textarea via JS.
+
+    Faster and more reliable than keyboard.type() which can hang on
+    long prompts due to per-keystroke event dispatch.
+    """
+    return page.evaluate(f"""() => {{
+        var textareas = document.querySelectorAll('textarea');
+        for (var ta of textareas) {{
+            var r = ta.getBoundingClientRect();
+            if (r.x > 60 && r.x < 350 && r.width > 100 && r.height > 30) {{
+                ta.value = {json.dumps(prompt)};
+                ta.dispatchEvent(new Event('input', {{bubbles: true}}));
+                ta.dispatchEvent(new Event('change', {{bubbles: true}}));
+                return true;
+            }}
+        }}
+        return false;
+    }}""")
+
+
 def _js_get_progress(page) -> list[dict]:
     """Check for generation progress indicators (percentage text)."""
     return page.evaluate("""() => {
@@ -463,6 +484,65 @@ def _exit_tool_mode(page) -> None:
         page.wait_for_timeout(500)
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Canvas image upload (for Img2Img reference)
+# ---------------------------------------------------------------------------
+
+
+def _upload_image_to_canvas(page, image_path: str) -> bool:
+    """Upload an image file to the Dzine canvas via JavaScript drop event.
+
+    Reads the image, converts to base64, then dispatches a synthetic drop
+    event on the canvas drop zone. The image becomes a layer that can be
+    used as input for Img2Img generation.
+
+    Returns True if the image was uploaded successfully.
+    """
+    import base64
+
+    img_path = Path(image_path)
+    if not img_path.is_file():
+        print(f"[dzine] Image not found: {image_path}", file=sys.stderr)
+        return False
+
+    img_data = img_path.read_bytes()
+    img_b64 = base64.b64encode(img_data).decode()
+    suffix = img_path.suffix.lower()
+    mime = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/png"
+    filename = img_path.name
+
+    result = page.evaluate(f"""async () => {{
+        var b64 = '{img_b64}';
+        var byteChars = atob(b64);
+        var byteArray = new Uint8Array(byteChars.length);
+        for (var i = 0; i < byteChars.length; i++) {{
+            byteArray[i] = byteChars.charCodeAt(i);
+        }}
+        var file = new File([byteArray], {json.dumps(filename)}, {{ type: {json.dumps(mime)} }});
+        var dt = new DataTransfer();
+        dt.items.add(file);
+        var dropBox = document.querySelector('.drop-box') || document.querySelector('.drop');
+        if (!dropBox) return 'no_drop_zone';
+        dropBox.dispatchEvent(new DragEvent('dragenter', {{ dataTransfer: dt, bubbles: true }}));
+        dropBox.dispatchEvent(new DragEvent('dragover', {{ dataTransfer: dt, bubbles: true }}));
+        dropBox.dispatchEvent(new DragEvent('drop', {{ dataTransfer: dt, bubbles: true }}));
+        return 'ok';
+    }}""")
+
+    if result != "ok":
+        print(f"[dzine] Drop event failed: {result}", file=sys.stderr)
+        return False
+
+    page.wait_for_timeout(5000)
+
+    # Click on center of canvas to select the placed image
+    page.mouse.click(720, 450)
+    page.wait_for_timeout(1000)
+
+    print(f"[dzine] Image uploaded to canvas: {filename}", file=sys.stderr)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -846,11 +926,12 @@ def _generate_img2img(page, prompt: str, *,
     if model:
         _select_model(page, model)
 
-    # 2. Fill prompt textarea
-    page.mouse.click(101, 175)
-    page.keyboard.press("Meta+a")
-    page.wait_for_timeout(200)
-    page.keyboard.type(prompt, delay=3)
+    # 2. Fill prompt textarea via JS (faster than keyboard.type, avoids hangs)
+    if not _js_set_prompt(page, prompt):
+        page.mouse.click(101, 175)
+        page.keyboard.press("Meta+a")
+        page.wait_for_timeout(200)
+        page.keyboard.type(prompt, delay=3)
     page.wait_for_timeout(500)
 
     # 3. Set output quality
@@ -996,18 +1077,32 @@ def _generate_cc(page, scene_prompt: str, *,
 # ---------------------------------------------------------------------------
 
 
+_MODEL_CATEGORY: dict[str, str] = {
+    "Nano Banana Pro": "General",
+    "Nano Banana": "General",
+    "Seedream 4.5": "General",
+    "Z-Image Turbo": "General",
+    "Dzine General": "General",
+    "Realistic Product": "Realistic",
+}
+
+
 def _select_model(page, model_name: str, category: str = "") -> bool:
     """Select a model/style in the Txt2Img model picker.
 
-    Opens the style picker overlay, optionally navigates to a category,
-    and clicks the model card. Picker closes automatically on selection.
+    Opens the style picker overlay, navigates to the correct category,
+    scrolls the model into view, and clicks it.
 
     Args:
         model_name: Exact model name (e.g., "Realistic Product", "Nano Banana Pro")
-        category: Optional category to click first (e.g., "Realistic", "General")
+        category: Optional category override (e.g., "Realistic", "General")
 
     Returns True if model was selected.
     """
+    # Auto-detect category if not specified
+    if not category:
+        category = _MODEL_CATEGORY.get(model_name, "General")
+
     # Open picker
     page.evaluate("""() => {
         var btn = document.querySelector('button.style');
@@ -1015,24 +1110,27 @@ def _select_model(page, model_name: str, category: str = "") -> bool:
     }""")
     page.wait_for_timeout(2000)
 
-    # Navigate to category if specified
-    if category:
-        page.evaluate(f"""() => {{
-            for (const el of document.querySelectorAll('.left-filter-item, .filter-item, [class*="category-item"]')) {{
-                if ((el.innerText || '').trim() === {json.dumps(category)}) {{
-                    el.click(); return true;
-                }}
+    # Navigate to category — models are only visible in their category
+    page.evaluate(f"""() => {{
+        for (const el of document.querySelectorAll('.left-filter-item, .filter-item, [class*="category-item"]')) {{
+            if ((el.innerText || '').trim() === {json.dumps(category)}) {{
+                el.click(); return true;
             }}
-            return false;
-        }}""")
-        page.wait_for_timeout(1000)
+        }}
+        return false;
+    }}""")
+    page.wait_for_timeout(1500)
 
-    # Click the model card
+    # Click the model card — scroll into view first, then click
     selected = page.evaluate(f"""() => {{
+        var name = {json.dumps(model_name)};
         for (const el of document.querySelectorAll('.style-name')) {{
-            if ((el.innerText || '').trim() === {json.dumps(model_name)}) {{
+            if ((el.innerText || '').trim() === name) {{
+                // Scroll element into view
+                el.scrollIntoView({{behavior: 'instant', block: 'center'}});
+                // Walk up to find clickable card (parent with dimensions)
                 var target = el;
-                for (var i = 0; i < 3; i++) {{
+                for (var i = 0; i < 4; i++) {{
                     target = target.parentElement;
                     if (!target) break;
                     var r = target.getBoundingClientRect();
@@ -1122,11 +1220,13 @@ def _generate_txt2img(page, prompt: str, *,
     if model:
         _select_model(page, model)
 
-    # 2. Fill prompt textarea at ~(101, 175)
-    page.mouse.click(101, 175)
-    page.keyboard.press("Meta+a")
-    page.wait_for_timeout(200)
-    page.keyboard.type(prompt, delay=3)
+    # 2. Fill prompt textarea via JS (faster than keyboard.type, avoids hangs)
+    if not _js_set_prompt(page, prompt):
+        # Fallback: click + type
+        page.mouse.click(101, 175)
+        page.keyboard.press("Meta+a")
+        page.wait_for_timeout(200)
+        page.keyboard.type(prompt, delay=3)
     page.wait_for_timeout(500)
 
     # 3. Set aspect ratio — use "canvas" for 16:9 (1536×864)
@@ -1564,9 +1664,11 @@ def generate_variant(
     *,
     output_path: Path | None = None,
 ) -> GenerationResult:
-    """Generate a single product variant image via Txt2Img.
+    """Generate a single product variant image.
 
-    Uses the prompt from req (call build_prompts first).
+    When reference_image is set: uploads the Amazon image to canvas and uses
+    Img2Img to create a faithful studio-quality version.
+    When no reference_image: uses Txt2Img to generate from scratch.
 
     Args:
         req: DzineRequest with prompt already populated
@@ -1579,7 +1681,9 @@ def generate_variant(
     if not req.prompt:
         return GenerationResult(success=False, error="DzineRequest has no prompt — call build_prompts() first")
 
-    log_action("dzine_variant", f"type={req.asset_type} variant={req.image_variant}")
+    use_img2img = bool(req.reference_image and Path(req.reference_image).is_file())
+    mode = "img2img" if use_img2img else "txt2img"
+    log_action("dzine_variant", f"type={req.asset_type} variant={req.image_variant} mode={mode}")
 
     def _attempt():
         start = time.monotonic()
@@ -1595,13 +1699,28 @@ def generate_variant(
                                         error="Not logged in to Dzine")
             _exit_tool_mode(page)
 
-            is_16_9 = req.image_variant != "detail"
+            from tools.lib.dzine_schema import recommended_model
+            model = recommended_model(req.asset_type, req.image_variant)
 
-            model = ""
-            if req.asset_type == "product":
-                model = "Realistic Product"
+            if use_img2img:
+                # Upload Amazon image to canvas, then Img2Img for faithful reproduction
+                if not _upload_image_to_canvas(page, req.reference_image):
+                    return GenerationResult(success=False, duration_s=time.monotonic() - start,
+                                            error="Failed to upload reference image to canvas")
+                result = _generate_img2img(page, req.prompt, quality="2K", model=model)
+                # Clean up: delete the uploaded layer so next generation starts clean
+                try:
+                    page.mouse.click(720, 450)
+                    page.wait_for_timeout(300)
+                    page.keyboard.press("Delete")
+                    page.wait_for_timeout(500)
+                except Exception:
+                    pass
+            else:
+                # No reference — generate from scratch via Txt2Img
+                is_16_9 = req.image_variant != "detail"
+                result = _generate_txt2img(page, req.prompt, aspect_16_9=is_16_9, model=model)
 
-            result = _generate_txt2img(page, req.prompt, aspect_16_9=is_16_9, model=model)
             if not result.success:
                 return result
 
