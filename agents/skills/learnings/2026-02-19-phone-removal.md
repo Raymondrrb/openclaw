@@ -38,6 +38,12 @@ The Tapo RV30 had a phone too close to the product to crop cleanly.
 Found alternate Amazon image `41PRqyHoCtL` (robot + dock only, white BG, no phone).
 Replaced 02_ref.jpg entirely.
 
+## QA Verification (post-generation)
+
+Even after cropping, product 01 STILL had phone remnants in all 5 variants (worst in mood — full phone with amber screen visible). The crop was not aggressive enough.
+
+**Lesson:** After crop + BG Remove, ALWAYS visually verify the cutout before feeding into Product Background. If any phone edge/shape persists, re-crop more aggressively or use alternate Amazon image.
+
 ## Prevention
 
 Before uploading ANY reference image:
@@ -46,3 +52,5 @@ Before uploading ANY reference image:
 2. If yes: crop out unwanted objects OR find an alternate Amazon image
 3. Use Amazon listing gallery (multiple images available per product)
 4. Prefer images with clean/white backgrounds
+5. **After BG Remove, verify cutout is clean** — check edges for phone shapes, rectangular remnants, translucent strips
+6. **If phone persists after crop** — use alternate Amazon image entirely (don't try incremental crops)
