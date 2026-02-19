@@ -1,0 +1,48 @@
+{
+  "generated_at": "2026-02-19T21:36:24Z",
+  "period_days": 7,
+  "scope": "all",
+  "events_total": 6,
+  "events_recent": 6,
+  "by_severity": {
+    "FAIL": 3,
+    "BLOCKER": 2,
+    "WARN": 1
+  },
+  "by_component": {
+    "unknown": 6
+  },
+  "by_status": {
+    "open": 6
+  },
+  "agent_summaries": {
+    "market_scout": {
+      "active_rules": 0,
+      "tombstones": 0
+    },
+    "researcher": {
+      "active_rules": 0,
+      "tombstones": 0
+    },
+    "scriptwriter": {
+      "active_rules": 0,
+      "tombstones": 0
+    },
+    "reviewer": {
+      "active_rules": 0,
+      "tombstones": 0
+    },
+    "dzine_producer": {
+      "active_rules": 0,
+      "tombstones": 1
+    },
+    "davinci_editor": {
+      "active_rules": 0,
+      "tombstones": 0
+    },
+    "publisher": {
+      "active_rules": 0,
+      "tombstones": 0
+    }
+  }
+}
