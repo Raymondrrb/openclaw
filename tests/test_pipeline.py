@@ -175,6 +175,7 @@ class TestPipelineResearch(unittest.TestCase):
             patch("tools.lib.amazon_research.VIDEOS_BASE", self.videos_base),
             patch("tools.lib.notify.send_telegram", return_value=False),
             patch("tools.pipeline._log_error"),
+            patch("tools.pipeline._run_learning_gate", return_value=None),
         ]
         for p in self.patchers:
             p.start()
@@ -256,6 +257,7 @@ class TestPipelineScript(unittest.TestCase):
             patch("tools.lib.amazon_research.VIDEOS_BASE", self.videos_base),
             patch("tools.lib.notify.send_telegram", return_value=False),
             patch("tools.pipeline._log_error"),
+            patch("tools.pipeline._run_learning_gate", return_value=None),
         ]
         for p in self.patchers:
             p.start()
@@ -444,6 +446,7 @@ class TestPipelineDayCluster(unittest.TestCase):
             patch("tools.lib.pipeline_status._cache", {}),
             patch("tools.lib.notify.send_telegram", return_value=False),
             patch("tools.pipeline._log_error"),
+            patch("tools.pipeline._run_learning_gate", return_value=None),
             patch("tools.cluster_manager.DATA_DIR", self.data_dir),
             patch("tools.cluster_manager.CLUSTERS_PATH", self.data_dir / "clusters.json"),
             patch("tools.cluster_manager.CLUSTER_HISTORY_PATH", self.data_dir / "cluster_history.json"),

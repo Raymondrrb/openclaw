@@ -214,6 +214,7 @@ class TestCmdDay(unittest.TestCase):
             patch("tools.lib.pipeline_status.VIDEOS_BASE", self.videos_base),
             patch("tools.lib.pipeline_status._cache", {}),
             patch("tools.lib.notify.send_telegram", return_value=False),
+            patch("tools.pipeline._run_learning_gate", return_value=None),
         ]
         for p in self.patchers:
             p.start()
