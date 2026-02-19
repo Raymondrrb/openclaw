@@ -31,7 +31,7 @@ The single most important decision is tool selection. Wrong tool = wasted credit
 
 ## Failures & Recovery
 
-- [[failures/_index]] — All documented failures with root cause and fix
+- [[dzine/failures/_index]] — All documented failures with root cause and fix
 
 ## Reference
 

@@ -1212,7 +1212,16 @@ def cmd_assets(args) -> int:
     except Exception:
         pass
 
+    import random as _rng
+    import time as _time
+
     for i, (label, dest_path, params) in enumerate(targets):
+        # Anti-bot: random delay between generations (skip first)
+        if i > 0:
+            delay = _rng.uniform(3.0, 8.0)
+            print(f"  (waiting {delay:.1f}s between generations)")
+            _time.sleep(delay)
+
         print(f"\nGenerating {label} ({i+1}/{len(targets)})...")
 
         # Add reference image if available for product variants

@@ -1,10 +1,10 @@
 ---
-description: Product Background tool — THE correct tool for product scene variation. Removes BG + generates scene with prompt + adjusts lighting.
+description: Product Background tool — THE correct tool for product scene variation. Requires BG Remove first, then generates scene with prompt + adjusts lighting.
 tags: [dzine, tool, product-background, scene-variation, critical]
 created: 2026-02-19
 updated: 2026-02-19
 status: proven
-credits: 4
+credits: 8
 ---
 
 # Product Background
@@ -26,30 +26,52 @@ The Product Background tool is Dzine's dedicated feature for placing products in
 
 ## How It Works
 
-1. Upload product image → Dzine auto-detects and isolates product
-2. Browse template categories OR write custom prompt for background
-3. AI removes background, composites product, adjusts lighting/shadows
-4. Download result
+1. **PREREQUISITE**: Run BG Remove first — Product Background shows "Background is NOT empty" error otherwise
+2. Navigate to Image Editor > Background subtool
+3. Click **Prompt** tab (class `.pro-tab`, text "Prompt")
+4. Click **Manual Prompt** toggle (class `.to-manual-prompt`) to switch to freeform textarea
+5. Fill textarea (placeholder: "Descreva tanto o produto quanto o ambiente...")
+6. Click **Generate** button (class `.generative`, costs 8 credits)
+7. Wait for 4 result images (typically 15-30s)
+
+## Panel Structure (discovered 2026-02-19)
+
+```
+Panel class: c-gen-config show float-gen-btn float-pro-img-gen-btn
+├── Source Preview (product image)
+├── Tabs: Template | Prompt | Image  (class: .pro-tab)
+├── [Prompt tab]
+│   ├── Toggle: Manual Prompt / Assisted Prompt (class: .to-manual-prompt)
+│   ├── Textarea (placeholder: "Descreva tanto o produto quanto o ambiente...")
+│   └── Generate button (class: .generative, text: "Generate" + credit badge)
+└── [Template tab]
+    └── Preset backgrounds: White, +Shadow, Black, Green, etc.
+```
 
 ## Automation Code
 
 ```python
-# Scroll Image Editor panel to reveal Product Background
+# 1. BG Remove first (REQUIRED)
+bg_time = _bg_remove(page)
+
+# 2. Open Image Editor > Background
 page.evaluate("""() => {
     var panel = document.querySelector('.subtools');
-    if (panel) { panel.scrollTop = panel.scrollHeight; return true; }
-    return false;
+    if (panel) panel.scrollTop = panel.scrollHeight;
 }""")
-page.wait_for_timeout(500)
+# Click Background subtool (.subtool-item text "Background")
 
-# Click Background subtool
+# 3. Click Prompt tab
 page.evaluate("""() => {
-    for (const el of document.querySelectorAll('.subtool-item')) {
-        var text = (el.innerText || '').trim();
-        if (text === 'Background') { el.click(); return true; }
-    }
-    return false;
+    for (var tab of document.querySelectorAll('.pro-tab'))
+        if (tab.innerText.trim() === 'Prompt') tab.click();
 }""")
+
+# 4. Click Manual Prompt toggle
+document.querySelector('.to-manual-prompt').click()
+
+# 5. Fill textarea (use nativeTextAreaValueSetter for React compat)
+# 6. Click .generative button (ignore disabled attr — React lag)
 ```
 
 Position: `(92, 877)` — CSS class: `subtool-item`
@@ -69,7 +91,14 @@ Key prompt elements that work:
 
 ## Relationship to Other Tools
 
-- Prerequisite: None (handles BG removal internally)
+- **Prerequisite**: [[bg-remove]] — MUST run before Product Background
 - Alternative: [[bg-remove]] + [[generative-expand]] (worse — expand ignores prompts)
 - Alternative: [[img2img-workflow]] with faithful reproduction as reference (changes product too)
 - Complementary: [[local-edit]] for post-processing artifacts
+
+## Critical Rules
+
+- **Never change product color** — if the Amazon listing shows white, the output must be white. Aesthetic only.
+- **Verify BG Remove didn't erase the product** — if product is clipped/partially erased, use tighter crop or alternate reference image. Fix immediately.
+- **Vary prompts across videos** — rotate lighting, angles, environments to avoid same-looking content across different videos.
+- **Authenticity** — no over-stylization. The product must look like what the customer receives.

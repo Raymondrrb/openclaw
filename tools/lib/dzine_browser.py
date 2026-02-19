@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import struct
 import sys
 import time
@@ -221,7 +222,7 @@ def close_all_dialogs(page) -> int:
     closed = 0
     for _ in range(8):
         found = False
-        for text in ["Not now", "Close", "Never show again", "Got it", "Skip", "Later"]:
+        for text in ["Not now", "Close", "Never show again", "Got it", "Skip", "Later", "Done"]:
             try:
                 btn = page.locator(f'button:has-text("{text}")')
                 if btn.count() > 0 and btn.first.is_visible(timeout=500):
@@ -2134,23 +2135,43 @@ def _export_canvas(page, format: str = "PNG", scale: str = "2x") -> Path | None:
         return None
 
 
+def _human_delay(page, min_ms: int = 800, max_ms: int = 2500) -> None:
+    """Random delay to simulate human interaction timing."""
+    page.wait_for_timeout(random.randint(min_ms, max_ms))
+
+
+def _human_click(page, x: int, y: int, jitter: int = 3) -> None:
+    """Click with small random offset to avoid pixel-perfect bot patterns."""
+    dx = random.randint(-jitter, jitter)
+    dy = random.randint(-jitter, jitter)
+    page.mouse.click(x + dx, y + dy)
+
+
 def _product_background(page, prompt: str) -> list[str]:
     """Open Product Background tool and generate scene with prompt.
 
     Returns list of result image URLs. Uses Image Editor > Product Background.
     The tool handles BG removal internally and generates a new background
     from the prompt, adjusting lighting and shadows automatically.
+
+    Panel layout (discovered 2026-02-19):
+      - Panel class: c-gen-config show float-gen-btn float-pro-img-gen-btn
+      - Three tabs with class .pro-tab: Template | Prompt | Image
+      - Prompt tab has two modes: Assisted Prompt (chips) and Manual Prompt (textarea)
+      - Toggle: .to-manual-prompt.switch-prompt (click to switch to freeform)
+      - Textarea placeholder: "Descreva tanto o produto quanto o ambiente..."
+      - Generate button: class .generative, text "Generate" + credit count
     """
     # Close existing panels
     page.evaluate("""() => {
         for (var el of document.querySelectorAll('.c-gen-config.show .ico-close')) el.click();
         for (var el of document.querySelectorAll('.panels.show .ico-close')) el.click();
     }""")
-    page.wait_for_timeout(500)
+    _human_delay(page, 400, 800)
 
     # Open Image Editor sidebar
-    page.mouse.click(40, SIDEBAR["image_editor"][1])
-    page.wait_for_timeout(2000)
+    _human_click(page, 40, SIDEBAR["image_editor"][1])
+    _human_delay(page, 1500, 2500)
     close_all_dialogs(page)
 
     # Scroll subtools panel to reveal Product Background (it's at the bottom)
@@ -2159,7 +2180,7 @@ def _product_background(page, prompt: str) -> list[str]:
         if (panel) { panel.scrollTop = panel.scrollHeight; return true; }
         return false;
     }""")
-    page.wait_for_timeout(500)
+    _human_delay(page, 400, 800)
 
     # Click "Background" subtool
     clicked = page.evaluate("""() => {
@@ -2167,7 +2188,6 @@ def _product_background(page, prompt: str) -> list[str]:
             var text = (el.innerText || '').trim();
             if (text === 'Background') { el.click(); return true; }
         }
-        // Fallback: try by position
         for (const el of document.querySelectorAll('[class*="subtool"]')) {
             var text = (el.innerText || '').trim().toLowerCase();
             if (text.includes('background')) { el.click(); return true; }
@@ -2178,43 +2198,105 @@ def _product_background(page, prompt: str) -> list[str]:
         print("[dzine] Could not find Product Background tool", file=sys.stderr)
         return []
 
-    page.wait_for_timeout(2000)
+    _human_delay(page, 1500, 2500)
     close_all_dialogs(page)
 
-    # Set prompt in the panel's textarea
-    page.evaluate("""(prompt) => {
-        for (var ta of document.querySelectorAll('textarea')) {
-            var r = ta.getBoundingClientRect();
-            if (r.width > 80 && r.x < 350) {
-                ta.value = prompt;
-                ta.dispatchEvent(new Event('input', {bubbles: true}));
-                return true;
-            }
-        }
-        // Fallback: try contenteditable or input fields
-        for (var inp of document.querySelectorAll('input[type="text"]')) {
-            var r = inp.getBoundingClientRect();
-            if (r.width > 80 && r.x < 350) {
-                inp.value = prompt;
-                inp.dispatchEvent(new Event('input', {bubbles: true}));
+    # Step A: Click "Prompt" tab (class .pro-tab, text "Prompt")
+    prompt_tab_clicked = page.evaluate("""() => {
+        for (var tab of document.querySelectorAll('.pro-tab')) {
+            if ((tab.innerText || '').trim() === 'Prompt') {
+                tab.click();
                 return true;
             }
         }
         return false;
+    }""")
+    if not prompt_tab_clicked:
+        print("[dzine] Could not find Prompt tab (.pro-tab)", file=sys.stderr)
+        return []
+
+    _human_delay(page, 800, 1200)
+
+    # Step B: Switch to Manual Prompt mode (freeform textarea)
+    # Click .to-manual-prompt to toggle from Assisted -> Manual mode
+    page.evaluate("""() => {
+        var el = document.querySelector('.to-manual-prompt');
+        if (el) { el.click(); return true; }
+        // Fallback: find smallest element with "Manual Prompt" text
+        var best = null, bestArea = Infinity;
+        for (var el of document.querySelectorAll('*')) {
+            var t = (el.textContent || '').trim();
+            if (t === 'Manual Prompt' && el.children.length < 3) {
+                var r = el.getBoundingClientRect();
+                var area = r.width * r.height;
+                if (area > 0 && area < bestArea) { bestArea = area; best = el; }
+            }
+        }
+        if (best) { best.click(); return true; }
+        return false;
+    }""")
+    _human_delay(page, 800, 1200)
+
+    # Step C: Fill the Manual Prompt textarea
+    # Use nativeTextAreaValueSetter for React/Vue compatibility
+    prompt_set = page.evaluate("""(prompt) => {
+        for (var ta of document.querySelectorAll('textarea')) {
+            var r = ta.getBoundingClientRect();
+            var ph = (ta.placeholder || '').toLowerCase();
+            if (r.width > 100 && (ph.includes('produto') || ph.includes('product') || ph.includes('ambiente'))) {
+                ta.focus();
+                var setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+                setter.call(ta, prompt);
+                ta.dispatchEvent(new Event('input', {bubbles: true}));
+                ta.dispatchEvent(new Event('change', {bubbles: true}));
+                return 'native-setter';
+            }
+        }
+        // Fallback: any visible textarea in left panel
+        for (var ta of document.querySelectorAll('textarea')) {
+            var r = ta.getBoundingClientRect();
+            if (r.width > 80 && r.x < 350) {
+                ta.focus();
+                var setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+                setter.call(ta, prompt);
+                ta.dispatchEvent(new Event('input', {bubbles: true}));
+                ta.dispatchEvent(new Event('change', {bubbles: true}));
+                return 'fallback-textarea';
+            }
+        }
+        return false;
     }""", prompt)
-    page.wait_for_timeout(500)
+
+    if not prompt_set:
+        print("[dzine] Could not fill Product Background prompt textarea", file=sys.stderr)
+        return []
+
+    print(f"[dzine] Prompt set via: {prompt_set}", file=sys.stderr)
+    _human_delay(page, 500, 1000)
 
     # Count images before generation
     before_count = len(_js_get_result_images(page))
 
-    # Click Generate button (in the panel, x < 350)
+    # Step D: Click Generate button
+    # Button has class .generative and text "Generate" + credit count.
+    # May report disabled=true in DOM even when visually enabled (React lag),
+    # so we click via class .generative regardless of disabled state.
     clicked = page.evaluate("""() => {
+        // Strategy 1: .generative button in left panel
+        for (var b of document.querySelectorAll('button.generative, button[class*="generative"]')) {
+            var r = b.getBoundingClientRect();
+            if (r.width > 100 && r.x < 300) {
+                b.click();
+                return 'generative-class';
+            }
+        }
+        // Strategy 2: button with "Generate" text in left panel
         for (var b of document.querySelectorAll('button')) {
             var text = (b.innerText || '').trim();
             var r = b.getBoundingClientRect();
-            if (text.includes('Generate') && r.width > 0 && r.x < 350 && r.y > 200 && !b.disabled) {
+            if (text.includes('Generate') && r.width > 100 && r.x < 300 && r.y > 400) {
                 b.click();
-                return true;
+                return 'generate-text';
             }
         }
         return false;
@@ -2223,9 +2305,10 @@ def _product_background(page, prompt: str) -> list[str]:
         print("[dzine] Could not click Product Background Generate button", file=sys.stderr)
         return []
 
-    page.wait_for_timeout(2000)
+    print(f"[dzine] Product Background Generate clicked via: {clicked}", file=sys.stderr)
+    _human_delay(page, 1500, 2500)
     close_all_dialogs(page)
-    page.wait_for_timeout(1000)
+    _human_delay(page, 800, 1500)
     close_all_dialogs(page)
 
     # Wait for results (up to 120s)
@@ -2242,7 +2325,7 @@ def _product_background(page, prompt: str) -> list[str]:
             progress = _js_get_progress(page)
             pct = progress[0]["pct"] if progress else "?"
             print(f"[dzine] ProdBG: {elapsed}s... {pct}", file=sys.stderr)
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(random.randint(2500, 3500))
 
     print("[dzine] Product Background generation timed out", file=sys.stderr)
     return []
@@ -2314,18 +2397,19 @@ def generate_product_faithful(
 
             print(f"[dzine] Canvas: {canvas_url}", file=sys.stderr)
 
-            # Step 2: Try Product Background (preferred — respects scene prompts)
+            # Step 2: Remove background (required before Product Background)
+            print("[dzine] Removing background...", file=sys.stderr)
+            bg_time = _bg_remove(page)
+            print(f"[dzine] BG Remove done in {bg_time:.0f}s", file=sys.stderr)
+            _human_delay(page, 800, 1500)
+
+            # Step 3: Product Background (preferred — generates scene from prompt)
             print("[dzine] Running Product Background...", file=sys.stderr)
             result_urls = _product_background(page, backdrop_prompt)
 
-            # Step 2b: Fallback to BG Remove + Expand if Product Background failed
+            # Step 3b: Fallback to Generative Expand if Product Background failed
             if not result_urls:
-                print("[dzine] Product Background failed, falling back to BG Remove + Expand...", file=sys.stderr)
-                print("[dzine] Removing background...", file=sys.stderr)
-                bg_time = _bg_remove(page)
-                print(f"[dzine] BG Remove done in {bg_time:.0f}s", file=sys.stderr)
-
-                print("[dzine] Running Generative Expand...", file=sys.stderr)
+                print("[dzine] Product Background failed, falling back to Generative Expand...", file=sys.stderr)
                 result_urls = _generative_expand(page, backdrop_prompt, aspect)
 
             if not result_urls:

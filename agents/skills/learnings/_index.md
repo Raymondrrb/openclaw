@@ -19,6 +19,7 @@ Every pipeline run records its outcome here. Before starting any generation, the
 
 ## Recent Learnings (newest first)
 
+- [[2026-02-19-bg-remove-prerequisite]] — Product Background requires empty BG. Must run BG Remove first or get "Background is NOT empty" error.
 - [[2026-02-19-identical-images]] — **CRITICAL**: Generative Expand ignores scene prompts. All 18 images came out identical. Switch to Product Background.
 - [[2026-02-19-phone-removal]] — BG Remove treats phones as foreground. Must crop from reference before upload.
 - [[2026-02-19-duplicate-dock]] — Tapo RV30 Expand created phantom second dock. Fixed with clean alternate Amazon image.
@@ -42,6 +43,7 @@ Bad reference images cascade into bad outputs:
 
 ## Statistics
 
-| Date       | Video    | Generated | Failed | Avg Score       | Key Issue             |
-| ---------- | -------- | --------- | ------ | --------------- | --------------------- |
-| 2026-02-19 | vtest-qa | 18/18     | 0      | 9.8/10 fidelity | Identical backgrounds |
+| Date       | Video    | Generated | Failed | Tool               | Key Issue                           |
+| ---------- | -------- | --------- | ------ | ------------------ | ----------------------------------- |
+| 2026-02-19 | vtest-qa | 18/18     | 0      | BG Remove + ProdBG | Minor: 01_mood phone, 04_hero ghost |
+| 2026-02-19 | vtest-qa | 18/18     | 0      | Gen Expand (old)   | Identical backgrounds (FIXED)       |
