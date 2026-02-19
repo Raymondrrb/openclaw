@@ -1182,15 +1182,35 @@ def cmd_assets(args) -> int:
         details=[f"Starting Dzine generation: {len(targets)} images"],
     )
 
-    # Backdrop prompts for product_faithful (BG Remove + Expand).
-    # These describe ONLY the background/scene — the product is preserved exactly.
-    _BACKDROP_PROMPTS = {
-        "hero": "Premium dark studio surface with subtle reflections, professional product photography lighting, clean gradient background, soft shadows",
-        "usage1": "Modern living room hardwood floor, clean home environment, soft natural window light, shallow depth of field background",
-        "usage2": "Bedroom wooden floor, cozy home setting, warm soft indoor light, blurred furniture in background",
-        "detail": "Clean white studio surface, soft even lighting from above, minimal neutral background, macro photography setup",
-        "mood": "Dramatic dark surface with volumetric light rays, atmospheric haze, cinematic color grading, moody studio environment",
+    # Load variant-specific prompts from skill graph (detailed, scene-specific).
+    # Falls back to inline defaults if skill graph is unavailable.
+    _BACKDROP_PROMPTS_FALLBACK = {
+        "hero": "Premium dark matte surface with subtle reflections. Professional studio environment with three-point lighting: soft key light from 45-degree upper left, subtle fill from right, rim light highlighting product edges. Dark gradient background transitioning from charcoal to deep navy. Clean minimalist composition with dramatic cast shadow underneath. High-end e-commerce aesthetic.",
+        "usage1": "Modern living room with warm oak hardwood flooring. Beige fabric sofa in soft-focus background, indoor potted plants in terracotta pots. Natural afternoon sunlight streaming through large floor-to-ceiling windows from the left, creating warm golden tones and soft natural shadows. Scandinavian minimalist interior, clean and inviting atmosphere. Low-angle perspective at 15 degrees above floor level. Shallow depth of field with softly blurred background.",
+        "usage2": "Bright contemporary kitchen with white subway tile backsplash and marble countertops visible in soft-focus background. Polished medium-brown hardwood floor with warm tones. Morning sunlight from side window creating soft diffused illumination and gentle shadows. Clean modern aesthetic with stainless steel appliances blurred in background. 45-degree diagonal angle showing product in kitchen context.",
+        "detail": "Pure white seamless studio surface. Soft even diffused lighting from two large softboxes positioned above and to the sides. Minimal shadows, bright and clean high-key environment. Professional e-commerce product photography setup. Neutral, clinical, technical aesthetic. Top-down 90-degree overhead perspective for maximum detail visibility.",
+        "mood": "Dramatic industrial environment with polished concrete floor showing visible texture. Exposed brick wall with dark teal color grading in background. Single spotlight from upper left creating strong directional light and deep shadows. Atmospheric haze or light fog adding depth layers. Volumetric light rays visible in the air. Low-key cinematic lighting with warm amber key light and cool blue fill. Film noir aesthetic.",
     }
+
+    def _get_backdrop_prompt(variant: str) -> str:
+        """Load prompt from skill graph, fall back to inline defaults."""
+        try:
+            from tools.lib.skill_graph import get_variant_prompt
+            prompt = get_variant_prompt(variant, "product-background")
+            if prompt:
+                return prompt
+        except Exception:
+            pass
+        return _BACKDROP_PROMPTS_FALLBACK.get(variant, _BACKDROP_PROMPTS_FALLBACK["hero"])
+
+    # Pre-run check: warn about known issues with current tool
+    try:
+        from tools.lib.skill_graph import pre_run_check
+        warnings = pre_run_check("product-background")
+        for w in warnings:
+            print(f"  [skill-graph] {w}")
+    except Exception:
+        pass
 
     for i, (label, dest_path, params) in enumerate(targets):
         print(f"\nGenerating {label} ({i+1}/{len(targets)})...")
@@ -1204,7 +1224,7 @@ def cmd_assets(args) -> int:
                 params["reference_image"] = str(ref_images[rank])
 
         # Product variants with reference images → use product_faithful
-        # (BG Remove + Generative Expand: product stays pixel-perfect)
+        # (Product Background preferred, fallback to BG Remove + Expand)
         use_faithful = (not is_thumbnail
                         and params.get("reference_image")
                         and Path(params["reference_image"]).is_file())
@@ -1212,7 +1232,7 @@ def cmd_assets(args) -> int:
         if use_faithful:
             from tools.lib.dzine_browser import generate_product_faithful
             ref_path = params["reference_image"]
-            backdrop = _BACKDROP_PROMPTS.get(variant, _BACKDROP_PROMPTS["hero"])
+            backdrop = _get_backdrop_prompt(variant)
             aspect = "1:1" if variant == "detail" else "16:9"
 
             # Save backdrop prompt

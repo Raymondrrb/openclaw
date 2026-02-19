@@ -2134,6 +2134,120 @@ def _export_canvas(page, format: str = "PNG", scale: str = "2x") -> Path | None:
         return None
 
 
+def _product_background(page, prompt: str) -> list[str]:
+    """Open Product Background tool and generate scene with prompt.
+
+    Returns list of result image URLs. Uses Image Editor > Product Background.
+    The tool handles BG removal internally and generates a new background
+    from the prompt, adjusting lighting and shadows automatically.
+    """
+    # Close existing panels
+    page.evaluate("""() => {
+        for (var el of document.querySelectorAll('.c-gen-config.show .ico-close')) el.click();
+        for (var el of document.querySelectorAll('.panels.show .ico-close')) el.click();
+    }""")
+    page.wait_for_timeout(500)
+
+    # Open Image Editor sidebar
+    page.mouse.click(40, SIDEBAR["image_editor"][1])
+    page.wait_for_timeout(2000)
+    close_all_dialogs(page)
+
+    # Scroll subtools panel to reveal Product Background (it's at the bottom)
+    page.evaluate("""() => {
+        var panel = document.querySelector('.subtools');
+        if (panel) { panel.scrollTop = panel.scrollHeight; return true; }
+        return false;
+    }""")
+    page.wait_for_timeout(500)
+
+    # Click "Background" subtool
+    clicked = page.evaluate("""() => {
+        for (const el of document.querySelectorAll('.subtool-item')) {
+            var text = (el.innerText || '').trim();
+            if (text === 'Background') { el.click(); return true; }
+        }
+        // Fallback: try by position
+        for (const el of document.querySelectorAll('[class*="subtool"]')) {
+            var text = (el.innerText || '').trim().toLowerCase();
+            if (text.includes('background')) { el.click(); return true; }
+        }
+        return false;
+    }""")
+    if not clicked:
+        print("[dzine] Could not find Product Background tool", file=sys.stderr)
+        return []
+
+    page.wait_for_timeout(2000)
+    close_all_dialogs(page)
+
+    # Set prompt in the panel's textarea
+    page.evaluate("""(prompt) => {
+        for (var ta of document.querySelectorAll('textarea')) {
+            var r = ta.getBoundingClientRect();
+            if (r.width > 80 && r.x < 350) {
+                ta.value = prompt;
+                ta.dispatchEvent(new Event('input', {bubbles: true}));
+                return true;
+            }
+        }
+        // Fallback: try contenteditable or input fields
+        for (var inp of document.querySelectorAll('input[type="text"]')) {
+            var r = inp.getBoundingClientRect();
+            if (r.width > 80 && r.x < 350) {
+                inp.value = prompt;
+                inp.dispatchEvent(new Event('input', {bubbles: true}));
+                return true;
+            }
+        }
+        return false;
+    }""", prompt)
+    page.wait_for_timeout(500)
+
+    # Count images before generation
+    before_count = len(_js_get_result_images(page))
+
+    # Click Generate button (in the panel, x < 350)
+    clicked = page.evaluate("""() => {
+        for (var b of document.querySelectorAll('button')) {
+            var text = (b.innerText || '').trim();
+            var r = b.getBoundingClientRect();
+            if (text.includes('Generate') && r.width > 0 && r.x < 350 && r.y > 200 && !b.disabled) {
+                b.click();
+                return true;
+            }
+        }
+        return false;
+    }""")
+    if not clicked:
+        print("[dzine] Could not click Product Background Generate button", file=sys.stderr)
+        return []
+
+    page.wait_for_timeout(2000)
+    close_all_dialogs(page)
+    page.wait_for_timeout(1000)
+    close_all_dialogs(page)
+
+    # Wait for results (up to 120s)
+    start = time.monotonic()
+    while time.monotonic() - start < GENERATION_TIMEOUT_S:
+        close_all_dialogs(page)
+        images = _js_get_result_images(page)
+        if len(images) > before_count:
+            new_urls = [i["src"] for i in images[before_count:]]
+            return new_urls[:4]
+
+        elapsed = int(time.monotonic() - start)
+        if elapsed % 15 == 0:
+            progress = _js_get_progress(page)
+            pct = progress[0]["pct"] if progress else "?"
+            print(f"[dzine] ProdBG: {elapsed}s... {pct}", file=sys.stderr)
+        page.wait_for_timeout(3000)
+
+    print("[dzine] Product Background generation timed out", file=sys.stderr)
+    return []
+
+
 def generate_product_faithful(
     product_image_path: str,
     *,
@@ -2144,22 +2258,23 @@ def generate_product_faithful(
 ) -> GenerationResult:
     """Generate a product-faithful image preserving real product appearance.
 
-    Uses the BG Remove + Generative Expand workflow (NOT Img2Img or Txt2Img).
+    Uses Product Background tool (preferred) with fallback to BG Remove + Expand.
     The real product photo is preserved — only the background is AI-generated.
 
     Steps:
         1. Create new project from product image ("Start from an image")
-        2. BG Remove — isolate product with transparent background
-        3. Generative Expand — AI-generates backdrop around the real product
-        4. Download best expand result
+        2. Product Background — generate scene background from prompt
+           (handles BG removal + scene generation + lighting adjustment)
+        3. Fallback: BG Remove + Generative Expand if Product Background fails
+        4. Download best result
 
     Uses the shared session (same Playwright instance across calls).
 
     Args:
         product_image_path: Path to Amazon product photo (JPEG/PNG)
         output_path: Where to save the final image
-        backdrop_prompt: Prompt for the expanded background
-        aspect: Aspect ratio for expand ("16:9", "4:3", "1:1")
+        backdrop_prompt: Prompt for the background scene
+        aspect: Aspect ratio for expand fallback ("16:9", "4:3", "1:1")
         export_scale: Export upscale ("1x", "2x", "4x")
 
     Returns GenerationResult with local_path on success.
@@ -2199,22 +2314,28 @@ def generate_product_faithful(
 
             print(f"[dzine] Canvas: {canvas_url}", file=sys.stderr)
 
-            # Step 2: BG Remove
-            print("[dzine] Removing background...", file=sys.stderr)
-            bg_time = _bg_remove(page)
-            print(f"[dzine] BG Remove done in {bg_time:.0f}s", file=sys.stderr)
+            # Step 2: Try Product Background (preferred — respects scene prompts)
+            print("[dzine] Running Product Background...", file=sys.stderr)
+            result_urls = _product_background(page, backdrop_prompt)
 
-            # Step 3: Generative Expand
-            print("[dzine] Running Generative Expand...", file=sys.stderr)
-            expand_urls = _generative_expand(page, backdrop_prompt, aspect)
-            if not expand_urls:
+            # Step 2b: Fallback to BG Remove + Expand if Product Background failed
+            if not result_urls:
+                print("[dzine] Product Background failed, falling back to BG Remove + Expand...", file=sys.stderr)
+                print("[dzine] Removing background...", file=sys.stderr)
+                bg_time = _bg_remove(page)
+                print(f"[dzine] BG Remove done in {bg_time:.0f}s", file=sys.stderr)
+
+                print("[dzine] Running Generative Expand...", file=sys.stderr)
+                result_urls = _generative_expand(page, backdrop_prompt, aspect)
+
+            if not result_urls:
                 return GenerationResult(success=False, duration_s=time.monotonic() - start,
-                                        error="Generative Expand produced no results")
+                                        error="Both Product Background and Expand produced no results")
 
-            print(f"[dzine] Expand: {len(expand_urls)} results", file=sys.stderr)
+            print(f"[dzine] Results: {len(result_urls)} images", file=sys.stderr)
 
-            # Step 4: Download best expand result (first one)
-            best_url = expand_urls[0]
+            # Step 3: Download best result (first one)
+            best_url = result_urls[0]
             if output_path:
                 dest = Path(output_path)
             else:
