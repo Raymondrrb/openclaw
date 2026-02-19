@@ -74,9 +74,48 @@ def load_env_file(path: str) -> None:
                 key, value = raw.split("=", 1)
                 key = key.strip()
                 if key and key not in os.environ:
-                    os.environ[key] = value.strip()
+                    v = value.strip()
+                    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                        v = v[1:-1]
+                    os.environ[key] = v
     except OSError:
         return
+
+
+def ensure_control_plane_url(default_url: str = "https://new-project-control-plane.vercel.app") -> str:
+    """Ensure CONTROL_PLANE_URL is populated from known env candidates.
+
+    Accepts values coming from local env exports or Vercel env dumps where
+    placeholders like `""` may appear.
+    """
+    current = _normalize_url_like(os.environ.get("CONTROL_PLANE_URL", ""))
+    if current:
+        os.environ["CONTROL_PLANE_URL"] = current
+        return current
+
+    for candidate in (
+        os.environ.get("NEWPROJECT_VERCEL_BASE_URL", ""),
+        os.environ.get("VERCEL_URL", ""),
+        default_url,
+    ):
+        normalized = _normalize_url_like(candidate)
+        if normalized:
+            os.environ["CONTROL_PLANE_URL"] = normalized
+            return normalized
+    return ""
+
+
+def _normalize_url_like(value: str) -> str:
+    raw = str(value or "").strip().strip("\"'").strip()
+    if not raw:
+        return ""
+    if raw.lower() in {"none", "null", "nil"}:
+        return ""
+    if raw.startswith(("http://", "https://")):
+        return raw.rstrip("/")
+    if "." not in raw:
+        return ""
+    return f"https://{raw}".rstrip("/")
 
 
 def require_env(name: str) -> str:

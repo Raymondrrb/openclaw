@@ -17,11 +17,19 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from lib.common import now_iso, today_iso
+from lib.common import ensure_control_plane_url, load_env_file, now_iso, project_root, today_iso
 from lib.control_plane import api_get, send_telegram
 
 
+def _bootstrap_env() -> None:
+    load_env_file(os.path.expanduser("~/.config/newproject/ops.env"))
+    load_env_file(os.path.expanduser("~/.config/newproject/vercel_control_plane.env"))
+    load_env_file(str(project_root() / ".env"))
+    ensure_control_plane_url()
+
+
 def main() -> int:
+    _bootstrap_env()
     errors = []
 
     try:

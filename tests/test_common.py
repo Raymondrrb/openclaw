@@ -22,6 +22,7 @@ from lib.common import (
     save_json,
     load_jsonl,
     load_env_file,
+    ensure_control_plane_url,
     require_env,
     slugify,
     iso8601_duration_to_seconds,
@@ -209,6 +210,21 @@ class TestLoadEnvFile(unittest.TestCase):
     def test_missing_file_no_error(self):
         load_env_file("/nonexistent/.env")  # Should not raise
 
+    def test_strips_surrounding_quotes(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".env", delete=False) as f:
+            f.write('TEST_URL_SAFETY_Q1="hello"\nTEST_URL_SAFETY_Q2=\'world\'\n')
+            path = f.name
+        try:
+            os.environ.pop("TEST_URL_SAFETY_Q1", None)
+            os.environ.pop("TEST_URL_SAFETY_Q2", None)
+            load_env_file(path)
+            self.assertEqual(os.environ.get("TEST_URL_SAFETY_Q1"), "hello")
+            self.assertEqual(os.environ.get("TEST_URL_SAFETY_Q2"), "world")
+        finally:
+            os.unlink(path)
+            os.environ.pop("TEST_URL_SAFETY_Q1", None)
+            os.environ.pop("TEST_URL_SAFETY_Q2", None)
+
 
 # ---------------------------------------------------------------------------
 # require_env
@@ -241,6 +257,30 @@ class TestRequireEnv(unittest.TestCase):
                 require_env("TEST_URL_SAFETY_EMPTY")
         finally:
             os.environ.pop("TEST_URL_SAFETY_EMPTY", None)
+
+
+class TestEnsureControlPlaneUrl(unittest.TestCase):
+    def test_uses_vercel_url_without_protocol(self):
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"CONTROL_PLANE_URL": "", "NEWPROJECT_VERCEL_BASE_URL": "", "VERCEL_URL": "new-project-control-plane.vercel.app"},
+            clear=True,
+        ):
+            self.assertEqual(
+                ensure_control_plane_url(),
+                "https://new-project-control-plane.vercel.app",
+            )
+
+    def test_ignores_quoted_empty_vercel_url(self):
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"CONTROL_PLANE_URL": "", "NEWPROJECT_VERCEL_BASE_URL": "", "VERCEL_URL": "\"\""},
+            clear=True,
+        ):
+            self.assertEqual(
+                ensure_control_plane_url(),
+                "https://new-project-control-plane.vercel.app",
+            )
 
 
 # ---------------------------------------------------------------------------

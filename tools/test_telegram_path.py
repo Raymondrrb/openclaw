@@ -16,6 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 from lib.common import now_iso, load_env_file
+from lib.common import ensure_control_plane_url
 from lib.control_plane import api_get, send_telegram, send_telegram_media
 
 
@@ -38,9 +39,11 @@ def parse_args() -> argparse.Namespace:
 
 def _bootstrap_env(load_openclaw_env: bool) -> None:
     load_env_file(os.path.expanduser("~/.config/newproject/ops.env"))
+    load_env_file(os.path.expanduser("~/.config/newproject/vercel_control_plane.env"))
     load_env_file(os.path.expanduser("~/.config/newproject/minimax.env"))
     if load_openclaw_env:
         load_env_file("/Users/ray/Documents/openclaw/.env")
+    ensure_control_plane_url()
 
 
 def _default_message(kind: str) -> str:

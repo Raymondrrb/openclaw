@@ -21,10 +21,17 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
-from lib.common import now_iso, project_root
+from lib.common import ensure_control_plane_url, load_env_file, now_iso, project_root
 from lib.control_plane import api_get, send_telegram
 
 ALERTED_FILE = project_root() / "tmp" / "failure_alert_seen.json"
+
+
+def _bootstrap_env() -> None:
+    load_env_file(os.path.expanduser("~/.config/newproject/ops.env"))
+    load_env_file(os.path.expanduser("~/.config/newproject/vercel_control_plane.env"))
+    load_env_file(str(project_root() / ".env"))
+    ensure_control_plane_url()
 
 
 def load_alerted() -> set:
@@ -51,6 +58,7 @@ def save_alerted(slugs: set) -> None:
 
 
 def main() -> int:
+    _bootstrap_env()
     try:
         data = api_get("/api/ops/runs", "OPS_READ_SECRET", params={"limit": "10", "status": "failed"})
     except Exception as e:
