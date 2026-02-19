@@ -1332,6 +1332,27 @@ def cmd_assets(args) -> int:
                 progress_done=i + 1, progress_total=len(targets),
             )
 
+    # --- Image approval gate ---
+    from tools.lib.telegram_image_approval import request_image_approval, ImageEntry
+    image_entries = []
+    for label, dest_path, params in needed:
+        if dest_path.is_file() and dest_path.stat().st_size >= MIN_ASSET_SIZE:
+            image_entries.append(ImageEntry(
+                label=label,
+                path=dest_path,
+                product_name=params.get("product_name", label),
+                variant=params.get("image_variant", "thumbnail"),
+            ))
+
+    if image_entries:
+        approval = request_image_approval(image_entries, video_id=args.video_id)
+        if approval.rejected:
+            print(f"\nRejected: {', '.join(approval.rejected)}")
+            notify_action_required(args.video_id, "assets",
+                f"{len(approval.rejected)} image(s) rejected",
+                next_action="Analyze failures and regenerate")
+            return EXIT_ACTION_REQUIRED
+
     update_milestone(args.video_id, "assets", "product_images_done")
 
     if failed == 0:
@@ -1495,6 +1516,34 @@ def cmd_generate_images(args) -> int:
     failed = result.get("failed", 0)
 
     if not args.dry_run:
+        # --- Image approval gate ---
+        from tools.lib.telegram_image_approval import request_image_approval, ImageEntry
+        from tools.lib.dzine_schema import variants_for_rank
+
+        MIN_ASSET_SIZE_GEN = 80 * 1024
+        image_entries = []
+        for rank in [5, 4, 3, 2, 1]:
+            p = next((pr for pr in products if pr.rank == rank), None)
+            name = p.name if p else f"Product {rank}"
+            for variant in variants_for_rank(rank):
+                img_path = paths.product_image_path(rank, variant)
+                if img_path.is_file() and img_path.stat().st_size >= MIN_ASSET_SIZE_GEN:
+                    image_entries.append(ImageEntry(
+                        label=f"{rank:02d}_{variant}",
+                        path=img_path,
+                        product_name=name,
+                        variant=variant,
+                    ))
+
+        if image_entries:
+            approval = request_image_approval(image_entries, video_id=args.video_id)
+            if approval.rejected:
+                print(f"\nRejected: {', '.join(approval.rejected)}")
+                notify_action_required(args.video_id, "generate-images",
+                    f"{len(approval.rejected)} image(s) rejected",
+                    next_action="Analyze failures and regenerate")
+                return EXIT_ACTION_REQUIRED
+
         update_milestone(args.video_id, "assets", "product_images_done")
 
         if failed == 0:
