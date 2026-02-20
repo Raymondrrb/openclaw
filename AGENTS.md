@@ -2,7 +2,7 @@
 
 ## Workspace Boundary (Critical)
 
-- This folder is no longer the canonical workspace.
+- This folder is the canonical workspace.
 - Canonical workspace for RayViewsLab: `/Users/ray/Documents/openclaw`
 - Canonical GitHub remote: `rayviewslab` (`https://github.com/Raymondrrb/rayviewslab.git`)
 - If this folder is opened by mistake, stop and switch to `/Users/ray/Documents/openclaw`.

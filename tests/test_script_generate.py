@@ -548,7 +548,9 @@ class TestRunScriptPipeline(unittest.TestCase):
         # No script_final.txt when refinement skipped
         self.assertFalse((self.output_dir / "script_final.txt").is_file())
 
-    def test_missing_openai_key(self):
+    @patch("tools.lib.script_generate._try_browser_draft",
+           return_value=ScriptGenResult(success=False, error="no browser in test"))
+    def test_missing_openai_key(self, _mock_browser):
         with patch.dict("os.environ", {}, clear=True):
             result = run_script_pipeline(
                 "Write a draft",

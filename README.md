@@ -1,360 +1,145 @@
-# RayViewsLab Channel Ops
+# New Project (RayViewsLab Ops Workspace)
 
-Automated YouTube "Top 5" product review video pipeline. From trend scanning to published video.
+This workspace contains the `market_scout` agent runtime contract, policy docs, and local safety/quality tooling.
 
-Workspace boundary: this repo is the source of truth for channel automation.
-If you also use `/Users/ray/Documents/openclaw`, see `/Users/ray/Documents/Rayviews/WORKSPACE_BOUNDARY.md`.
+## Main area
 
-## Pipeline Overview
+- `agents/market_scout/AGENTS.md`
+- `agents/market_scout/skill_graph/`
+- `agents/market_scout/scripts/`
 
-```
-init-run (category selection)
-    |
-discover-products (Amazon scraping)
-    |
-generate-script (AI agents)
-    |
-[GATE 1] -- human approval (script + product list)
-    |
-generate-assets (Dzine image prompts)
-    |
-generate-voice (ElevenLabs voiceover)
-    |
-build-davinci (DaVinci timeline manifest)
-    |
-validate-originality (anti-inauthentic contract)
-    |
-validate-compliance (FTC/Amazon contract)
-    |
-[GATE 2] -- human approval (visuals + audio)
-    |
-render-and-upload (DaVinci render + YouTube)
-    |
-collect-metrics (24h performance)
-    |
-plan-variations (format variation engine, optional)
-    |
-convert-to-rayvault (RayVault conversion, optional)
-```
+## Quality checks
 
-## Project Structure
-
-```
-.
-├── agents/          # AI agent configs, workflows, team roles
-├── api/             # Vercel serverless endpoints (control plane)
-│   ├── health.js
-│   └── ops/         # heartbeat, summary, runs, gate, go
-├── config/          # Category configs, trend queries, env examples
-├── pipeline_runs/   # Canonical run artifacts (file-driven pipeline)
-├── content/         # Legacy generated outputs (gitignored)
-├── data/            # CSV templates
-├── ops/             # Ops state files, runbooks, legacy n8n exports
-├── reports/         # Generated trend/market/analysis reports
-├── supabase/        # SQL migrations (001-005)
-├── tests/           # Auth + sync tests
-└── tools/           # Python & shell automation scripts
-    └── lib/         # Shared utilities
-```
-
-## Setup
-
-### Prerequisites
-
-- Python 3.11+ (3.12 recommended)
-- Node.js 18+ (for Vercel functions)
-- ffmpeg / ffprobe (for asset processing and voiceover QC)
-- DaVinci Resolve Studio (for video editing automation)
-- beautifulsoup4 (Amazon scraping)
-- playwright (lazy fallback for headless browsing)
-- google-api-python-client (YouTube Data API v3)
-
-### Install Python dependencies (macOS / Linux)
+Run from repo root:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install --upgrade pip
-python3 -m pip install -r requirements.txt
+bash agents/market_scout/scripts/preflight_checks.sh "gate1 review for top5 pipeline" --with-tests
 ```
 
-### Install Python dependencies (Windows PowerShell)
+## CI
 
-```powershell
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
+GitHub Actions workflow:
 
-If `python` opens Microsoft Store, disable App execution aliases for `python.exe` / `python3.exe` in Windows Settings and use `py -3.11`.
+- `.github/workflows/market_scout_checks.yml`
 
-### Environment variables
+It runs compile checks + skill graph preflight + Python unit tests.
 
-Copy the example files and fill in your credentials:
+## Mission Control (visual dashboard)
+
+Run a local visual panel to see OpenClaw agents, heartbeat state, channels, and recent activity:
 
 ```bash
-cp config/supabase.env.example ~/.config/newproject/supabase.env
-cp config/youtube.env.example ~/.config/newproject/youtube.env
+python3 tools/mission_control.py
 ```
 
-Required env vars for Vercel deployment:
+Then open:
 
-| Variable                    | Purpose                              |
-| --------------------------- | ------------------------------------ |
-| `SUPABASE_URL`              | Supabase project URL                 |
-| `SUPABASE_SERVICE_ROLE_KEY` | Service role key (never publishable) |
-| `CRON_SECRET`               | Heartbeat cron authentication        |
-| `OPS_READ_SECRET`           | Read access (summary/runs)           |
-| `OPS_GATE_SECRET`           | Gate approval decisions              |
-| `OPS_GO_SECRET`             | Final render/upload trigger          |
+```text
+http://127.0.0.1:8788
+```
 
-Optional env vars for Telegram notifications:
+What it shows:
 
-| Variable                            | Purpose                                                             |
-| ----------------------------------- | ------------------------------------------------------------------- |
-| `TELEGRAM_CHAT_ID`                  | Telegram target chat/user/channel                                   |
-| `OPENCLAW_TELEGRAM_ACCOUNT`         | OpenClaw Telegram account id (default `tg_main`)                    |
-| `TELEGRAM_USE_MINIMAX`              | Set `1` to rewrite alert messages with MiniMax before sending       |
-| `MINIMAX_API_KEY`                   | MiniMax API key (also read from `~/.config/newproject/minimax.env`) |
-| `MINIMAX_MODEL`                     | Optional model override (default `MiniMax-M2.5`)                    |
-| `TELEGRAM_MINIMAX_TEMPLATE_DEFAULT` | Optional default rewrite system prompt                              |
-| `TELEGRAM_MINIMAX_TEMPLATE_GATE`    | Optional rewrite template for gate notifications                    |
-| `TELEGRAM_MINIMAX_TEMPLATE_FAILURE` | Optional rewrite template for failure alerts                        |
-| `TELEGRAM_MINIMAX_TEMPLATE_SUMMARY` | Optional rewrite template for summaries                             |
-| `TELEGRAM_REWRITE_LOG_PATH`         | Optional JSONL log file path for raw/rewritten Telegram messages    |
-| `TELEGRAM_LOG_MESSAGES`             | Set `1` to force logging even without MiniMax rewrite               |
+- Office grid with one card per agent (`active`, `scheduled`, `idle`, `cold`, `error`)
+- Gateway/channel health KPIs
+- Recent session activity feed (model, token usage, recency)
+- Last Supabase sync snapshot if `tmp/supabase_sync.out.log` exists
+- Pipeline control board (manual stages): gateway start/restart/stop/probe, graph lint, skill scan, ops tier, injection guard, preflight, tests
+- Firecrawl stages (search/scrape) from the same board when `FIRECRAWL_API_KEY` is configured
+- Job history with output/error log paths under `tmp/mission_control_jobs/`
 
-### Supabase setup
+## Firecrawl adapter (optional)
 
-Apply migrations in order:
+Set key:
 
 ```bash
-# In Supabase SQL Editor:
-supabase/sql/001_ops_core.sql
-supabase/sql/002_ops_hardening.sql
-supabase/sql/003_ops_video_runs.sql
-supabase/sql/004_ops_video_runs_locking.sql
-supabase/sql/005_ops_step_locks.sql
+export FIRECRAWL_API_KEY=...
 ```
 
-## Usage
-
-### Daily workflow (canonical: `tools/pipeline.py`)
+Quick examples:
 
 ```bash
-# 1) Start run (or let run-e2e create one)
-python3 tools/pipeline.py init-run \
-  --category "portable_monitors" \
-  --affiliate-tag "rayviews-20" \
-  --tracking-id-override "rayviews-video001-20"
-
-# 2) Build Gate 1 package (discovery + script). This stops for approval.
-python3 tools/pipeline.py run-e2e --run-id "portable_monitors_2026-02-16_1254"
-
-# 3) Human decision for Gate 1
-python3 tools/pipeline.py approve-gate1 --run-id "portable_monitors_2026-02-16_1254" --reviewer "Ray" --notes "GO"
-# (or reject)
-# python3 tools/pipeline.py reject-gate1 --run-id "portable_monitors_2026-02-16_1254" --reviewer "Ray" --notes "Rewrite hook"
-
-# 4) Build Gate 2 package (assets + voice + davinci plan). Stops again.
-python3 tools/pipeline.py run-e2e --run-id "portable_monitors_2026-02-16_1254"
-
-# Optional manual checks (already included in run-e2e gate2 package):
-python3 tools/pipeline.py validate-originality --run-id "portable_monitors_2026-02-16_1254"
-python3 tools/pipeline.py validate-compliance --run-id "portable_monitors_2026-02-16_1254"
-
-# 5) Human decision for Gate 2
-python3 tools/pipeline.py approve-gate2 --run-id "portable_monitors_2026-02-16_1254" --reviewer "Ray" --notes "GO"
-
-# 6) Render + Upload (requires YouTube OAuth client secrets)
-python3 tools/pipeline.py render-and-upload \
-  --run-id "portable_monitors_2026-02-16_1254" \
-  --youtube-client-secrets "/ABS/path/client_secret.json" \
-  --tracking-id-override "rayviews-video001-20" \
-  --privacy-status private
+python3 agents/market_scout/scripts/firecrawl_adapter.py search --query "best portable monitors reviews" --json
+python3 agents/market_scout/scripts/firecrawl_adapter.py scrape --url "https://www.amazon.com" --allow-domain amazon.com --json
 ```
 
-### Telegram-first approvals (low-noise mode)
+Safety defaults:
 
-Use this when you want approvals from Telegram at each critical checkpoint:
+- blocks localhost/private IP scrape targets
+- enforces `http/https` only
+- supports allowlist via `--allow-domain`
 
-- niche/category
-- product shortlist
-- generated assets (image samples)
-- gate1 and gate2
+## Deep Amazon product intelligence (OpenClaw Browser)
+
+For better scripts and visual planning, collect product-page evidence (features + review signals + image refs) directly from Amazon page UI via OpenClaw Browser:
 
 ```bash
-python3 tools/pipeline.py run-e2e \
-  --category "portable_monitors" \
-  --telegram-approvals \
-  --telegram-stages "niche,products,assets,gate1,gate2" \
-  --telegram-assets-per-product 1 \
-  --telegram-timeout-sec 1800 \
-  --telegram-reviewer "Ray"
+python3 agents/market_scout/scripts/amazon_product_intel.py \
+  --category "portable monitors" \
+  --products-json tmp/top5_products.json \
+  --out-dir tmp/amazon_intel \
+  --download-image-count 3 \
+  --browser-profiles "openclaw-test" \
+  --json
 ```
 
-This mode is intentionally low-noise:
-
-- no periodic heartbeat messages
-- only approval prompts + hard failures
-- owner agent is included in each approval message (market_scout, researcher, dzine_producer, reviewer, quality_gate)
-
-### OpenClaw stability guardrails (important)
-
-When the Mac gets slow, the usual cause is an OpenClaw process storm (many orphaned `openclaw` processes).
+or with direct URLs:
 
 ```bash
-# 1) Inspect (dry-run)
-tools/openclaw_recover.sh
-
-# 2) Recover orphans + restart managed browser service
-tools/openclaw_recover.sh --apply --restart-browser
+python3 agents/market_scout/scripts/amazon_product_intel.py \
+  --category "portable monitors" \
+  --product-url "https://www.amazon.com/dp/B0AAAAAA01" \
+  --product-url "https://www.amazon.com/dp/B0AAAAAA02" \
+  --product-url "https://www.amazon.com/dp/B0AAAAAA03" \
+  --product-url "https://www.amazon.com/dp/B0AAAAAA04" \
+  --product-url "https://www.amazon.com/dp/B0AAAAAA05" \
+  --out-dir tmp/amazon_intel \
+  --download-image-count 3 \
+  --json
 ```
 
-Additional protections already in place:
+What this produces:
 
-- `tools/chatgpt_ui.py` now serializes `openclaw browser` commands with a lock file.
-- ChatGPT response wait now uses one `wait` call (with fallback), instead of high-frequency command polling.
-- OpenClaw browser command calls include hard timeout protection.
+- `tmp/amazon_intel/<run_id>/amazon_product_intel.json` (full extraction contract)
+- `tmp/amazon_intel/<run_id>/script_input_compact.json` (token-efficient script brief)
+- `tmp/amazon_intel/<run_id>/product_text/<ASIN>.txt` (human-readable per-product brief)
+- `tmp/amazon_intel/<run_id>/assets/ref/*` (multiple downloaded image refs per product)
+- `agents/market_scout/memory/amazon_intel/<YYYY-MM-DD>/*.md` (Obsidian-ready notes)
+- `agents/market_scout/memory/amazon_intel/learning_loop.jsonl` (structured learning loop)
 
-If you use Claude Code on this repo, enforce:
+Affiliate link behavior:
 
-- never run parallel loops that call `openclaw browser evaluate/tabs/status` every 1s.
-- prefer one `wait` command with explicit timeout for UI readiness and output completion.
-- before large runs, check process pressure and run `tools/openclaw_recover.sh` if needed.
+- For each product, collector tries SiteStripe `Get Link` and stores `affiliate.sitestripe_short_url` (`amzn.to/...`).
+- Default is strict: product fails if short link is missing.
+- To debug without blocking, pass `--allow-missing-sitestripe-shortlink`.
 
-### Telegram smoke test (control plane + optional MiniMax)
+Behavior defaults:
+
+- Cleans stale Amazon tabs before run (to reduce browser instability)
+- Scrolls each product page to reach review areas before extraction
+- Captures buyer sentiment (positive + critical) and evidence snippets
+- Closes Amazon tab after each product (use `--keep-product-tabs` only for debugging)
+- If Amazon shows robot check/captcha, run once with `--wait-on-robot-check-sec 90`, solve manually in the opened page, then extraction resumes
+
+In Mission Control, run the stage `Amazon Product Intel` to execute the same flow from the dashboard.
+
+## Narration script chain (ChatGPT UI -> Claude review -> specialist review)
+
+Use the compact intel pack to create spoken narration text via your logged-in ChatGPT browser session:
 
 ```bash
-python3 tools/test_telegram_path.py --kind gate
-python3 tools/test_telegram_path.py --kind summary
-python3 tools/test_telegram_path.py --media "/ABS/path/image1.png" --media "/ABS/path/image2.png"
-python3 tools/test_telegram_path.py --dry-run
+python3 tools/narration_script_pipeline.py \
+  --compact-json tmp/amazon_intel/<run_id>/script_input_compact.json \
+  --run-dir tmp/script_pipeline \
+  --duration-minutes 10 \
+  --json
 ```
 
-### Legacy flow
+Outputs include:
 
-`tools/top5_video_pipeline.py` re-exports shared symbols from `tools/video_pipeline_lib.py` and retains gate/state/writer logic.
-`tools/pipeline_orchestrator.py` is a deprecated wrapper.
-All new automation should target `tools/pipeline.py`.
+- `00_chatgpt_prompt.txt` (exact prompt used in browser)
+- `01_chatgpt_draft_narration.md` (spoken script draft)
+- `02_claude_review_prompt.txt` (prompt to review/refine in Claude)
+- `03_specialist_review_contract.json` (agent checklist for final script QA)
 
-### Run artifacts
-
-Each run produces a structured directory under `pipeline_runs/<run_id>/`:
-
-```
-run.json                    # Run state and metadata
-products.json               # Discovered products (contract schema)
-products.csv                # Tabular export for review
-discovery_receipt.json      # Discovery attempts (rate-limit/ban/fallback audit)
-script.json                 # Structured script (segments)
-security/input_guard_report.json # External input scan report for script generation
-assets_manifest.json        # Image asset inventory
-voice/timestamps.json       # Voice timing manifest
-davinci/project.json        # DaVinci timeline plan
-ops_tier_report.json        # Operational tier decision (normal/low_compute/critical/paused)
-receipts/*.json             # Per-step receipts (inputs_hash, outputs_hash, timings, host/tools)
-logs/*.jsonl                # Structured step logs
-run_summary.json            # Aggregated run status
-upload/youtube_url.txt      # Published video URL
-metrics/metrics.json        # Performance snapshot
-```
-
-### Trend scanning
-
-```bash
-# Single query
-python3 tools/youtube_trends.py --query "portable monitor review" --out reports/trends/portable_monitors.json
-
-# Batch (all configured queries)
-python3 tools/youtube_trends_batch.py
-
-# Generate market pulse from trends
-python3 tools/market_pulse_from_trends.py
-```
-
-### Ops management
-
-```bash
-# Propose a new mission
-python3 tools/ops_loop.py propose --title "Open-ear earbuds Top 5" --category "audio"
-
-# List missions
-python3 tools/ops_loop.py list
-
-# Sync to Supabase
-python3 tools/supabase_sync_ops.py
-```
-
-### Distributed execution (Mac ↔ Windows)
-
-See `/Users/ray/Documents/Rayviews/README_CLUSTER.md` for Tailscale setup, worker startup, controller health checks, and remote job submission.
-
-## API Endpoints (Vercel)
-
-| Endpoint             | Method   | Auth              | Purpose                |
-| -------------------- | -------- | ----------------- | ---------------------- |
-| `/api/health`        | GET      | None              | Health check           |
-| `/api/ops/heartbeat` | GET/POST | `CRON_SECRET`     | Daily heartbeat        |
-| `/api/ops/summary`   | GET      | `OPS_READ_SECRET` | Table counts           |
-| `/api/ops/runs`      | GET      | `OPS_READ_SECRET` | Video run status       |
-| `/api/ops/gate`      | POST     | `OPS_GATE_SECRET` | Approve/reject gates   |
-| `/api/ops/go`        | POST     | `OPS_GO_SECRET`   | Advance pipeline state |
-
-## Tests
-
-```bash
-# API auth tests
-node --test tests/control_plane_auth.test.js
-
-# Supabase sync validation
-python3 -m pytest tests/test_supabase_sync_ops.py
-```
-
-## Quality Gates
-
-All videos pass through two mandatory human approval gates before any paid resources (voiceover, rendering) are consumed:
-
-- **Gate 1**: Product selection, pricing accuracy, script review, claim verification
-- **Gate 2**: Visual assets, voiceover quality, storyboard approval
-
-### Automatic contracts before Gate 1
-
-- `generate-script` now writes `security/input_guard_report.json`
-  - scans untrusted product fields for injection-like patterns.
-  - `critical` blocks script generation and Gate 1 approval.
-  - `high` sets Gate 1 to WARN mode; approval requires `--notes "#override-warn ..."`.
-
-### Automatic contracts before Gate 2
-
-- `validate-originality` writes `originality_report.json`
-  - checks script uniqueness score, template phrase repetition, evidence segments per product, opinion density.
-- `validate-compliance` writes `compliance_report.json`
-  - enforces disclosure contract (intro + description + pinned comment),
-  - validates affiliate link clarity (blocks external shorteners, allows first-party `amzn.to`),
-  - patches manifest with compliance block when available.
-- `ops_tier_report.json` is recomputed before Gate 2 / render
-  - derives runtime tier from budget + failure pressure.
-  - `critical` / `paused` blocks expensive steps (assets, voice, DaVinci, render/upload).
-- `render_inputs` contract is now part of Gate 2 auto-check
-  - requires `voice/voiceover.mp3`,
-  - requires all required Dzine image variants from `assets_manifest.json`,
-  - requires `davinci/render_ready.flag`.
-
-Gate 2 approval is blocked if any automatic contract is `FAIL`.
-If a contract is `WARN`, approval requires `--notes "#override-warn ..."` to acknowledge risk.
-
-### Format moat (editorial differentiation)
-
-`variation_plan.json` now rotates an `editorial_format` dimension to avoid generic repeated structure:
-
-- `classic_top5`
-- `buy_skip_upgrade`
-- `persona_top3`
-- `one_winner_two_alts`
-- `budget_vs_premium`
-
-Policy is configurable in `/Users/ray/Documents/Rayviews/policies/format_variation_policy.json`.
-
-See `ops/QUALITY_FIRST_RUNBOOK.md` for the full runbook.
+This keeps script generation strictly on ChatGPT browser UI (no API generation), then passes through layered review.
