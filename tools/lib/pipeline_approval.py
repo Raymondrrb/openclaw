@@ -133,8 +133,8 @@ def _send_approval_message(
 
     keyboard = {
         "inline_keyboard": [[
-            {"text": "Approve", "callback_data": approve_data},
-            {"text": "Reject", "callback_data": reject_data},
+            {"text": "✅ Aprovar", "callback_data": approve_data},
+            {"text": "❌ Rejeitar", "callback_data": reject_data},
         ]],
     }
 
@@ -214,10 +214,10 @@ def _poll_for_response(
             cq_id = cb.get("id", "")
 
             if data == approve_data:
-                _answer_callback(cq_id, "Approved!")
+                _answer_callback(cq_id, "Aprovado ✅")
                 return "approve"
             elif data == reject_data:
-                _answer_callback(cq_id, "Rejected")
+                _answer_callback(cq_id, "Rejeitado ❌")
                 return "reject"
 
     return None  # timeout
@@ -268,11 +268,16 @@ def request_approval(
     normalized_summary = _normalize_summary(gate_name, summary)
     normalized_details = _normalize_details(gate_name, details)
 
-    header = f"[Rayviews Lab] Gate {gate_name}: {normalized_summary}"
+    header = f"🧭 RayViewsLab Approval\nGate: {gate_name.upper()}\nResumo: {normalized_summary}"
     if video_id:
-        header = f"[Rayviews Lab] Gate {gate_name}: {normalized_summary}\n\nVideo: {video_id}"
+        header = (
+            "🧭 RayViewsLab Approval\n"
+            f"Gate: {gate_name.upper()}\n"
+            f"Run: {video_id}\n"
+            f"Resumo: {normalized_summary}"
+        )
 
-    body = "\n".join(normalized_details)
+    body = "\n".join(f"• {line}" for line in normalized_details)
 
     text = f"{header}\n\n{body}"
 
@@ -304,15 +309,15 @@ def request_approval(
         result = _poll_for_response(msg_id, approve_data, reject_data, last_update_id, timeout_s)
 
         if result == "approve":
-            _edit_message_text(msg_id, f"{text}\n\n--- APPROVED ---")
+            _edit_message_text(msg_id, f"{text}\n\n✅ DECISÃO: APROVADO")
             print(f"  {gate_name}: APPROVED")
             return True
         elif result == "reject":
-            _edit_message_text(msg_id, f"{text}\n\n--- REJECTED ---")
+            _edit_message_text(msg_id, f"{text}\n\n❌ DECISÃO: REJEITADO")
             print(f"  {gate_name}: REJECTED")
             return False
         else:
-            _edit_message_text(msg_id, f"{text}\n\n--- TIMED OUT ---")
+            _edit_message_text(msg_id, f"{text}\n\n⏰ DECISÃO: TEMPO ESGOTADO")
             print(f"  {gate_name}: TIMED OUT")
             return False
     finally:

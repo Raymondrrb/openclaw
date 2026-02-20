@@ -267,8 +267,8 @@ class TestSendApprovalButtons(unittest.TestCase):
         payload = mock_api.call_args[0][1]
         self.assertEqual(payload["chat_id"], "999")
         kb = payload["reply_markup"]["inline_keyboard"]
-        self.assertEqual(kb[0][0]["text"], "Approve All")
-        self.assertEqual(kb[0][1]["text"], "Reject")
+        self.assertEqual(kb[0][0]["text"], "✅ Aprovar tudo")
+        self.assertEqual(kb[0][1]["text"], "❌ Rejeitar")
 
     @patch("tools.lib.telegram_image_approval._chat_id", return_value="")
     def test_no_chat_id(self, _):
@@ -521,7 +521,7 @@ class TestTimeout(unittest.TestCase):
         self.assertFalse(result.all_approved)
         self.assertEqual(len(result.rejected), 2)
         edit_text = mock_edit.call_args[0][1]
-        self.assertIn("TIMED OUT", edit_text)
+        self.assertIn("TEMPO ESGOTADO", edit_text)
 
 
 # ---------------------------------------------------------------------------
@@ -597,7 +597,7 @@ class TestPollForCallback(unittest.TestCase):
         }
         result, offset = _poll_for_callback(50, "ia:images:abc:approve", "ia:images:abc:reject", 99, 10)
         self.assertEqual(result, "approve")
-        mock_answer.assert_called_once_with("cq1", "All approved!")
+        mock_answer.assert_called_once_with("cq1", "Tudo aprovado ✅")
 
     @patch("tools.lib.telegram_image_approval._answer_callback")
     @patch("tools.lib.telegram_image_approval._api_call")
@@ -615,7 +615,7 @@ class TestPollForCallback(unittest.TestCase):
         }
         result, offset = _poll_for_callback(50, "ia:images:abc:approve", "ia:images:abc:reject", 99, 10)
         self.assertEqual(result, "reject")
-        mock_answer.assert_called_once_with("cq2", "Send labels to reject")
+        mock_answer.assert_called_once_with("cq2", "Envie os labels para rejeitar")
 
     @patch("tools.lib.telegram_image_approval.time")
     @patch("tools.lib.telegram_image_approval._api_call")
@@ -661,7 +661,7 @@ class TestPollForCallback(unittest.TestCase):
         mock_api.side_effect = api_side_effect
         result, offset = _poll_for_callback(50, "ia:images:abc:approve", "ia:images:abc:reject", 99, 30)
         self.assertEqual(result, "approve")
-        mock_answer.assert_called_once_with("cq_ours", "All approved!")
+        mock_answer.assert_called_once_with("cq_ours", "Tudo aprovado ✅")
 
 
 # ---------------------------------------------------------------------------

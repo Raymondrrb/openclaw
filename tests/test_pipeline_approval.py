@@ -149,9 +149,9 @@ class TestSendApprovalMessage(unittest.TestCase):
         kb = payload["reply_markup"]["inline_keyboard"]
         self.assertEqual(len(kb), 1)
         self.assertEqual(len(kb[0]), 2)
-        self.assertEqual(kb[0][0]["text"], "Approve")
+        self.assertEqual(kb[0][0]["text"], "✅ Aprovar")
         self.assertEqual(kb[0][0]["callback_data"], "pa:t:abc:approve")
-        self.assertEqual(kb[0][1]["text"], "Reject")
+        self.assertEqual(kb[0][1]["text"], "❌ Rejeitar")
 
     @patch("tools.lib.pipeline_approval._chat_id", return_value="999")
     @patch("tools.lib.pipeline_approval._api_call", return_value=None)
@@ -184,7 +184,7 @@ class TestPollForResponse(unittest.TestCase):
         }
         result = _poll_for_response(50, "pa:test:abc:approve", "pa:test:abc:reject", 99, 10)
         self.assertEqual(result, "approve")
-        mock_answer.assert_called_once_with("cq1", "Approved!")
+        mock_answer.assert_called_once_with("cq1", "Aprovado ✅")
 
     @patch("tools.lib.pipeline_approval._answer_callback")
     @patch("tools.lib.pipeline_approval._api_call")
@@ -202,7 +202,7 @@ class TestPollForResponse(unittest.TestCase):
         }
         result = _poll_for_response(50, "pa:test:abc:approve", "pa:test:abc:reject", 99, 10)
         self.assertEqual(result, "reject")
-        mock_answer.assert_called_once_with("cq2", "Rejected")
+        mock_answer.assert_called_once_with("cq2", "Rejeitado ❌")
 
     @patch("tools.lib.pipeline_approval.time")
     @patch("tools.lib.pipeline_approval._api_call")
@@ -253,7 +253,7 @@ class TestPollForResponse(unittest.TestCase):
         result = _poll_for_response(50, "pa:test:abc:approve", "pa:test:abc:reject", 99, 30)
         self.assertEqual(result, "approve")
         # Only the correct callback should be answered
-        mock_answer.assert_called_once_with("cq_ours", "Approved!")
+        mock_answer.assert_called_once_with("cq_ours", "Aprovado ✅")
 
     @patch("tools.lib.pipeline_approval.time")
     @patch("tools.lib.pipeline_approval._answer_callback")
@@ -343,7 +343,7 @@ class TestRequestApprovalIntegration(unittest.TestCase):
         # Edit with APPROVED
         mock_edit.assert_called_once()
         edit_text = mock_edit.call_args[0][1]
-        self.assertIn("APPROVED", edit_text)
+        self.assertIn("APROVADO", edit_text)
 
     @patch("tools.lib.pipeline_approval._edit_message_text")
     @patch("tools.lib.pipeline_approval._poll_for_response", return_value="reject")
@@ -358,7 +358,7 @@ class TestRequestApprovalIntegration(unittest.TestCase):
         )
         self.assertFalse(result)
         edit_text = mock_edit.call_args[0][1]
-        self.assertIn("REJECTED", edit_text)
+        self.assertIn("REJEITADO", edit_text)
 
     @patch("tools.lib.pipeline_approval._edit_message_text")
     @patch("tools.lib.pipeline_approval._poll_for_response", return_value=None)
@@ -373,7 +373,7 @@ class TestRequestApprovalIntegration(unittest.TestCase):
         )
         self.assertFalse(result)
         edit_text = mock_edit.call_args[0][1]
-        self.assertIn("TIMED OUT", edit_text)
+        self.assertIn("TEMPO ESGOTADO", edit_text)
 
     @patch("tools.lib.pipeline_approval._send_approval_message", return_value=None)
     @patch("tools.lib.pipeline_approval._flush_updates", return_value=None)
@@ -398,9 +398,9 @@ class TestRequestApprovalIntegration(unittest.TestCase):
         """Works without video_id."""
         result = request_approval("test", "summary", ["detail"])
         self.assertTrue(result)
-        # Verify the message text doesn't contain "Video:"
+        # Verify the message text doesn't contain "Run:"
         send_text = mock_send.call_args[0][0]
-        self.assertNotIn("Video:", send_text)
+        self.assertNotIn("Run:", send_text)
 
     @patch("tools.lib.pipeline_approval._edit_message_text")
     @patch("tools.lib.pipeline_approval._poll_for_response", return_value="approve")
@@ -413,7 +413,7 @@ class TestRequestApprovalIntegration(unittest.TestCase):
         result = request_approval("test", "summary", ["detail"], video_id="v001")
         self.assertTrue(result)
         send_text = mock_send.call_args[0][0]
-        self.assertIn("Video: v001", send_text)
+        self.assertIn("Run: v001", send_text)
 
 
 class TestCallbackDataFormat(unittest.TestCase):

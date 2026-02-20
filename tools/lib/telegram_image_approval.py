@@ -280,8 +280,8 @@ def _send_approval_buttons(text: str, approve_data: str, reject_data: str) -> in
 
     keyboard = {
         "inline_keyboard": [[
-            {"text": "Approve All", "callback_data": approve_data},
-            {"text": "Reject", "callback_data": reject_data},
+            {"text": "✅ Aprovar tudo", "callback_data": approve_data},
+            {"text": "❌ Rejeitar", "callback_data": reject_data},
         ]],
     }
 
@@ -358,10 +358,10 @@ def _poll_for_callback(
             cq_id = cb.get("id", "")
 
             if data == approve_data:
-                _answer_callback(cq_id, "All approved!")
+                _answer_callback(cq_id, "Tudo aprovado ✅")
                 return "approve", poll_offset
             elif data == reject_data:
-                _answer_callback(cq_id, "Send labels to reject")
+                _answer_callback(cq_id, "Envie os labels para rejeitar")
                 return "reject", poll_offset
 
     return None, poll_offset
@@ -524,13 +524,13 @@ def request_image_approval(
         return _auto_approve()
 
     # Build summary
-    header = "[Rayviews Lab] Image Approval"
+    header = "🖼️ RayViewsLab — Aprovação de Imagens"
     if video_id:
-        header += f"\nVideo: {video_id}"
+        header += f"\nRun: {video_id}"
 
-    lines = [f"  {img.label} — {img.product_name} ({img.variant})" for img in images]
-    summary = f"{header}\n\n{len(images)} image(s):\n" + "\n".join(lines)
-    summary += "\n\nReply labels to reject, or tap a button:"
+    lines = [f"• {img.label} — {img.product_name} ({img.variant})" for img in images]
+    summary = f"{header}\n\nTotal: {len(images)} imagem(ns)\n" + "\n".join(lines)
+    summary += "\n\nToque um botão ou envie labels para rejeitar."
 
     # Callback data
     uid = str(uuid.uuid4())[:8]
@@ -575,7 +575,7 @@ def request_image_approval(
             # Ask for specific labels
             _edit_message_text(
                 msg_id,
-                f"{summary}\n\n--- REJECTING ---\nSend labels to reject (e.g. 01_hero 04_detail) or 'all':",
+                f"{summary}\n\n--- REJEIÇÃO ---\nEnvie labels para rejeitar (ex: 01_hero 04_detail) ou 'all':",
             )
 
             # Poll for text reply (60s for label entry)
@@ -596,14 +596,14 @@ def request_image_approval(
             approved = [lbl for lbl in all_labels if lbl not in rejected]
             result_obj = ImageApprovalResult(approved=approved, rejected=rejected)
 
-            status = f"{len(rejected)} REJECTED: {', '.join(rejected)}"
+            status = f"{len(rejected)} REJEITADAS: {', '.join(rejected)}"
             _edit_message_text(msg_id, f"{summary}\n\n--- {status} ---")
             print(f"  Images: {status}")
             return result_obj
 
         else:
             # Timeout
-            _edit_message_text(msg_id, f"{summary}\n\n--- TIMED OUT (all rejected) ---")
+            _edit_message_text(msg_id, f"{summary}\n\n--- TEMPO ESGOTADO (todas rejeitadas) ---")
             print(f"  Images: TIMED OUT — all rejected")
             return _auto_reject()
 
