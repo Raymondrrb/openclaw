@@ -7,6 +7,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -37,7 +38,7 @@ class TestTelegramEnabled(unittest.TestCase):
         class A:
             telegram_approvals = False
 
-        with unittest.mock.patch.dict(os.environ, {"PIPELINE_TELEGRAM_APPROVALS": "1"}, clear=False):
+        with patch.dict(os.environ, {"PIPELINE_TELEGRAM_APPROVALS": "1"}, clear=False):
             self.assertTrue(_telegram_approvals_enabled(A()))
 
 

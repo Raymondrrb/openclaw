@@ -325,13 +325,16 @@ class TestAnswerCallback(unittest.TestCase):
 class TestRequestApprovalIntegration(unittest.TestCase):
     """Full flow mocked end-to-end."""
 
+    @patch("tools.lib.pipeline_approval._restore_webhook")
+    @patch("tools.lib.pipeline_approval._drop_webhook", return_value="")
+    @patch("tools.lib.pipeline_approval.time")
     @patch("tools.lib.pipeline_approval._edit_message_text")
     @patch("tools.lib.pipeline_approval._poll_for_response", return_value="approve")
     @patch("tools.lib.pipeline_approval._send_approval_message", return_value=42)
     @patch("tools.lib.pipeline_approval._flush_updates", return_value=100)
     @patch("tools.lib.pipeline_approval._is_configured", return_value=True)
     @patch.dict(os.environ, {"PIPELINE_NO_APPROVAL": ""})
-    def test_full_approve(self, mock_cfg, mock_flush, mock_send, mock_poll, mock_edit):
+    def test_full_approve(self, mock_cfg, mock_flush, mock_send, mock_poll, mock_edit, mock_time, mock_drop, mock_restore):
         result = request_approval(
             "products", "Top 5 for 'speakers'", ["#1 Speaker A"],
             video_id="v001",
@@ -345,13 +348,16 @@ class TestRequestApprovalIntegration(unittest.TestCase):
         edit_text = mock_edit.call_args[0][1]
         self.assertIn("APROVADO", edit_text)
 
+    @patch("tools.lib.pipeline_approval._restore_webhook")
+    @patch("tools.lib.pipeline_approval._drop_webhook", return_value="")
+    @patch("tools.lib.pipeline_approval.time")
     @patch("tools.lib.pipeline_approval._edit_message_text")
     @patch("tools.lib.pipeline_approval._poll_for_response", return_value="reject")
     @patch("tools.lib.pipeline_approval._send_approval_message", return_value=42)
     @patch("tools.lib.pipeline_approval._flush_updates", return_value=100)
     @patch("tools.lib.pipeline_approval._is_configured", return_value=True)
     @patch.dict(os.environ, {"PIPELINE_NO_APPROVAL": ""})
-    def test_full_reject(self, mock_cfg, mock_flush, mock_send, mock_poll, mock_edit):
+    def test_full_reject(self, mock_cfg, mock_flush, mock_send, mock_poll, mock_edit, mock_time, mock_drop, mock_restore):
         result = request_approval(
             "products", "Top 5 for 'speakers'", ["#1 Speaker A"],
             video_id="v001",
@@ -360,13 +366,16 @@ class TestRequestApprovalIntegration(unittest.TestCase):
         edit_text = mock_edit.call_args[0][1]
         self.assertIn("REJEITADO", edit_text)
 
+    @patch("tools.lib.pipeline_approval._restore_webhook")
+    @patch("tools.lib.pipeline_approval._drop_webhook", return_value="")
+    @patch("tools.lib.pipeline_approval.time")
     @patch("tools.lib.pipeline_approval._edit_message_text")
     @patch("tools.lib.pipeline_approval._poll_for_response", return_value=None)
     @patch("tools.lib.pipeline_approval._send_approval_message", return_value=42)
     @patch("tools.lib.pipeline_approval._flush_updates", return_value=100)
     @patch("tools.lib.pipeline_approval._is_configured", return_value=True)
     @patch.dict(os.environ, {"PIPELINE_NO_APPROVAL": ""})
-    def test_full_timeout(self, mock_cfg, mock_flush, mock_send, mock_poll, mock_edit):
+    def test_full_timeout(self, mock_cfg, mock_flush, mock_send, mock_poll, mock_edit, mock_time, mock_drop, mock_restore):
         result = request_approval(
             "products", "Top 5 for 'speakers'", ["#1 Speaker A"],
             video_id="v001", timeout_s=1,
@@ -375,11 +384,14 @@ class TestRequestApprovalIntegration(unittest.TestCase):
         edit_text = mock_edit.call_args[0][1]
         self.assertIn("TEMPO ESGOTADO", edit_text)
 
+    @patch("tools.lib.pipeline_approval._restore_webhook")
+    @patch("tools.lib.pipeline_approval._drop_webhook", return_value="")
+    @patch("tools.lib.pipeline_approval.time")
     @patch("tools.lib.pipeline_approval._send_approval_message", return_value=None)
     @patch("tools.lib.pipeline_approval._flush_updates", return_value=None)
     @patch("tools.lib.pipeline_approval._is_configured", return_value=True)
     @patch.dict(os.environ, {"PIPELINE_NO_APPROVAL": ""})
-    def test_send_failure_auto_approves(self, mock_cfg, mock_flush, mock_send):
+    def test_send_failure_auto_approves(self, mock_cfg, mock_flush, mock_send, mock_time, mock_drop, mock_restore):
         result = request_approval("products", "Top 5", ["detail"])
         self.assertTrue(result)
 
@@ -388,13 +400,16 @@ class TestRequestApprovalIntegration(unittest.TestCase):
         result = request_approval("test", "summary", "single detail line", skip=True)
         self.assertTrue(result)
 
+    @patch("tools.lib.pipeline_approval._restore_webhook")
+    @patch("tools.lib.pipeline_approval._drop_webhook", return_value="")
+    @patch("tools.lib.pipeline_approval.time")
     @patch("tools.lib.pipeline_approval._edit_message_text")
     @patch("tools.lib.pipeline_approval._poll_for_response", return_value="approve")
     @patch("tools.lib.pipeline_approval._send_approval_message", return_value=42)
     @patch("tools.lib.pipeline_approval._flush_updates", return_value=None)
     @patch("tools.lib.pipeline_approval._is_configured", return_value=True)
     @patch.dict(os.environ, {"PIPELINE_NO_APPROVAL": ""})
-    def test_no_video_id(self, mock_cfg, mock_flush, mock_send, mock_poll, mock_edit):
+    def test_no_video_id(self, mock_cfg, mock_flush, mock_send, mock_poll, mock_edit, mock_time, mock_drop, mock_restore):
         """Works without video_id."""
         result = request_approval("test", "summary", ["detail"])
         self.assertTrue(result)
@@ -402,13 +417,16 @@ class TestRequestApprovalIntegration(unittest.TestCase):
         send_text = mock_send.call_args[0][0]
         self.assertNotIn("Run:", send_text)
 
+    @patch("tools.lib.pipeline_approval._restore_webhook")
+    @patch("tools.lib.pipeline_approval._drop_webhook", return_value="")
+    @patch("tools.lib.pipeline_approval.time")
     @patch("tools.lib.pipeline_approval._edit_message_text")
     @patch("tools.lib.pipeline_approval._poll_for_response", return_value="approve")
     @patch("tools.lib.pipeline_approval._send_approval_message", return_value=42)
     @patch("tools.lib.pipeline_approval._flush_updates", return_value=None)
     @patch("tools.lib.pipeline_approval._is_configured", return_value=True)
     @patch.dict(os.environ, {"PIPELINE_NO_APPROVAL": ""})
-    def test_with_video_id(self, mock_cfg, mock_flush, mock_send, mock_poll, mock_edit):
+    def test_with_video_id(self, mock_cfg, mock_flush, mock_send, mock_poll, mock_edit, mock_time, mock_drop, mock_restore):
         """Video ID is included in message header."""
         result = request_approval("test", "summary", ["detail"], video_id="v001")
         self.assertTrue(result)
@@ -419,13 +437,16 @@ class TestRequestApprovalIntegration(unittest.TestCase):
 class TestCallbackDataFormat(unittest.TestCase):
     """Verify callback data prefix doesn't conflict with circuit breaker."""
 
+    @patch("tools.lib.pipeline_approval._restore_webhook")
+    @patch("tools.lib.pipeline_approval._drop_webhook", return_value="")
+    @patch("tools.lib.pipeline_approval.time")
     @patch("tools.lib.pipeline_approval._edit_message_text")
     @patch("tools.lib.pipeline_approval._poll_for_response", return_value="approve")
     @patch("tools.lib.pipeline_approval._send_approval_message", return_value=42)
     @patch("tools.lib.pipeline_approval._flush_updates", return_value=None)
     @patch("tools.lib.pipeline_approval._is_configured", return_value=True)
     @patch.dict(os.environ, {"PIPELINE_NO_APPROVAL": ""})
-    def test_callback_data_uses_pa_prefix(self, mock_cfg, mock_flush, mock_send, mock_poll, mock_edit):
+    def test_callback_data_uses_pa_prefix(self, mock_cfg, mock_flush, mock_send, mock_poll, mock_edit, mock_time, mock_drop, mock_restore):
         request_approval("products", "summary", ["detail"])
         approve_data = mock_send.call_args[0][1]
         reject_data = mock_send.call_args[0][2]
