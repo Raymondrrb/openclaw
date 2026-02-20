@@ -66,6 +66,17 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_ACTION_REQUIRED = 2
 
+TELEGRAM_APPROVAL_STAGE_OWNERS = {
+    "niche": "market_scout",
+    "products": "researcher",
+    "assets": "dzine_producer",
+    "gate1": "reviewer",
+    "gate2": "quality_gate",
+    "render": "publisher",
+}
+DEFAULT_TELEGRAM_APPROVAL_STAGES = ("niche", "products", "assets", "gate1", "gate2")
+TELEGRAM_STAGE_APPROVALS = ("niche", "products", "assets")
+
 STEP_CONTRACTS: Dict[str, Dict[str, Any]] = {
     "init-run": {
         "inputs": [],
@@ -1242,6 +1253,171 @@ def set_gate_decision(
     save_run_config(run_dir, run_config)
 
 
+def _is_truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_csv_list(raw: str) -> List[str]:
+    items = []
+    for token in str(raw or "").split(","):
+        v = token.strip().lower()
+        if v:
+            items.append(v)
+    return items
+
+
+def _parse_telegram_stages(raw: str) -> List[str]:
+    stages: List[str] = []
+    seen = set()
+    for stage in _parse_csv_list(raw):
+        if stage in DEFAULT_TELEGRAM_APPROVAL_STAGES and stage not in seen:
+            stages.append(stage)
+            seen.add(stage)
+    return stages
+
+
+def _telegram_approvals_enabled(args: argparse.Namespace) -> bool:
+    if bool(getattr(args, "telegram_approvals", False)):
+        return True
+    return _is_truthy(os.environ.get("PIPELINE_TELEGRAM_APPROVALS", ""))
+
+
+def _ensure_telegram_stage_approvals(run_config: Dict[str, Any]) -> bool:
+    changed = False
+    approvals = run_config.get("stage_approvals")
+    if not isinstance(approvals, dict):
+        approvals = {}
+        changed = True
+    normalized: Dict[str, Dict[str, str]] = {}
+    for stage in TELEGRAM_STAGE_APPROVALS:
+        row = approvals.get(stage)
+        state = {
+            "status": "pending",
+            "reviewer": "",
+            "notes": "",
+            "decided_at": "",
+        }
+        if isinstance(row, dict):
+            status = str(row.get("status", "pending")).strip().lower()
+            state["status"] = status if status in {"pending", "approved", "rejected"} else "pending"
+            state["reviewer"] = str(row.get("reviewer", "")).strip()
+            state["notes"] = str(row.get("notes", "")).strip()
+            state["decided_at"] = str(row.get("decided_at", "")).strip()
+        normalized[stage] = state
+        if row != state:
+            changed = True
+    run_config["stage_approvals"] = normalized
+    return changed
+
+
+def _set_stage_approval(
+    run_dir: Path,
+    run_config: Dict[str, Any],
+    stage: str,
+    approved: bool,
+    reviewer: str,
+    notes: str,
+) -> None:
+    _ensure_telegram_stage_approvals(run_config)
+    approvals = run_config.get("stage_approvals", {})
+    approvals[stage] = {
+        "status": "approved" if approved else "rejected",
+        "reviewer": reviewer.strip(),
+        "notes": notes.strip(),
+        "decided_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    run_config["stage_approvals"] = approvals
+    run_config["status"] = f"{stage}_{'approved' if approved else 'rejected'}"
+    save_run_config(run_dir, run_config)
+
+
+def _assert_telegram_approval_env() -> None:
+    missing = [k for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not str(os.environ.get(k, "")).strip()]
+    if missing:
+        raise RuntimeError(
+            "Telegram approvals require env vars: "
+            + ", ".join(missing)
+            + ". Set them in /Users/ray/Documents/openclaw/.env or ~/.config/newproject/*.env"
+        )
+
+
+def _request_text_approval(
+    *,
+    run_id: str,
+    gate_name: str,
+    summary: str,
+    details: List[str],
+    timeout_s: int,
+) -> bool:
+    from lib.pipeline_approval import request_approval
+
+    owner = TELEGRAM_APPROVAL_STAGE_OWNERS.get(gate_name, "operator")
+    lines = [f"Owner agent: {owner}"] + [str(x) for x in details if str(x).strip()]
+    return bool(
+        request_approval(
+            gate_name=gate_name,
+            summary=summary,
+            details=lines,
+            video_id=run_id,
+            timeout_s=timeout_s,
+            skip=False,
+        )
+    )
+
+
+def _request_assets_approval(
+    *,
+    run_dir: Path,
+    run_id: str,
+    max_per_product: int,
+    timeout_s: int,
+) -> Tuple[bool, Dict[str, Any]]:
+    from lib.telegram_image_approval import ImageEntry, request_image_approval
+
+    max_per_product = max(1, int(max_per_product))
+    manifest_path = run_dir / "assets_manifest.json"
+    if not manifest_path.exists():
+        raise RuntimeError("assets_manifest.json missing; run generate-assets first")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    images: List[Any] = []
+
+    for row in manifest.get("assets", []):
+        rank = int(row.get("product_rank", 0) or 0)
+        title = str(row.get("title", f"product_{rank}"))
+        files = row.get("files", {}) if isinstance(row.get("files"), dict) else {}
+        dzine_images = files.get("dzine_images", []) if isinstance(files.get("dzine_images"), list) else []
+        for idx, rel in enumerate(dzine_images[:max_per_product], start=1):
+            p = (run_dir / str(rel)).resolve()
+            if not p.exists():
+                continue
+            label = f"p{rank:02d}_v{idx:02d}"
+            images.append(
+                ImageEntry(
+                    label=label,
+                    path=p,
+                    product_name=title,
+                    variant="dzine",
+                )
+            )
+
+    if not images:
+        raise RuntimeError("No Dzine images found for Telegram asset approval")
+
+    result = request_image_approval(images, video_id=run_id, timeout_s=timeout_s, skip=False)
+    report = {
+        "run_id": run_id,
+        "requested": len(images),
+        "approved": list(result.approved),
+        "rejected": list(result.rejected),
+        "all_approved": bool(result.all_approved),
+        "max_per_product": max_per_product,
+        "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    atomic_write_json(run_dir / "security" / "telegram_assets_review.json", report)
+    return bool(result.all_approved), report
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1564,6 +1740,11 @@ def cmd_init_run(args):
         "quality_gates": {
             "gate1": _default_gate_state(),
             "gate2": _default_gate_state(),
+        },
+        "stage_approvals": {
+            "niche": _default_gate_state(),
+            "products": _default_gate_state(),
+            "assets": _default_gate_state(),
         },
         "steps_completed": [],
         "artifact_checksums": {},
@@ -4472,8 +4653,56 @@ def cmd_run_e2e(args):
         ("validate-originality", cmd_validate_originality),
         ("validate-compliance", cmd_validate_compliance),
     ]
+    telegram_enabled = _telegram_approvals_enabled(args)
+    telegram_stages = _parse_telegram_stages(getattr(args, "telegram_stages", ""))
+    if not telegram_stages:
+        telegram_stages = list(DEFAULT_TELEGRAM_APPROVAL_STAGES)
+    telegram_timeout_s = max(60, int(getattr(args, "telegram_timeout_sec", 1800)))
+    telegram_reviewer = str(getattr(args, "telegram_reviewer", "Ray") or "Ray").strip() or "Ray"
+    telegram_assets_per_product = max(1, int(getattr(args, "telegram_assets_per_product", 1)))
 
     with RunLock(run_dir):
+        if telegram_enabled:
+            _assert_telegram_approval_env()
+            cfg = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            if _ensure_telegram_stage_approvals(cfg):
+                save_run_config(run_dir, cfg)
+
+            if "niche" in telegram_stages:
+                niche_state = cfg.get("stage_approvals", {}).get("niche", {})
+                if niche_state.get("status") == "rejected":
+                    print("[BLOCKED] Niche approval is rejected. Re-run init-run with another category or force approval.")
+                    return
+                if niche_state.get("status") != "approved":
+                    niche_ok = _request_text_approval(
+                        run_id=run_id,
+                        gate_name="niche",
+                        summary=f"Niche proposal: {cfg.get('category', run_id)}",
+                        details=[
+                            f"Target duration: {cfg.get('config', {}).get('target_duration_minutes', '?')} min",
+                            f"Owner: {TELEGRAM_APPROVAL_STAGE_OWNERS['niche']}",
+                            "Approve to continue product discovery.",
+                        ],
+                        timeout_s=telegram_timeout_s,
+                    )
+                    cfg = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+                    _set_stage_approval(
+                        run_dir=run_dir,
+                        run_config=cfg,
+                        stage="niche",
+                        approved=niche_ok,
+                        reviewer=telegram_reviewer,
+                        notes="telegram_inline",
+                    )
+                    log_ops_event(
+                        run_id,
+                        "stage_approval_decision",
+                        {"stage": "niche", "decision": "approved" if niche_ok else "rejected", "reviewer": telegram_reviewer},
+                    )
+                    if not niche_ok:
+                        print("[STOP] Niche rejected on Telegram.")
+                        return
+
         for name, fn in gate1_package_steps:
             print(f"\n{'='*60}")
             print(f"STEP: {name}")
@@ -4486,6 +4715,47 @@ def cmd_run_e2e(args):
                 print(f"\nPipeline stopped at {name}. Fix and re-run from this step:")
                 print(f"  python3 tools/pipeline.py {name} --run-id {run_id}")
                 sys.exit(1)
+
+            if telegram_enabled and name == "discover-products" and "products" in telegram_stages:
+                cfg = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+                prod_state = cfg.get("stage_approvals", {}).get("products", {})
+                if prod_state.get("status") == "rejected":
+                    print("[BLOCKED] Products approval is rejected. Re-run discover-products --force.")
+                    return
+                if prod_state.get("status") != "approved":
+                    products_path = run_dir / "products.json"
+                    details: List[str] = [f"Owner: {TELEGRAM_APPROVAL_STAGE_OWNERS['products']}"]
+                    if products_path.exists():
+                        pdata = json.loads(products_path.read_text(encoding="utf-8"))
+                        for row in (pdata.get("products", []) if isinstance(pdata, dict) else [])[:5]:
+                            details.append(
+                                f"#{row.get('rank','?')} {str(row.get('title',''))[:52]} | ${row.get('price','?')} | "
+                                f"{row.get('rating','?')}★ ({row.get('reviews','?')})"
+                            )
+                    products_ok = _request_text_approval(
+                        run_id=run_id,
+                        gate_name="products",
+                        summary="Top 5 shortlist ready",
+                        details=details,
+                        timeout_s=telegram_timeout_s,
+                    )
+                    cfg = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+                    _set_stage_approval(
+                        run_dir=run_dir,
+                        run_config=cfg,
+                        stage="products",
+                        approved=products_ok,
+                        reviewer=telegram_reviewer,
+                        notes="telegram_inline",
+                    )
+                    log_ops_event(
+                        run_id,
+                        "stage_approval_decision",
+                        {"stage": "products", "decision": "approved" if products_ok else "rejected", "reviewer": telegram_reviewer},
+                    )
+                    if not products_ok:
+                        print("[STOP] Product shortlist rejected on Telegram.")
+                        return
 
         # Gate 1 is mandatory.
         run_config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
@@ -4516,13 +4786,51 @@ def cmd_run_e2e(args):
                 "WARN is telemetry-only (approval allowed). Review security/input_guard_report.json."
             )
         if gates["gate1"]["status"] != "approved":
-            print(f"\n{'='*60}")
-            print("WAITING FOR GATE 1 APPROVAL")
-            print(f"{'='*60}")
-            print(f"Run: {run_id}")
-            print(f"Approve: python3 tools/pipeline.py approve-gate1 --run-id {run_id} --reviewer Ray --notes \"GO\"")
-            print(f"Reject : python3 tools/pipeline.py reject-gate1 --run-id {run_id} --reviewer Ray --notes \"Needs rewrite\"")
-            return
+            if telegram_enabled and "gate1" in telegram_stages:
+                script_path = run_dir / "script.json"
+                details = [
+                    f"Owner: {TELEGRAM_APPROVAL_STAGE_OWNERS['gate1']}",
+                    f"Input guard: {gate1_checks.get('input_guard', {}).get('status', 'unknown')}",
+                ]
+                if script_path.exists():
+                    try:
+                        sdata = json.loads(script_path.read_text(encoding="utf-8"))
+                        details.append(f"Target duration: {sdata.get('target_duration_minutes', '?')} min")
+                        details.append(f"Segments: {len(sdata.get('structure', []) or [])}")
+                    except Exception:
+                        pass
+                gate1_ok = _request_text_approval(
+                    run_id=run_id,
+                    gate_name="gate1",
+                    summary="Gate 1 review: products + script",
+                    details=details,
+                    timeout_s=telegram_timeout_s,
+                )
+                run_config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+                set_gate_decision(
+                    run_dir=run_dir,
+                    run_config=run_config,
+                    gate_name="gate1",
+                    decision="approved" if gate1_ok else "rejected",
+                    reviewer=telegram_reviewer,
+                    notes="telegram_inline",
+                )
+                log_ops_event(
+                    run_id,
+                    "quality_gate_decision",
+                    {"gate": "gate1", "decision": "approved" if gate1_ok else "rejected", "reviewer": telegram_reviewer, "notes": "telegram_inline"},
+                )
+                if not gate1_ok:
+                    print("[STOP] Gate 1 rejected on Telegram.")
+                    return
+            else:
+                print(f"\n{'='*60}")
+                print("WAITING FOR GATE 1 APPROVAL")
+                print(f"{'='*60}")
+                print(f"Run: {run_id}")
+                print(f"Approve: python3 tools/pipeline.py approve-gate1 --run-id {run_id} --reviewer Ray --notes \"GO\"")
+                print(f"Reject : python3 tools/pipeline.py reject-gate1 --run-id {run_id} --reviewer Ray --notes \"Needs rewrite\"")
+                return
 
         for name, fn in gate2_package_steps:
             print(f"\n{'='*60}")
@@ -4536,6 +4844,47 @@ def cmd_run_e2e(args):
                 print(f"\nPipeline stopped at {name}. Fix and re-run from this step:")
                 print(f"  python3 tools/pipeline.py {name} --run-id {run_id}")
                 sys.exit(1)
+
+            if telegram_enabled and name == "generate-assets" and "assets" in telegram_stages:
+                cfg = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+                asset_state = cfg.get("stage_approvals", {}).get("assets", {})
+                if asset_state.get("status") == "rejected":
+                    print("[BLOCKED] Asset approval is rejected. Re-run generate-assets --force.")
+                    return
+                if asset_state.get("status") != "approved":
+                    assets_ok, assets_report = _request_assets_approval(
+                        run_dir=run_dir,
+                        run_id=run_id,
+                        max_per_product=telegram_assets_per_product,
+                        timeout_s=telegram_timeout_s,
+                    )
+                    cfg = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+                    notes = (
+                        f"telegram_inline approved={assets_report.get('approved', [])[:4]} "
+                        f"rejected={assets_report.get('rejected', [])[:4]}"
+                    )
+                    _set_stage_approval(
+                        run_dir=run_dir,
+                        run_config=cfg,
+                        stage="assets",
+                        approved=assets_ok,
+                        reviewer=telegram_reviewer,
+                        notes=notes,
+                    )
+                    log_ops_event(
+                        run_id,
+                        "stage_approval_decision",
+                        {
+                            "stage": "assets",
+                            "decision": "approved" if assets_ok else "rejected",
+                            "reviewer": telegram_reviewer,
+                            "requested": assets_report.get("requested", 0),
+                            "rejected": assets_report.get("rejected", []),
+                        },
+                    )
+                    if not assets_ok:
+                        print("[STOP] Asset images rejected on Telegram. Regenerate assets and re-run.")
+                        return
 
         run_config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         _ops_tier_report(run_dir, run_config, persist=True)
@@ -4561,13 +4910,45 @@ def cmd_run_e2e(args):
         if changed:
             save_run_config(run_dir, run_config)
         if gates["gate2"]["status"] != "approved":
-            print(f"\n{'='*60}")
-            print("WAITING FOR GATE 2 APPROVAL")
-            print(f"{'='*60}")
-            print(f"Run: {run_id}")
-            print(f"Approve: python3 tools/pipeline.py approve-gate2 --run-id {run_id} --reviewer Ray --notes \"GO\"")
-            print(f"Reject : python3 tools/pipeline.py reject-gate2 --run-id {run_id} --reviewer Ray --notes \"Regenerate assets\"")
-            return
+            if telegram_enabled and "gate2" in telegram_stages:
+                details = [
+                    f"Owner: {TELEGRAM_APPROVAL_STAGE_OWNERS['gate2']}",
+                    f"Originality: {auto_checks.get('originality', {}).get('status', 'unknown')}",
+                    f"Compliance: {auto_checks.get('compliance', {}).get('status', 'unknown')}",
+                    f"Render inputs: {auto_checks.get('render_inputs', {}).get('status', 'unknown')}",
+                ]
+                gate2_ok = _request_text_approval(
+                    run_id=run_id,
+                    gate_name="gate2",
+                    summary="Gate 2 review: assets + voice + compliance",
+                    details=details,
+                    timeout_s=telegram_timeout_s,
+                )
+                run_config = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+                set_gate_decision(
+                    run_dir=run_dir,
+                    run_config=run_config,
+                    gate_name="gate2",
+                    decision="approved" if gate2_ok else "rejected",
+                    reviewer=telegram_reviewer,
+                    notes="telegram_inline",
+                )
+                log_ops_event(
+                    run_id,
+                    "quality_gate_decision",
+                    {"gate": "gate2", "decision": "approved" if gate2_ok else "rejected", "reviewer": telegram_reviewer, "notes": "telegram_inline"},
+                )
+                if not gate2_ok:
+                    print("[STOP] Gate 2 rejected on Telegram.")
+                    return
+            else:
+                print(f"\n{'='*60}")
+                print("WAITING FOR GATE 2 APPROVAL")
+                print(f"{'='*60}")
+                print(f"Run: {run_id}")
+                print(f"Approve: python3 tools/pipeline.py approve-gate2 --run-id {run_id} --reviewer Ray --notes \"GO\"")
+                print(f"Reject : python3 tools/pipeline.py reject-gate2 --run-id {run_id} --reviewer Ray --notes \"Regenerate assets\"")
+                return
 
         if not str(getattr(args, "youtube_client_secrets", "") or "").strip():
             print(f"\n{'='*60}")
@@ -4762,6 +5143,33 @@ def build_parser() -> argparse.ArgumentParser:
     # run-e2e
     p = sub.add_parser("run-e2e", help="Run full pipeline end-to-end")
     add_all_config(p)
+    p.add_argument(
+        "--telegram-approvals",
+        action="store_true",
+        help="Enable blocking Telegram approvals inside run-e2e (niche/products/assets/gates).",
+    )
+    p.add_argument(
+        "--telegram-stages",
+        default="niche,products,assets,gate1,gate2",
+        help="Comma-separated approval stages when --telegram-approvals is enabled.",
+    )
+    p.add_argument(
+        "--telegram-timeout-sec",
+        type=int,
+        default=1800,
+        help="Timeout in seconds for each Telegram approval prompt.",
+    )
+    p.add_argument(
+        "--telegram-assets-per-product",
+        type=int,
+        default=1,
+        help="How many Dzine image variants per product to send for Telegram asset approval.",
+    )
+    p.add_argument(
+        "--telegram-reviewer",
+        default="Ray",
+        help="Reviewer name stored when Telegram approvals decide a stage/gate.",
+    )
     p.add_argument("--youtube-client-secrets", default="", help="Optional: if set and gate2 approved, upload runs automatically")
     p.add_argument("--youtube-token-file", default="", help="Optional cached token for YouTube upload")
     p.add_argument("--video-file", default="", help="Optional override for rendered video path")

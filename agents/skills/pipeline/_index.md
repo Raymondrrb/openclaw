@@ -18,6 +18,7 @@ How the RayviewsLab video production pipeline works.
 
 - [[openclaw-stability-guardrails]] — Prevent and recover OpenClaw process storms on Mac.
 - [[claude-code-execution-contract]] — Prompt contract to keep Claude Code within safe execution patterns.
+- [[telegram-approval-matrix]] — Low-noise Telegram approvals by stage owner (niche/products/assets/gates).
 
 ## Key Architecture
 

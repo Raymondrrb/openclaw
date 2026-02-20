@@ -175,6 +175,31 @@ python3 tools/pipeline.py render-and-upload \
   --privacy-status private
 ```
 
+### Telegram-first approvals (low-noise mode)
+
+Use this when you want approvals from Telegram at each critical checkpoint:
+
+- niche/category
+- product shortlist
+- generated assets (image samples)
+- gate1 and gate2
+
+```bash
+python3 tools/pipeline.py run-e2e \
+  --category "portable_monitors" \
+  --telegram-approvals \
+  --telegram-stages "niche,products,assets,gate1,gate2" \
+  --telegram-assets-per-product 1 \
+  --telegram-timeout-sec 1800 \
+  --telegram-reviewer "Ray"
+```
+
+This mode is intentionally low-noise:
+
+- no periodic heartbeat messages
+- only approval prompts + hard failures
+- owner agent is included in each approval message (market_scout, researcher, dzine_producer, reviewer, quality_gate)
+
 ### OpenClaw stability guardrails (important)
 
 When the Mac gets slow, the usual cause is an OpenClaw process storm (many orphaned `openclaw` processes).
