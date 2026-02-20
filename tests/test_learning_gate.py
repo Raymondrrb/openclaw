@@ -66,7 +66,7 @@ class TestStageAgentMap(unittest.TestCase):
 
     def test_all_stages_mapped(self):
         expected = {"research", "script", "script-brief", "script-review",
-                    "assets", "tts", "manifest", "day"}
+                    "assets", "tts", "manifest", "render", "publish", "day"}
         self.assertEqual(set(STAGE_AGENT_MAP.keys()), expected)
 
     def test_known_mappings(self):

@@ -50,6 +50,8 @@ STAGE_AGENT_MAP = {
     "assets": "dzine_producer",
     "tts": "publisher",
     "manifest": "davinci_editor",
+    "render": "davinci_editor",
+    "publish": "publisher",
     "day": "market_scout",
 }
 

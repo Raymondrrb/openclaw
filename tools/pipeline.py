@@ -751,6 +751,7 @@ def _run_with_contract(command_name: str, args: argparse.Namespace, fn) -> None:
         },
     )
     try:
+        _show_learning_brief(run_id, command_name)
         fn(args)
         if output_files:
             _required_files_exist(run_dir, output_files)
@@ -839,6 +840,9 @@ def _run_with_contract(command_name: str, args: argparse.Namespace, fn) -> None:
             },
         )
         _refresh_run_summary(run_dir)
+        # --- Closed-loop learning: log error + create learning event ---
+        _log_error(run_id, command_name, str(exc))
+        _create_learning_event_from_failure(run_id, command_name, exc)
         raise
     finally:
         hb_stop.set()
@@ -1758,6 +1762,14 @@ def cmd_init_run(args):
     log.info(f"Folder: {run_dir}")
 
     log_ops_event(run_id, "run_init", {"category": category})
+
+    # Initialize learning system agent state (idempotent)
+    try:
+        from tools.learning_apply import init_all_agents
+        init_all_agents()
+    except Exception:
+        pass
+
     print(f"[OK] Run initialized: {run_id}")
     print(f"     Folder: {run_dir}")
 
@@ -3440,6 +3452,7 @@ def cmd_convert_to_rayvault(args):
 
 def cmd_validate_originality(args):
     run_dir, run_id, _ = load_run(args)
+    _run_learning_gate(run_id, "script-review")
     log = setup_logger(run_dir, "05c_originality")
     report_path = run_dir / "originality_report.json"
 
@@ -3489,6 +3502,7 @@ def cmd_validate_originality(args):
 
 def cmd_validate_compliance(args):
     run_dir, run_id, _ = load_run(args)
+    _run_learning_gate(run_id, "script-review")
     log = setup_logger(run_dir, "05d_compliance")
     report_path = run_dir / "compliance_report.json"
 
@@ -3547,6 +3561,7 @@ def _run_cmd_checked(cmd: List[str], *, cwd: Optional[Path], label: str) -> subp
 
 def cmd_render_and_upload(args):
     run_dir, run_id, run_config = load_run(args)
+    _run_learning_gate(run_id, "manifest")
     log = setup_logger(run_dir, "06_upload")
     upload_dir = run_dir / "upload"
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -4333,6 +4348,68 @@ def _run_learning_gate(video_id: str, stage: str) -> None:
             raise RuntimeError(f"Learning gate blocked: {result.reason}")
     except ImportError:
         pass  # Learning system not installed yet
+
+
+# Step name → learning component + agent mapping
+_STEP_LEARNING_MAP: Dict[str, Tuple[str, str]] = {
+    "discover-products": ("research", "researcher"),
+    "generate-script": ("script", "scriptwriter"),
+    "plan-variations": ("script", "scriptwriter"),
+    "generate-assets": ("assets", "dzine_producer"),
+    "generate-voice": ("tts", "publisher"),
+    "build-davinci": ("manifest", "davinci_editor"),
+    "convert-to-rayvault": ("manifest", "davinci_editor"),
+    "validate-originality": ("script", "reviewer"),
+    "validate-compliance": ("script", "reviewer"),
+    "render-and-upload": ("render", "davinci_editor"),
+    "collect-metrics": ("publish", "publisher"),
+}
+
+
+def _create_learning_event_from_failure(
+    run_id: str, step_name: str, error: str
+) -> None:
+    """Create a learning event from a pipeline step failure (fire-and-forget)."""
+    try:
+        from tools.learning_event import create_event
+        component, agent = _STEP_LEARNING_MAP.get(step_name, (step_name, ""))
+        create_event(
+            run_id=run_id,
+            severity="FAIL",
+            component=component,
+            symptom=str(error)[:200],
+            root_cause=f"Pipeline step '{step_name}' failed",
+            fix_applied="",
+            verification="",
+            video_id=run_id,
+            agent=agent,
+        )
+    except Exception:
+        pass  # Non-blocking
+
+
+def _show_learning_brief(run_id: str, step_name: str) -> None:
+    """Show relevant active memory rules before a step runs."""
+    try:
+        from tools.learning_apply import load_active_memory
+        _, agent = _STEP_LEARNING_MAP.get(step_name, ("", ""))
+        if not agent:
+            return
+        memory = load_active_memory(agent)
+        rules = memory.get("rules", [])
+        if not rules:
+            return
+        # Show only FAIL/BLOCKER rules — these are the critical learnings
+        critical = [r for r in rules if r.get("severity") in ("FAIL", "BLOCKER")]
+        if not critical:
+            return
+        print(f"  [LEARN] {len(critical)} active rule(s) for {agent}:")
+        for r in critical[:3]:
+            print(f"    - {r.get('rule', '?')[:100]}")
+        if len(critical) > 3:
+            print(f"    ... and {len(critical) - 3} more")
+    except Exception:
+        pass  # Non-blocking
 
 
 # ===================================================================

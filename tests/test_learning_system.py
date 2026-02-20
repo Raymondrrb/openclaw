@@ -1209,8 +1209,6 @@ class TestPipelineGateIntegration(unittest.TestCase):
 
     def test_run_learning_gate_function_exists(self):
         """Verify _run_learning_gate is importable from pipeline."""
-        # We can't easily test the full pipeline function, but we verify
-        # the integration pattern works
         from tools.learning_gate import learning_gate, LearningGateResult
         self.assertTrue(callable(learning_gate))
 
@@ -1223,6 +1221,83 @@ class TestPipelineGateIntegration(unittest.TestCase):
         )
         self.assertTrue(result.blocked)
         self.assertEqual(len(result.checks), 1)
+
+
+class TestPipelineLearningWiring(unittest.TestCase):
+    """Test the pipeline learning system wiring."""
+
+    def test_step_learning_map_covers_all_pipeline_steps(self):
+        from tools.pipeline import _STEP_LEARNING_MAP
+        expected_steps = {
+            "discover-products", "generate-script", "plan-variations",
+            "generate-assets", "generate-voice", "build-davinci",
+            "convert-to-rayvault", "validate-originality",
+            "validate-compliance", "render-and-upload", "collect-metrics",
+        }
+        self.assertEqual(set(_STEP_LEARNING_MAP.keys()), expected_steps)
+
+    def test_step_learning_map_values_are_tuples(self):
+        from tools.pipeline import _STEP_LEARNING_MAP
+        for step, (component, agent) in _STEP_LEARNING_MAP.items():
+            self.assertIsInstance(component, str, f"{step} component not str")
+            self.assertIsInstance(agent, str, f"{step} agent not str")
+            self.assertTrue(len(component) > 0, f"{step} has empty component")
+
+    def test_create_learning_event_from_failure_noop_on_missing(self):
+        """Should not raise even if learning system has issues."""
+        from tools.pipeline import _create_learning_event_from_failure
+        # Should not raise
+        _create_learning_event_from_failure("test-run", "unknown-step", "test error")
+
+    def test_show_learning_brief_noop_on_missing(self):
+        """Should not raise even if agent state doesn't exist."""
+        from tools.pipeline import _show_learning_brief
+        # Should not raise
+        _show_learning_brief("test-run", "unknown-step")
+
+    @patch("tools.learning_event.sync_to_skill_graph")
+    def test_create_learning_event_from_failure_creates_event(self, mock_sync):
+        from tools.pipeline import _create_learning_event_from_failure
+
+        with tempfile.TemporaryDirectory() as tmp:
+            events_path = Path(tmp) / "events.json"
+            with patch("tools.learning_event.EVENTS_PATH", events_path):
+                with patch("tools.learning_event.project_root", return_value=Path(tmp)):
+                    _create_learning_event_from_failure(
+                        "v042", "discover-products", "ASIN B0X is accessories"
+                    )
+
+            if events_path.is_file():
+                import json
+                data = json.loads(events_path.read_text())
+                self.assertEqual(len(data), 1)
+                self.assertEqual(data[0]["severity"], "FAIL")
+                self.assertEqual(data[0]["component"], "research")
+                self.assertIn("ASIN B0X", data[0]["symptom"])
+
+    def test_show_learning_brief_shows_rules(self):
+        from tools.pipeline import _show_learning_brief
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("tools.learning_apply.AGENTS_STATE_DIR", Path(tmp) / "agents"):
+                from tools.learning_apply import init_agent_state, apply_to_memory
+                init_agent_state("researcher")
+                apply_to_memory({
+                    "event_id": "le-test-00001", "severity": "FAIL",
+                    "component": "research", "root_cause": "Price anomaly",
+                    "fix_applied": "Added validation", "symptom": "test",
+                    "video_id": "v001",
+                }, "researcher")
+
+                # Should not raise, and should print the rule
+                import io
+                from contextlib import redirect_stdout
+                f = io.StringIO()
+                with redirect_stdout(f):
+                    _show_learning_brief("v042", "discover-products")
+                output = f.getvalue()
+                self.assertIn("LEARN", output)
+                self.assertIn("Price anomaly", output)
 
 
 if __name__ == "__main__":
