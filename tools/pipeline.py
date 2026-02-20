@@ -4295,8 +4295,114 @@ def cmd_research(args):
 
 
 def cmd_script(args):
-    """Placeholder for script command — must be mocked in tests."""
-    return EXIT_ERROR
+    """Generate or validate a video script (text-based, [SECTION] markers).
+
+    With --generate: builds prompts from products.json, sends to LLM APIs
+    (or browser), writes script.txt + narration.txt + avatar.txt + youtube_desc.txt.
+
+    Without --generate: expects script.txt to already exist (manual workflow).
+    """
+    from tools.lib.video_paths import VideoPaths
+    from tools.lib.script_schema import (
+        ProductEntry,
+        ScriptRequest,
+        build_draft_prompt,
+        build_refinement_prompt,
+    )
+
+    video_id = getattr(args, "video_id", "")
+    if not video_id:
+        return EXIT_ERROR
+
+    paths = VideoPaths(video_id)
+    generate = getattr(args, "generate", False)
+    force = getattr(args, "force", False)
+
+    # Already done?
+    if paths.script_txt.is_file() and not force:
+        print(f"[SKIP] script.txt exists for {video_id}")
+        return EXIT_OK
+
+    if not generate:
+        print(f"No script.txt for {video_id}. Use --generate or write manually.")
+        return EXIT_ACTION_REQUIRED
+
+    # Need products.json
+    if not paths.products_json.is_file():
+        print(f"Missing products.json for {video_id}")
+        return EXIT_ERROR
+
+    products_data = json.loads(paths.products_json.read_text(encoding="utf-8"))
+    niche = products_data.get("keyword", "")
+    if not niche and paths.niche_txt.is_file():
+        niche = paths.niche_txt.read_text(encoding="utf-8").strip()
+
+    # Build ProductEntry list from products.json
+    entries = []
+    for p in products_data.get("products", []):
+        entries.append(ProductEntry(
+            rank=p["rank"],
+            name=p["name"],
+            positioning=p.get("positioning", ""),
+            benefits=p.get("benefits", []),
+            target_audience=p.get("target_audience", ""),
+            downside=p.get("downside", ""),
+            amazon_url=p.get("amazon_url", ""),
+            source_evidence=p.get("evidence", []),
+        ))
+
+    charismatic = getattr(args, "charismatic", "reality_check") or "reality_check"
+    req = ScriptRequest(niche=niche, products=entries, charismatic_type=charismatic)
+
+    # Build prompts
+    extraction_notes = "(Use natural authority, cite specific sources, and include honest downsides.)"
+    draft_prompt = build_draft_prompt(req, extraction_notes)
+    refine_prompt_template = build_refinement_prompt("(paste draft here)", charismatic)
+
+    # Run script generation pipeline
+    from tools.lib.script_generate import (
+        run_script_pipeline,
+        extract_metadata,
+        split_script_outputs,
+    )
+
+    output_dir = paths.script_txt.parent
+    use_browser = bool(os.environ.get("OPENCLAW_BROWSER_LLM", ""))
+    result = run_script_pipeline(
+        draft_prompt,
+        refine_prompt_template,
+        output_dir,
+        use_browser=use_browser,
+    )
+
+    if not result.success:
+        for err in result.errors:
+            print(f"  [ERROR] {err}")
+        return EXIT_ERROR
+
+    # Split into narration/avatar/desc
+    script_text = paths.script_txt.read_text(encoding="utf-8")
+    meta_path = output_dir / "script_gen_meta.json"
+    meta = {}
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+    outputs = split_script_outputs(script_text, meta)
+
+    if outputs.get("narration"):
+        paths.narration_txt.parent.mkdir(parents=True, exist_ok=True)
+        paths.narration_txt.write_text(outputs["narration"], encoding="utf-8")
+
+    if outputs.get("avatar"):
+        paths.avatar_txt.parent.mkdir(parents=True, exist_ok=True)
+        paths.avatar_txt.write_text(outputs["avatar"], encoding="utf-8")
+
+    if outputs.get("youtube_description"):
+        paths.youtube_desc_txt.parent.mkdir(parents=True, exist_ok=True)
+        paths.youtube_desc_txt.write_text(outputs["youtube_description"], encoding="utf-8")
+
+    print(f"[OK] Script generated: {result.word_count} words → {paths.script_txt}")
+    return EXIT_OK
 
 
 # ===================================================================

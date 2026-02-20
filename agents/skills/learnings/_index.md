@@ -24,6 +24,337 @@ Every pipeline run records its outcome here. Before starting any generation, the
 - [[2026-02-19-duplicate-title-2]] — Entry 1
 - [[2026-02-19-duplicate-title]] — Entry 0
 - [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-fail-research-test-21]] — cause → fix
+- [[2026-02-19-fail-research-test-20]] — cause → fix
+- [[2026-02-19-fail-research-test-19]] — cause → fix
+- [[2026-02-19-fail-research-test-18]] — cause → fix
+- [[2026-02-19-fail-research-test-17]] — cause → fix
+- [[2026-02-19-fail-research-test-16]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-6]] — No price validation → Added price anomaly check
+- [[2026-02-19-fail-assets-s3-21]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-21]] — c2 → f2
+- [[2026-02-19-fail-research-s1-21]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-20]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-20]] — c2 → f2
+- [[2026-02-19-fail-research-s1-20]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-19]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-19]] — c2 → f2
+- [[2026-02-19-fail-research-s1-19]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-18]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-18]] — c2 → f2
+- [[2026-02-19-fail-research-s1-18]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-17]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-17]] — c2 → f2
+- [[2026-02-19-fail-research-s1-17]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-16]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-16]] — c2 → f2
+- [[2026-02-19-fail-research-s1-16]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-15]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-15]] — c2 → f2
+- [[2026-02-19-fail-research-s1-15]] — c1 → f1
+- [[2026-02-19-warn-tts-audio-clipping-3]] — Volume too high → Reduced volume by 3dB
+- [[2026-02-19-fail-assets-image-hallucination-3]] — Changed reference angle → Reverted to original angle
+- [[2026-02-19-fail-research-test-15]] — cause → fix
+- [[2026-02-19-warn-dzine-phone-ghost-in-bg-remove-3]] — Ref had phone → Used drawbox to blank phone area
+- [[2026-02-19-info-research-symptom-2-3]] — cause → fix
+- [[2026-02-19-info-research-symptom-1-3]] — cause → fix
+- [[2026-02-19-info-research-symptom-0-3]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-5]] — No price validation → Added price anomaly check
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-fail-research-test-14]] — cause → fix
+- [[2026-02-19-fail-research-test-13]] — cause → fix
+- [[2026-02-19-fail-research-test-12]] — cause → fix
+- [[2026-02-19-fail-research-test-11]] — cause → fix
+- [[2026-02-19-fail-research-test-10]] — cause → fix
+- [[2026-02-19-fail-research-test-9]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-4]] — No price validation → Added price anomaly check
+- [[2026-02-19-fail-assets-s3-14]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-14]] — c2 → f2
+- [[2026-02-19-fail-research-s1-14]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-13]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-13]] — c2 → f2
+- [[2026-02-19-fail-research-s1-13]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-12]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-12]] — c2 → f2
+- [[2026-02-19-fail-research-s1-12]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-11]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-11]] — c2 → f2
+- [[2026-02-19-fail-research-s1-11]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-10]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-10]] — c2 → f2
+- [[2026-02-19-fail-research-s1-10]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-9]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-9]] — c2 → f2
+- [[2026-02-19-fail-research-s1-9]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-8]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-8]] — c2 → f2
+- [[2026-02-19-fail-research-s1-8]] — c1 → f1
+- [[2026-02-19-warn-tts-audio-clipping-2]] — Volume too high → Reduced volume by 3dB
+- [[2026-02-19-fail-assets-image-hallucination-2]] — Changed reference angle → Reverted to original angle
+- [[2026-02-19-fail-research-test-8]] — cause → fix
+- [[2026-02-19-warn-dzine-phone-ghost-in-bg-remove-2]] — Ref had phone → Used drawbox to blank phone area
+- [[2026-02-19-info-research-symptom-2-2]] — cause → fix
+- [[2026-02-19-info-research-symptom-1-2]] — cause → fix
+- [[2026-02-19-info-research-symptom-0-2]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-3]] — No price validation → Added price anomaly check
+- [[2026-02-19-script-word-count-targets-differ-between-schema-and-template]] — script_schema.py: 230-280 per product. competitor_informed_script_template: 120-220 per product. Template targets are based on real YouTube analysis and produce better pacing.
+- [[2026-02-19-v038-products-json-copy-pasted-evidence-across-3-products]] — Products #5, #4, #2 had IDENTICAL evidence text. Product #5 had wrong ASIN at $26.59 (accessories). Research scraper extracted from single Wirecutter article without per-product attribution.
+- [[2026-02-19-script-self-critique-iteration-pattern]] — Draft v1 had game-changer hype word, oversized hook (70 vs 30-50 target), undersized retention reset, conclusion too long, missing credibility section. Implemented 3-pass iteration: v1 generate → analyze metrics → v2 fix → v3 polish.
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-fail-research-test-7]] — cause → fix
+- [[2026-02-19-fail-research-test-6]] — cause → fix
+- [[2026-02-19-fail-research-test-5]] — cause → fix
+- [[2026-02-19-fail-research-test-4]] — cause → fix
+- [[2026-02-19-fail-research-test-3]] — cause → fix
+- [[2026-02-19-fail-research-test-2]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-2]] — No price validation → Added price anomaly check
+- [[2026-02-19-fail-assets-s3-7]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-7]] — c2 → f2
+- [[2026-02-19-fail-research-s1-7]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-6]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-6]] — c2 → f2
+- [[2026-02-19-fail-research-s1-6]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-5]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-5]] — c2 → f2
+- [[2026-02-19-fail-research-s1-5]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-4]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-4]] — c2 → f2
+- [[2026-02-19-fail-research-s1-4]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-3]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-3]] — c2 → f2
+- [[2026-02-19-fail-research-s1-3]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-2]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-2]] — c2 → f2
+- [[2026-02-19-fail-research-s1-2]] — c1 → f1
+- [[2026-02-19-fail-assets-s3]] — c3 → f3
+- [[2026-02-19-warn-assets-s2]] — c2 → f2
+- [[2026-02-19-fail-research-s1]] — c1 → f1
+- [[2026-02-19-warn-tts-audio-clipping]] — Volume too high → Reduced volume by 3dB
+- [[2026-02-19-fail-assets-image-hallucination]] — Changed reference angle → Reverted to original angle
+- [[2026-02-19-fail-research-test]] — cause → fix
+- [[2026-02-19-warn-dzine-phone-ghost-in-bg-remove]] — Ref had phone → Used drawbox to blank phone area
+- [[2026-02-19-info-research-symptom-2]] — cause → fix
+- [[2026-02-19-info-research-symptom-1]] — cause → fix
+- [[2026-02-19-info-research-symptom-0]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories]] — No price validation → Added price anomaly check
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-fail-research-test-112]] — cause → fix
+- [[2026-02-19-fail-research-test-111]] — cause → fix
+- [[2026-02-19-fail-research-test-110]] — cause → fix
+- [[2026-02-19-fail-research-test-109]] — cause → fix
+- [[2026-02-19-fail-research-test-108]] — cause → fix
+- [[2026-02-19-fail-research-test-107]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-32]] — No price validation → Added price anomaly check
+- [[2026-02-19-fail-assets-s3-112]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-112]] — c2 → f2
+- [[2026-02-19-fail-research-s1-112]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-111]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-111]] — c2 → f2
+- [[2026-02-19-fail-research-s1-111]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-110]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-110]] — c2 → f2
+- [[2026-02-19-fail-research-s1-110]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-109]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-109]] — c2 → f2
+- [[2026-02-19-fail-research-s1-109]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-108]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-108]] — c2 → f2
+- [[2026-02-19-fail-research-s1-108]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-107]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-107]] — c2 → f2
+- [[2026-02-19-fail-research-s1-107]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-106]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-106]] — c2 → f2
+- [[2026-02-19-fail-research-s1-106]] — c1 → f1
+- [[2026-02-19-warn-tts-audio-clipping-16]] — Volume too high → Reduced volume by 3dB
+- [[2026-02-19-fail-assets-image-hallucination-16]] — Changed reference angle → Reverted to original angle
+- [[2026-02-19-fail-research-test-106]] — cause → fix
+- [[2026-02-19-warn-dzine-phone-ghost-in-bg-remove-16]] — Ref had phone → Used drawbox to blank phone area
+- [[2026-02-19-info-research-symptom-2-16]] — cause → fix
+- [[2026-02-19-info-research-symptom-1-16]] — cause → fix
+- [[2026-02-19-info-research-symptom-0-16]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-31]] — No price validation → Added price anomaly check
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-fail-research-test-105]] — cause → fix
+- [[2026-02-19-fail-research-test-104]] — cause → fix
+- [[2026-02-19-fail-research-test-103]] — cause → fix
+- [[2026-02-19-fail-research-test-102]] — cause → fix
+- [[2026-02-19-fail-research-test-101]] — cause → fix
+- [[2026-02-19-fail-research-test-100]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-30]] — No price validation → Added price anomaly check
+- [[2026-02-19-fail-assets-s3-105]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-105]] — c2 → f2
+- [[2026-02-19-fail-research-s1-105]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-104]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-104]] — c2 → f2
+- [[2026-02-19-fail-research-s1-104]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-103]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-103]] — c2 → f2
+- [[2026-02-19-fail-research-s1-103]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-102]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-102]] — c2 → f2
+- [[2026-02-19-fail-research-s1-102]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-101]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-101]] — c2 → f2
+- [[2026-02-19-fail-research-s1-101]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-100]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-100]] — c2 → f2
+- [[2026-02-19-fail-research-s1-100]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-99]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-99]] — c2 → f2
+- [[2026-02-19-fail-research-s1-99]] — c1 → f1
+- [[2026-02-19-warn-tts-audio-clipping-15]] — Volume too high → Reduced volume by 3dB
+- [[2026-02-19-fail-assets-image-hallucination-15]] — Changed reference angle → Reverted to original angle
+- [[2026-02-19-fail-research-test-99]] — cause → fix
+- [[2026-02-19-warn-dzine-phone-ghost-in-bg-remove-15]] — Ref had phone → Used drawbox to blank phone area
+- [[2026-02-19-info-research-symptom-2-15]] — cause → fix
+- [[2026-02-19-info-research-symptom-1-15]] — cause → fix
+- [[2026-02-19-info-research-symptom-0-15]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-29]] — No price validation → Added price anomaly check
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-fail-research-test-98]] — cause → fix
+- [[2026-02-19-fail-research-test-97]] — cause → fix
+- [[2026-02-19-fail-research-test-96]] — cause → fix
+- [[2026-02-19-fail-research-test-95]] — cause → fix
+- [[2026-02-19-fail-research-test-94]] — cause → fix
+- [[2026-02-19-fail-research-test-93]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-28]] — No price validation → Added price anomaly check
+- [[2026-02-19-fail-assets-s3-98]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-98]] — c2 → f2
+- [[2026-02-19-fail-research-s1-98]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-97]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-97]] — c2 → f2
+- [[2026-02-19-fail-research-s1-97]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-96]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-96]] — c2 → f2
+- [[2026-02-19-fail-research-s1-96]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-95]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-95]] — c2 → f2
+- [[2026-02-19-fail-research-s1-95]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-94]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-94]] — c2 → f2
+- [[2026-02-19-fail-research-s1-94]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-93]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-93]] — c2 → f2
+- [[2026-02-19-fail-research-s1-93]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-92]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-92]] — c2 → f2
+- [[2026-02-19-fail-research-s1-92]] — c1 → f1
+- [[2026-02-19-warn-tts-audio-clipping-14]] — Volume too high → Reduced volume by 3dB
+- [[2026-02-19-fail-assets-image-hallucination-14]] — Changed reference angle → Reverted to original angle
+- [[2026-02-19-fail-research-test-92]] — cause → fix
+- [[2026-02-19-warn-dzine-phone-ghost-in-bg-remove-14]] — Ref had phone → Used drawbox to blank phone area
+- [[2026-02-19-info-research-symptom-2-14]] — cause → fix
+- [[2026-02-19-info-research-symptom-1-14]] — cause → fix
+- [[2026-02-19-info-research-symptom-0-14]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-27]] — No price validation → Added price anomaly check
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-fail-research-test-91]] — cause → fix
+- [[2026-02-19-fail-research-test-90]] — cause → fix
+- [[2026-02-19-fail-research-test-89]] — cause → fix
+- [[2026-02-19-fail-research-test-88]] — cause → fix
+- [[2026-02-19-fail-research-test-87]] — cause → fix
+- [[2026-02-19-fail-research-test-86]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-26]] — No price validation → Added price anomaly check
+- [[2026-02-19-fail-assets-s3-91]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-91]] — c2 → f2
+- [[2026-02-19-fail-research-s1-91]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-90]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-90]] — c2 → f2
+- [[2026-02-19-fail-research-s1-90]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-89]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-89]] — c2 → f2
+- [[2026-02-19-fail-research-s1-89]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-88]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-88]] — c2 → f2
+- [[2026-02-19-fail-research-s1-88]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-87]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-87]] — c2 → f2
+- [[2026-02-19-fail-research-s1-87]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-86]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-86]] — c2 → f2
+- [[2026-02-19-fail-research-s1-86]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-85]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-85]] — c2 → f2
+- [[2026-02-19-fail-research-s1-85]] — c1 → f1
+- [[2026-02-19-warn-tts-audio-clipping-13]] — Volume too high → Reduced volume by 3dB
+- [[2026-02-19-fail-assets-image-hallucination-13]] — Changed reference angle → Reverted to original angle
+- [[2026-02-19-fail-research-test-85]] — cause → fix
+- [[2026-02-19-warn-dzine-phone-ghost-in-bg-remove-13]] — Ref had phone → Used drawbox to blank phone area
+- [[2026-02-19-info-research-symptom-2-13]] — cause → fix
+- [[2026-02-19-info-research-symptom-1-13]] — cause → fix
+- [[2026-02-19-info-research-symptom-0-13]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-25]] — No price validation → Added price anomaly check
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
+- [[2026-02-19-fail-research-test-84]] — cause → fix
+- [[2026-02-19-fail-research-test-83]] — cause → fix
+- [[2026-02-19-fail-research-test-82]] — cause → fix
+- [[2026-02-19-fail-research-test-81]] — cause → fix
+- [[2026-02-19-fail-research-test-80]] — cause → fix
+- [[2026-02-19-fail-research-test-79]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-24]] — No price validation → Added price anomaly check
+- [[2026-02-19-fail-assets-s3-84]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-84]] — c2 → f2
+- [[2026-02-19-fail-research-s1-84]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-83]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-83]] — c2 → f2
+- [[2026-02-19-fail-research-s1-83]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-82]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-82]] — c2 → f2
+- [[2026-02-19-fail-research-s1-82]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-81]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-81]] — c2 → f2
+- [[2026-02-19-fail-research-s1-81]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-80]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-80]] — c2 → f2
+- [[2026-02-19-fail-research-s1-80]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-79]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-79]] — c2 → f2
+- [[2026-02-19-fail-research-s1-79]] — c1 → f1
+- [[2026-02-19-fail-assets-s3-78]] — c3 → f3
+- [[2026-02-19-warn-assets-s2-78]] — c2 → f2
+- [[2026-02-19-fail-research-s1-78]] — c1 → f1
+- [[2026-02-19-warn-tts-audio-clipping-12]] — Volume too high → Reduced volume by 3dB
+- [[2026-02-19-fail-assets-image-hallucination-12]] — Changed reference angle → Reverted to original angle
+- [[2026-02-19-fail-research-test-78]] — cause → fix
+- [[2026-02-19-warn-dzine-phone-ghost-in-bg-remove-12]] — Ref had phone → Used drawbox to blank phone area
+- [[2026-02-19-info-research-symptom-2-12]] — cause → fix
+- [[2026-02-19-info-research-symptom-1-12]] — cause → fix
+- [[2026-02-19-info-research-symptom-0-12]] — cause → fix
+- [[2026-02-19-fail-research-asin-is-accessories-23]] — No price validation → Added price anomaly check
+- [[2026-02-19-pipeline-run-test-summary]] — Run test-summary: 5 generated, avg fidelity 9.5, avg variety 8.0
+- [[2026-02-19-duplicate-title-3]] — Entry 2
+- [[2026-02-19-duplicate-title-2]] — Entry 1
+- [[2026-02-19-duplicate-title]] — Entry 0
+- [[2026-02-19-test-learning]] — This is a test learning entry
 - [[2026-02-19-fail-research-test-77]] — cause → fix
 - [[2026-02-19-fail-research-test-76]] — cause → fix
 - [[2026-02-19-fail-research-test-75]] — cause → fix
