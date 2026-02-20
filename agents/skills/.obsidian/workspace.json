@@ -49,7 +49,7 @@
             "state": {
               "type": "search",
               "state": {
-                "query": "",
+                "query": "tag:#info",
                 "matchingCase": false,
                 "explainSearch": false,
                 "collapseAll": false,
@@ -70,7 +70,8 @@
               "title": "Bookmarks"
             }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "horizontal",
@@ -178,32 +179,32 @@
   },
   "active": "graph-leaf",
   "lastOpenFiles": [
-    "learnings/2026-02-19-fail-research-test-21.md",
-    "learnings/2026-02-19-fail-research-test-20.md",
-    "learnings/2026-02-19-fail-research-test-19.md",
-    "learnings/2026-02-19-fail-research-test-18.md",
-    "learnings/2026-02-19-fail-research-test-17.md",
-    "learnings/2026-02-19-fail-research-test-16.md",
-    "learnings/2026-02-19-fail-research-asin-is-accessories-6.md",
-    "learnings/2026-02-19-fail-assets-s3-21.md",
-    "learnings/2026-02-19-warn-assets-s2-21.md",
-    "learnings/2026-02-19-fail-research-s1-21.md",
-    "learnings/2026-02-19-fail-assets-s3-20.md",
-    "learnings/2026-02-19-warn-assets-s2-20.md",
-    "learnings/2026-02-19-fail-research-s1-20.md",
-    "learnings/2026-02-19-fail-assets-s3-19.md",
-    "learnings/2026-02-19-warn-assets-s2-19.md",
-    "learnings/2026-02-19-fail-research-s1-19.md",
-    "learnings/2026-02-19-fail-assets-s3-18.md",
-    "learnings/2026-02-19-warn-assets-s2-18.md",
-    "learnings/2026-02-19-fail-research-s1-18.md",
-    "learnings/2026-02-19-fail-assets-s3-17.md",
-    "learnings/2026-02-19-warn-assets-s2-17.md",
-    "learnings/2026-02-19-fail-research-s1-17.md",
-    "learnings/2026-02-19-fail-assets-s3-16.md",
-    "learnings/2026-02-19-warn-assets-s2-16.md",
-    "learnings/2026-02-19-fail-research-s1-16.md",
-    "learnings/2026-02-19-fail-assets-s3-15.md",
+    "learnings/2026-02-20-fail-research-test-42.md",
+    "learnings/2026-02-20-fail-research-test-41.md",
+    "learnings/2026-02-20-fail-research-test-40.md",
+    "learnings/2026-02-20-fail-research-test-39.md",
+    "learnings/2026-02-20-fail-research-test-38.md",
+    "learnings/2026-02-20-fail-research-test-37.md",
+    "learnings/2026-02-20-fail-research-asin-is-accessories-12.md",
+    "learnings/2026-02-20-fail-assets-s3-42.md",
+    "learnings/2026-02-20-warn-assets-s2-42.md",
+    "learnings/2026-02-20-fail-research-s1-42.md",
+    "learnings/2026-02-20-fail-assets-s3-41.md",
+    "learnings/2026-02-20-warn-assets-s2-41.md",
+    "learnings/2026-02-20-fail-research-s1-41.md",
+    "learnings/2026-02-20-fail-assets-s3-40.md",
+    "learnings/2026-02-20-warn-assets-s2-40.md",
+    "learnings/2026-02-20-fail-research-s1-40.md",
+    "learnings/2026-02-20-fail-assets-s3-39.md",
+    "learnings/2026-02-20-warn-assets-s2-39.md",
+    "learnings/2026-02-20-fail-research-s1-39.md",
+    "learnings/2026-02-20-fail-assets-s3-38.md",
+    "learnings/2026-02-20-warn-assets-s2-38.md",
+    "learnings/2026-02-20-fail-research-s1-38.md",
+    "learnings/2026-02-20-fail-assets-s3-37.md",
+    "learnings/2026-02-20-warn-assets-s2-37.md",
+    "learnings/2026-02-20-fail-research-s1-37.md",
+    "learnings/2026-02-20-fail-assets-s3-36.md",
     "dzine/failures"
   ]
 }

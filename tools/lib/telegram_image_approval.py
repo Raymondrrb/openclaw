@@ -23,7 +23,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -98,6 +100,85 @@ def _api_call(method: str, payload: dict) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Image resize (Telegram limit: 10 MB for photos)
+# ---------------------------------------------------------------------------
+
+_TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def _resize_for_telegram(path: Path) -> tuple[Path, bool]:
+    """Resize image if too large for Telegram (>10 MB).
+
+    Returns (path_to_use, is_temporary).  Caller must delete temp files.
+    Uses sips (macOS native) first, then ffmpeg as fallback.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return path, False
+
+    if size <= _TELEGRAM_PHOTO_MAX_BYTES:
+        return path, False
+
+    fd, tmp_name = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    out = Path(tmp_name)
+
+    print(
+        f"[image_approval] Resizing {path.name} ({size // (1024 * 1024)}MB) for Telegram...",
+        file=sys.stderr,
+    )
+
+    # Try sips (macOS native, always available)
+    try:
+        subprocess.run(
+            [
+                "sips",
+                "--resampleHeightWidthMax", "2048",
+                "--setProperty", "format", "jpeg",
+                "-s", "formatOptions", "85",
+                str(path), "--out", str(out),
+            ],
+            capture_output=True, timeout=60, check=True,
+        )
+        if out.is_file() and 0 < out.stat().st_size <= _TELEGRAM_PHOTO_MAX_BYTES:
+            print(
+                f"[image_approval] Resized to {out.stat().st_size // 1024}KB (sips)",
+                file=sys.stderr,
+            )
+            return out, True
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    # Fallback: ffmpeg
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(path),
+                "-vf", "scale='min(2048,iw)':'min(2048,ih)':force_original_aspect_ratio=decrease",
+                "-q:v", "5", str(out),
+            ],
+            capture_output=True, timeout=60, check=True,
+        )
+        if out.is_file() and 0 < out.stat().st_size <= _TELEGRAM_PHOTO_MAX_BYTES:
+            print(
+                f"[image_approval] Resized to {out.stat().st_size // 1024}KB (ffmpeg)",
+                file=sys.stderr,
+            )
+            return out, True
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    # Failed — clean up temp and return original
+    out.unlink(missing_ok=True)
+    print(
+        f"[image_approval] Resize failed — sending original ({size // (1024 * 1024)}MB)",
+        file=sys.stderr,
+    )
+    return path, False
+
+
+# ---------------------------------------------------------------------------
 # Webhook / update management
 # ---------------------------------------------------------------------------
 
@@ -167,6 +248,7 @@ def _build_multipart(fields: dict[str, str], files: dict[str, tuple[str, bytes, 
 def _send_photo(image_path: str | Path, caption: str = "") -> int | None:
     """Send a single photo via Telegram sendPhoto (multipart upload).
 
+    Automatically resizes images >10 MB before sending.
     Returns message_id on success, None on failure.
     """
     token = _bot_token()
@@ -179,34 +261,41 @@ def _send_photo(image_path: str | Path, caption: str = "") -> int | None:
         print(f"[image_approval] File not found: {path}", file=sys.stderr)
         return None
 
-    photo_data = path.read_bytes()
-    fields = {"chat_id": chat}
-    if caption:
-        fields["caption"] = caption
-
-    files = {"photo": (path.name, photo_data, "image/png")}
-    body, boundary = _build_multipart(fields, files)
-
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
-    req = urllib.request.Request(
-        url, method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        data=body,
-    )
+    send_path, is_temp = _resize_for_telegram(path)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read())
-            if result.get("ok"):
-                return result["result"]["message_id"]
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-        print(f"[image_approval] sendPhoto failed: {exc}", file=sys.stderr)
+        photo_data = send_path.read_bytes()
+        content_type = "image/jpeg" if send_path.suffix == ".jpg" else "image/png"
+        fields = {"chat_id": chat}
+        if caption:
+            fields["caption"] = caption
 
-    return None
+        files = {"photo": (send_path.name, photo_data, content_type)}
+        body, boundary = _build_multipart(fields, files)
+
+        url = f"https://api.telegram.org/bot{token}/sendPhoto"
+        req = urllib.request.Request(
+            url, method="POST",
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            data=body,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read())
+                if result.get("ok"):
+                    return result["result"]["message_id"]
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+            print(f"[image_approval] sendPhoto failed: {exc}", file=sys.stderr)
+
+        return None
+    finally:
+        if is_temp:
+            send_path.unlink(missing_ok=True)
 
 
 def _send_media_group(images: list[ImageEntry], group_caption: str = "") -> int | None:
     """Send images as a Telegram album (sendMediaGroup, multipart upload).
 
+    Automatically resizes images >10 MB before sending.
     Sends up to 10 photos per call. Returns first message_id or None.
     """
     token = _bot_token()
@@ -223,49 +312,59 @@ def _send_media_group(images: list[ImageEntry], group_caption: str = "") -> int 
     # Build media JSON array and file fields
     media_array: list[dict] = []
     file_fields: dict[str, tuple[str, bytes, str]] = {}
+    temp_paths: list[Path] = []
 
-    for i, entry in enumerate(batch):
-        path = Path(entry.path)
-        if not path.is_file():
-            continue
-
-        attach_key = f"photo_{i}"
-        media_item: dict = {
-            "type": "photo",
-            "media": f"attach://{attach_key}",
-        }
-        # Caption only on first photo
-        if i == 0 and group_caption:
-            media_item["caption"] = group_caption
-
-        media_array.append(media_item)
-        file_fields[attach_key] = (path.name, path.read_bytes(), "image/png")
-
-    if not media_array:
-        return None
-
-    text_fields = {
-        "chat_id": chat,
-        "media": json.dumps(media_array),
-    }
-
-    body, boundary = _build_multipart(text_fields, file_fields)
-
-    url = f"https://api.telegram.org/bot{token}/sendMediaGroup"
-    req = urllib.request.Request(
-        url, method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        data=body,
-    )
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            result = json.loads(resp.read())
-            if result.get("ok") and result.get("result"):
-                return result["result"][0]["message_id"]
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-        print(f"[image_approval] sendMediaGroup failed: {exc}", file=sys.stderr)
+        for i, entry in enumerate(batch):
+            path = Path(entry.path)
+            if not path.is_file():
+                continue
 
-    return None
+            send_path, is_temp = _resize_for_telegram(path)
+            if is_temp:
+                temp_paths.append(send_path)
+
+            attach_key = f"photo_{i}"
+            content_type = "image/jpeg" if send_path.suffix == ".jpg" else "image/png"
+            media_item: dict = {
+                "type": "photo",
+                "media": f"attach://{attach_key}",
+            }
+            # Caption only on first photo
+            if i == 0 and group_caption:
+                media_item["caption"] = group_caption
+
+            media_array.append(media_item)
+            file_fields[attach_key] = (send_path.name, send_path.read_bytes(), content_type)
+
+        if not media_array:
+            return None
+
+        text_fields = {
+            "chat_id": chat,
+            "media": json.dumps(media_array),
+        }
+
+        body, boundary = _build_multipart(text_fields, file_fields)
+
+        url = f"https://api.telegram.org/bot{token}/sendMediaGroup"
+        req = urllib.request.Request(
+            url, method="POST",
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            data=body,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                result = json.loads(resp.read())
+                if result.get("ok") and result.get("result"):
+                    return result["result"][0]["message_id"]
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+            print(f"[image_approval] sendMediaGroup failed: {exc}", file=sys.stderr)
+
+        return None
+    finally:
+        for tp in temp_paths:
+            tp.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------

@@ -36,6 +36,8 @@ from tools.lib.telegram_image_approval import (
     _parse_rejected_labels,
     _answer_callback,
     _edit_message_text,
+    _resize_for_telegram,
+    _TELEGRAM_PHOTO_MAX_BYTES,
     request_image_approval,
 )
 
@@ -783,6 +785,188 @@ class TestFlushUpdates(unittest.TestCase):
         self.assertIsNone(uid)
 
 
+# ---------------------------------------------------------------------------
+# Test: _resize_for_telegram
+# ---------------------------------------------------------------------------
+
+class TestResizeForTelegram(unittest.TestCase):
+    def test_small_file_passthrough(self):
+        """Files under 10 MB are returned as-is (no temp)."""
+        p = _make_temp_image("small.png", size=1024)
+        try:
+            result_path, is_temp = _resize_for_telegram(p)
+            self.assertEqual(result_path, p)
+            self.assertFalse(is_temp)
+        finally:
+            _cleanup_paths([p])
+
+    def test_exactly_at_limit(self):
+        """File exactly at 10 MB is not resized."""
+        p = _make_temp_image("exact.png", size=_TELEGRAM_PHOTO_MAX_BYTES)
+        try:
+            result_path, is_temp = _resize_for_telegram(p)
+            self.assertEqual(result_path, p)
+            self.assertFalse(is_temp)
+        finally:
+            _cleanup_paths([p])
+
+    @patch("tools.lib.telegram_image_approval.subprocess.run")
+    def test_large_file_resized_with_sips(self, mock_run):
+        """Files >10 MB are resized via sips, producing a temp .jpg."""
+        p = _make_temp_image("big.png", size=_TELEGRAM_PHOTO_MAX_BYTES + 1)
+        try:
+            # Simulate sips writing a small output
+            def sips_effect(cmd, **kwargs):
+                # Write a small file to the output path (last --out arg)
+                out_path = Path(cmd[-1])
+                out_path.write_bytes(b"\xff\xd8" + b"\x00" * 5000)
+                return subprocess.CompletedProcess(cmd, 0)
+
+            mock_run.side_effect = sips_effect
+
+            result_path, is_temp = _resize_for_telegram(p)
+            self.assertTrue(is_temp)
+            self.assertTrue(result_path.suffix == ".jpg")
+            self.assertTrue(result_path.is_file())
+            # Verify sips was called
+            self.assertEqual(mock_run.call_count, 1)
+            self.assertIn("sips", mock_run.call_args[0][0])
+        finally:
+            _cleanup_paths([p])
+            if is_temp:
+                _cleanup_paths([result_path])
+
+    @patch("tools.lib.telegram_image_approval.subprocess.run")
+    def test_sips_fails_ffmpeg_fallback(self, mock_run):
+        """If sips fails, falls back to ffmpeg."""
+        p = _make_temp_image("big2.png", size=_TELEGRAM_PHOTO_MAX_BYTES + 1)
+        call_count = [0]
+
+        try:
+            def run_effect(cmd, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    # sips fails
+                    raise FileNotFoundError("sips not found")
+                else:
+                    # ffmpeg succeeds
+                    out_path = Path(cmd[-1])
+                    out_path.write_bytes(b"\xff\xd8" + b"\x00" * 3000)
+                    return subprocess.CompletedProcess(cmd, 0)
+
+            mock_run.side_effect = run_effect
+
+            result_path, is_temp = _resize_for_telegram(p)
+            self.assertTrue(is_temp)
+            self.assertEqual(call_count[0], 2)
+        finally:
+            _cleanup_paths([p])
+            if is_temp:
+                _cleanup_paths([result_path])
+
+    @patch("tools.lib.telegram_image_approval.subprocess.run")
+    def test_both_fail_returns_original(self, mock_run):
+        """If both sips and ffmpeg fail, returns original path."""
+        p = _make_temp_image("huge.png", size=_TELEGRAM_PHOTO_MAX_BYTES + 1)
+        try:
+            mock_run.side_effect = FileNotFoundError("no tool")
+
+            result_path, is_temp = _resize_for_telegram(p)
+            self.assertEqual(result_path, p)
+            self.assertFalse(is_temp)
+        finally:
+            _cleanup_paths([p])
+
+    def test_nonexistent_file(self):
+        """Non-existent file returns as-is (no crash)."""
+        p = Path("/nonexistent/file.png")
+        result_path, is_temp = _resize_for_telegram(p)
+        self.assertEqual(result_path, p)
+        self.assertFalse(is_temp)
+
+    @patch("tools.lib.telegram_image_approval.subprocess.run")
+    def test_sips_output_still_too_large(self, mock_run):
+        """If sips output is still >10 MB, falls back to ffmpeg."""
+        p = _make_temp_image("mega.png", size=_TELEGRAM_PHOTO_MAX_BYTES + 1)
+        call_count = [0]
+
+        try:
+            def run_effect(cmd, **kwargs):
+                call_count[0] += 1
+                out_path = Path(cmd[-1])
+                if call_count[0] == 1:
+                    # sips output still too big
+                    out_path.write_bytes(b"\x00" * (_TELEGRAM_PHOTO_MAX_BYTES + 100))
+                    return subprocess.CompletedProcess(cmd, 0)
+                else:
+                    # ffmpeg output OK
+                    out_path.write_bytes(b"\xff\xd8" + b"\x00" * 2000)
+                    return subprocess.CompletedProcess(cmd, 0)
+
+            mock_run.side_effect = run_effect
+
+            result_path, is_temp = _resize_for_telegram(p)
+            self.assertTrue(is_temp)
+            self.assertEqual(call_count[0], 2)
+        finally:
+            _cleanup_paths([p])
+            if is_temp:
+                _cleanup_paths([result_path])
+
+    @patch("tools.lib.telegram_image_approval._resize_for_telegram")
+    @patch("tools.lib.telegram_image_approval._chat_id", return_value="999")
+    @patch("tools.lib.telegram_image_approval._bot_token", return_value="tok")
+    @patch("tools.lib.telegram_image_approval.urllib.request.urlopen")
+    def test_send_photo_uses_resize(self, mock_urlopen, mock_token, mock_chat, mock_resize):
+        """_send_photo calls _resize_for_telegram and cleans up temp."""
+        orig = _make_temp_image("orig.png", size=1024)
+        resized = _make_temp_image("resized.jpg", size=512)
+        mock_resize.return_value = (resized, True)
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "ok": True, "result": {"message_id": 77},
+        }).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        try:
+            mid = _send_photo(orig, caption="test")
+            self.assertEqual(mid, 77)
+            mock_resize.assert_called_once()
+            # Temp file should be cleaned up
+            self.assertFalse(resized.exists())
+        finally:
+            _cleanup_paths([orig])
+
+    @patch("tools.lib.telegram_image_approval._resize_for_telegram")
+    @patch("tools.lib.telegram_image_approval._chat_id", return_value="999")
+    @patch("tools.lib.telegram_image_approval._bot_token", return_value="tok")
+    @patch("tools.lib.telegram_image_approval.urllib.request.urlopen")
+    def test_send_photo_no_resize_keeps_original(self, mock_urlopen, mock_token, mock_chat, mock_resize):
+        """_send_photo does NOT delete original when no resize needed."""
+        orig = _make_temp_image("small.png", size=1024)
+        mock_resize.return_value = (orig, False)
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "ok": True, "result": {"message_id": 78},
+        }).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        try:
+            mid = _send_photo(orig)
+            self.assertEqual(mid, 78)
+            # Original file should still exist
+            self.assertTrue(orig.exists())
+        finally:
+            _cleanup_paths([orig])
+
+
+import subprocess
 import urllib.error
 
 if __name__ == "__main__":
