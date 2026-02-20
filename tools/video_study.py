@@ -34,7 +34,7 @@ if str(_repo) not in sys.path:
 from tools.lib.common import load_env_file, now_iso
 
 # Load .env early
-load_env_file()
+load_env_file(str(_repo / ".env"))
 
 EXIT_OK = 0
 EXIT_ERROR = 1
